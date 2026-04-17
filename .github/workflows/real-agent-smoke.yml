@@ -62,29 +62,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v5
+      # Use OpenAI's official action rather than `npm install -g @openai/codex`
+      # + direct `codex exec`, because the action starts the Responses API
+      # proxy that API-key auth requires. Direct CLI invocation with only
+      # OPENAI_API_KEY in env returns 401 Unauthorized from /v1/responses.
+      - name: Run Codex via official action
+        id: codex
+        uses: openai/codex-action@v1
         with:
-          node-version: '20'
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: "List the shipped skills from AGENTS.md by directory name, comma-separated, no other text."
+          output-file: codex-response.txt
+          safety-strategy: drop-sudo
+          sandbox: read-only
 
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex
-
-      - name: Configure Codex to authenticate via API key
-        run: |
-          # Codex CLI defaults to ChatGPT OAuth (via `codex login`). In a
-          # headless CI runner we do not have OAuth; force API-key auth.
-          mkdir -p "$HOME/.codex"
-          cat > "$HOME/.codex/config.toml" <<'EOF'
-          preferred_auth_method = "apikey"
-          EOF
-
-      - name: Verify Codex sees the skill roster
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Verify response mentions all four skills
         run: |
           set -euo pipefail
-          PROMPT='List the shipped skills from AGENTS.md by directory name, comma-separated, no other text.'
-          RESP=$(codex exec "$PROMPT" < /dev/null)
+          RESP=$(cat codex-response.txt)
           echo "::group::codex response"
           echo "$RESP"
           echo "::endgroup::"
