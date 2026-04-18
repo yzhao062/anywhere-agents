@@ -40,23 +40,29 @@ git diff --name-only HEAD~1 HEAD -- README.md README.zh-CN.md
 # also be referenced in README.zh-CN.md unless the image is English-only by design.
 
 # 5. Cross-repo parity with the private `yzhao062/agent-config` source repo.
-#    Shared core files (must mirror, modulo expected default-upstream string differences like
-#    "yzhao062/anywhere-agents" vs "yzhao062/agent-config" and the banner label in AGENTS.md):
-#      AGENTS.md
-#      bootstrap/bootstrap.{ps1,sh}
-#      scripts/{guard.py, session_bootstrap.py, generate_agent_configs.py}
-#      scripts/{pre-push-smoke.sh, remote-smoke.sh}
-#      .claude/commands/*.md  .claude/settings.json  user/settings.json  .githooks/pre-push
-#      skills/<name>/  for each skill that ships in both repos
-#    Single-side by design (no mirror required):
+#    Run the automated checker from the agent-config clone (needs both repos side by side):
+bash ../agent-config/scripts/check-parity.sh
+#    The script splits shared-core files into two categories:
+#      STRICT (must be byte-identical; any diff fails):
+#        guard.py, session_bootstrap.py, generate_agent_configs.py, pre-push-smoke.sh,
+#        remote-smoke.sh, .claude/settings.json, .githooks/pre-push,
+#        .claude/commands/*.md for each of the 4 shipped skills,
+#        skills/{implement-review,ci-mockup-figure,readme-polish} recursive trees.
+#      BY-DESIGN (expected to differ; a +/- line delta is reported for eyeball):
+#        AGENTS.md (USC / Overleaf / PyCharm stripping),
+#        bootstrap/bootstrap.{sh,ps1} (default-upstream + CRLF-config stripping),
+#        user/settings.json (additionalDirectories stripping),
+#        skills/my-router (routing-table rewrite + extension guidance for forks).
+#    Exit 0 means STRICT is clean. Exit 1 means STRICT drift exists and must be fixed
+#    before tagging. A byte-for-byte match in BY-DESIGN is flagged as a warning because
+#    it usually means a sanitization step was skipped during backport.
+#
+#    Single-side files (no mirror; script does not check these):
 #      anywhere-agents only: README.md, README.zh-CN.md, CHANGELOG.md, RELEASING.md, packages/,
 #        docs/ (hero, banner, RTD content), .readthedocs.yaml, mkdocs.yml
 #      agent-config only: docs/anywhere-agents.md and other private docs, reference-skills/,
-#        MIGRATIONS.md, private-only skills (bibref-filler, dual-pass-workflow, figure-prompt-builder)
-#    If you touched a shared file in one repo only, update the other before tagging. Spot-check by
-#    diffing each shared path between the two local clones (e.g. `diff -q AGENTS.md ../agent-config/AGENTS.md`
-#    tolerates the expected default-upstream string differences but should otherwise flag the same
-#    structural changes).
+#        MIGRATIONS.md, private-only skills (bibref-filler, dual-pass-workflow, figure-prompt-builder),
+#        scripts/check-parity.sh itself (maintainer-only tool).
 
 # 6. Dual-OS local test: run the full suite on a Linux machine via SSH before tagging.
 #    Windows-only local coverage misses POSIX-specific behavior (HOME vs USERPROFILE, path
