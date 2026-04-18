@@ -6,10 +6,15 @@ Dispatches by tool_name. Shared checks:
 1. Writing-style gate — Write/Edit/MultiEdit on prose files (.md/.tex/.rst/.txt)
    is denied when the outgoing content contains a banned AI-tell word from
    AGENTS.md Writing Defaults. Skips code files.
-2. Banner gate — every tool call except Read/Grep/Glob (and Write of
-   ~/.claude/hooks/banner-emitted.json used for acknowledgment) is denied
+2. Banner gate — every tool call except the exempt observation tools
+   (Read/Grep/Glob/Skill/Task/TodoWrite/BashOutput/WebFetch/WebSearch/ToolSearch/LS/NotebookRead)
+   and Write/Edit/MultiEdit whose target is exactly
+   <consumer_root>/.agent-config/banner-emitted.json (the ack file) is denied
    when a SessionStart event is pending but the banner has not been emitted
-   for it (session-event.json.ts > banner-emitted.json.ts).
+   for it. Flag files are per-project under <consumer_root>/.agent-config/
+   where consumer_root is found by walking up from os.getcwd() until a dir
+   with .agent-config/bootstrap.{sh,ps1} is located. Source repos (no
+   .agent-config/) and unrelated directories are not gated.
 3. Compound cd commands (cd path && cmd, cd path; cmd) → deny  [Bash only]
 4. Destructive git subcommands (push, commit, merge, etc.) → ask  [Bash only]
 5. Destructive gh subcommands (pr create, pr merge, etc.) → ask  [Bash only]
@@ -58,11 +63,22 @@ BANNED_WORDS = frozenset([
 # Prose-content file extensions subject to writing-style enforcement.
 PROSE_EXTENSIONS = frozenset([".md", ".tex", ".rst", ".txt"])
 
-# Tools exempt from the banner gate: Read/Grep/Glob let the agent inspect
-# state without writing. Write/Edit/MultiEdit to ~/.claude/hooks/banner-emitted.json
-# is also exempt via a path check (not a tool-name check), handled separately
+# Tools exempt from the banner gate. Intent: block user-visible work (Bash,
+# Write, Edit, MultiEdit, NotebookEdit, KillShell, MCP write-style tools)
+# until the banner is emitted, but let the agent read state and dispatch
+# skills/subagents/todo-updates freely on turn 1.
+#
+# Write/Edit/MultiEdit to <consumer_root>/.agent-config/banner-emitted.json
+# (the ack file) is also exempt via an exact-path check, handled separately
 # in check_banner_emission.
-BANNER_GATE_EXEMPT_TOOLS = frozenset(["Read", "Grep", "Glob"])
+BANNER_GATE_EXEMPT_TOOLS = frozenset([
+    # File-system observation
+    "Read", "Grep", "Glob", "LS", "NotebookRead",
+    # Metadata / dispatch / internal state
+    "Skill", "Task", "TodoWrite",
+    # Read-only observation tools the agent may invoke on turn 1
+    "BashOutput", "WebFetch", "WebSearch", "ToolSearch",
+])
 
 
 def gates_enabled():
@@ -223,26 +239,68 @@ def _read_ts(path):
         return 0
 
 
+def _find_consumer_root(start=None):
+    """Walk up from `start` (default os.getcwd()) looking for a directory that
+    contains .agent-config/bootstrap.sh or .agent-config/bootstrap.ps1.
+    Returns the absolute consumer-repo root, or None if not inside one.
+
+    Terminates at filesystem root via the cwd != prev invariant (POSIX:
+    dirname('/') == '/'; Windows: dirname('C:\\') == 'C:\\'). Uses raw
+    os.path (no symlink resolution) — agent tool calls see paths as the
+    shell passes them, so not resolving keeps the comparison space simple.
+    """
+    cwd = os.path.abspath(start or os.getcwd())
+    prev = None
+    while cwd and cwd != prev:
+        for marker in ("bootstrap.sh", "bootstrap.ps1"):
+            if os.path.isfile(os.path.join(cwd, ".agent-config", marker)):
+                return cwd
+        prev = cwd
+        cwd = os.path.dirname(cwd)
+    return None
+
+
 def check_banner_emission(tool_name, tool_input):
     """Return a deny message if a SessionStart event is pending but the banner
-    has not yet been emitted for it. Exempts Read/Grep/Glob (so the agent can
-    inspect state) and the Write to ~/.claude/hooks/banner-emitted.json (the
-    agent's acknowledgment mechanism).
+    has not yet been emitted for it. Non-consumer directories (source repos
+    or unrelated dirs) skip the gate entirely. The exempt-tools set covers
+    the agent's turn-1 observation and dispatch needs. Write/Edit/MultiEdit
+    to the exact <consumer_root>/.agent-config/banner-emitted.json path is
+    also exempt so the agent can acknowledge the event.
     """
     if tool_name in BANNER_GATE_EXEMPT_TOOLS:
         return None
 
-    if tool_name in ("Write", "Edit", "MultiEdit"):
-        path = tool_input.get("file_path", "").replace("\\", "/")
-        if path.endswith(".claude/hooks/banner-emitted.json"):
-            return None
+    consumer_root = _find_consumer_root()
+    if consumer_root is None:
+        return None  # source repo or unrelated directory → no gate
 
-    home = os.path.expanduser("~")
-    event_path = os.path.join(home, ".claude", "hooks", "session-event.json")
-    emitted_path = os.path.join(home, ".claude", "hooks", "banner-emitted.json")
+    # Exact-path exemption for the ack file. Normalized equality prevents
+    # off-root suffix spoofs and cross-project ack writes from bypassing.
+    if tool_name in ("Write", "Edit", "MultiEdit"):
+        requested = tool_input.get("file_path", "")
+        if requested:
+            expected = os.path.join(
+                consumer_root, ".agent-config", "banner-emitted.json"
+            )
+            req_norm = os.path.normcase(
+                os.path.normpath(os.path.abspath(requested))
+            )
+            exp_norm = os.path.normcase(
+                os.path.normpath(os.path.abspath(expected))
+            )
+            if req_norm == exp_norm:
+                return None
+
+    event_path = os.path.join(
+        consumer_root, ".agent-config", "session-event.json"
+    )
+    emitted_path = os.path.join(
+        consumer_root, ".agent-config", "banner-emitted.json"
+    )
 
     if not os.path.exists(event_path):
-        return None  # No event → not a participating session; skip gate
+        return None  # No event recorded yet → skip gate
 
     event_ts = _read_ts(event_path)
     emitted_ts = _read_ts(emitted_path)
@@ -252,7 +310,7 @@ def check_banner_emission(tool_name, tool_input):
             "Session banner not yet emitted for this SessionStart event. "
             "Per AGENTS.md Session Start Check, emit the banner as the first "
             "content of your response, then Write to "
-            f"~/.claude/hooks/banner-emitted.json with content '{{\"ts\": {event_ts}}}' "
+            f"{emitted_path} with content '{{\"ts\": {event_ts}}}' "
             "to acknowledge. Only then retry this tool call. To bypass, set "
             "AGENT_CONFIG_GATES=off in ~/.claude/settings.json env."
         )

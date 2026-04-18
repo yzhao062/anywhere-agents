@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""SessionStart hook: run .agent-config bootstrap if present in the CWD.
+"""SessionStart hook: run .agent-config bootstrap for the enclosing consumer repo.
 
 Deployed to ~/.claude/hooks/session_bootstrap.py by bootstrap.sh / .ps1,
 and wired into ~/.claude/settings.json under hooks.SessionStart.
 
 When Claude Code opens a session, this hook runs before the agent sees any
-user prompt. If the current working directory has .agent-config/bootstrap.sh
-(Unix) or .agent-config/bootstrap.ps1 (Windows), this runs it. Otherwise it
-exits silently, so projects that do not use anywhere-agents are unaffected.
+user prompt. It walks up from the current working directory to find a
+consumer repo (a directory containing .agent-config/bootstrap.sh or
+.agent-config/bootstrap.ps1) — so a launch from a nested subdirectory still
+resolves to the project root. If found, it writes a per-project SessionStart
+event marker and runs the platform-specific bootstrap script from that root.
+Otherwise (unrelated directory) it exits silently.
+
+Also handles the source repos (agent-config / anywhere-agents) launched from
+their own root: detected via a cwd-only check for bootstrap/ + skills/.
+Source repos get legacy-flag cleanup but no per-project event (no
+.agent-config/ to write to).
 
 Claude Code's SessionStart hook behavior: stdout from the hook is added as
 context to the session. To avoid flooding Claude with git-pull noise or
@@ -29,16 +37,51 @@ import time
 VERSION_CACHE_TTL_SECONDS = 86400  # 24 hours
 
 
-def write_session_event() -> None:
-    """Write ~/.claude/hooks/session-event.json on every SessionStart fire so
-    the agent can detect resume / clear / compact events (not just fresh
-    startup) and re-emit the session banner when appropriate. The banner rule
-    in AGENTS.md compares this timestamp to ~/.claude/hooks/banner-emitted.json
-    and re-emits when the event is newer than the last emission.
+def _find_consumer_root(start=None):
+    """Walk up from `start` (default os.getcwd()) looking for a directory that
+    contains .agent-config/bootstrap.sh or .agent-config/bootstrap.ps1.
+    Returns the absolute consumer-repo root, or None if not inside one.
+
+    Mirrors the helper in guard.py. Duplicated because both scripts deploy to
+    ~/.claude/hooks/ as standalone files (no shared module at that location).
     """
-    path = os.path.join(
-        os.path.expanduser("~"), ".claude", "hooks", "session-event.json"
-    )
+    cwd = os.path.abspath(start or os.getcwd())
+    prev = None
+    while cwd and cwd != prev:
+        for marker in ("bootstrap.sh", "bootstrap.ps1"):
+            if os.path.isfile(os.path.join(cwd, ".agent-config", marker)):
+                return cwd
+        prev = cwd
+        cwd = os.path.dirname(cwd)
+    return None
+
+
+def _cleanup_legacy_flag_files() -> None:
+    """One-time cleanup of 0.1.8 global flag files under ~/.claude/hooks/.
+    Harmless after migration (files are gone and FileNotFoundError is swallowed).
+    Runs every SessionStart; cost is a couple of os.remove attempts.
+    """
+    home = os.path.expanduser("~")
+    for name in ("session-event.json", "banner-emitted.json"):
+        legacy = os.path.join(home, ".claude", "hooks", name)
+        try:
+            os.remove(legacy)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def write_session_event(consumer_root: str) -> None:
+    """Write <consumer_root>/.agent-config/session-event.json on every
+    SessionStart fire so the agent can detect resume / clear / compact events
+    (not just fresh startup) and re-emit the session banner when appropriate.
+    The banner rule in AGENTS.md compares this timestamp to
+    <consumer_root>/.agent-config/banner-emitted.json and re-emits when the
+    event is newer than the last emission. Per-project scope prevents
+    cross-session interference when multiple Claude Code windows run at once.
+    """
+    path = os.path.join(consumer_root, ".agent-config", "session-event.json")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -108,13 +151,17 @@ def update_version_cache() -> None:
 
 def main() -> int:
     cwd = os.getcwd()
-    cmd: list[str] | None = None
 
-    # Detect participating repos: consumer (has .agent-config/bootstrap.*) or
-    # the source repo itself (has bootstrap/ + skills at the root, where
-    # AGENTS.md is already present but bootstrap does not self-run). Accept
-    # either `reference-skills/` (agent-config layout) or `skills/`
-    # (anywhere-agents layout) so one shared script serves both repos.
+    # Walk up from cwd to find the consumer-repo root. A launch from a deep
+    # subdirectory (e.g. <project>/src/nested) should still resolve to the
+    # project root that owns .agent-config/ — guard.py does the same walk,
+    # so the two hooks agree on where the per-project flag files live.
+    consumer_root = _find_consumer_root(cwd)
+
+    # Source-repo detection is intentionally cwd-only: maintainers launch the
+    # source repos (agent-config / anywhere-agents) from their root. A source
+    # repo subdir launch is a known narrow gap (only affects maintainer
+    # workflow, not user consumers).
     has_source_skills = (
         os.path.isdir(os.path.join(cwd, "reference-skills"))
         or os.path.isdir(os.path.join(cwd, "skills"))
@@ -125,34 +172,49 @@ def main() -> int:
         and has_source_skills
     )
 
-    if platform.system() == "Windows":
-        script = os.path.join(cwd, ".agent-config", "bootstrap.ps1")
-        if os.path.isfile(script):
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                script,
-            ]
-    else:
-        script = os.path.join(cwd, ".agent-config", "bootstrap.sh")
-        if os.path.isfile(script):
-            cmd = ["bash", script]
-
-    is_consumer_repo = cmd is not None
+    is_consumer_repo = consumer_root is not None
 
     # Skip any state mutation in unrelated Claude Code sessions. Writing the
-    # session-event file unconditionally would turn the banner gate (which
-    # reads the same file) into a machine-wide behavior change, blocking
-    # tools in repos that never loaded this AGENTS.md.
+    # per-project session-event file unconditionally would be harmless (there
+    # is no .agent-config/ to write to), but running legacy cleanup, version
+    # cache refresh, or the bootstrap subprocess in unrelated sessions would
+    # waste time and violate the "only participating sessions are affected"
+    # contract.
     if not (is_source_repo or is_consumer_repo):
         return 0
 
-    # Mark the SessionStart event for participating repos so the agent (and
-    # the banner gate in guard.py) can tell a fresh event needs a new banner.
-    write_session_event()
+    _cleanup_legacy_flag_files()
+
+    if is_consumer_repo:
+        # Mark the SessionStart event so the agent (and the banner gate in
+        # guard.py) can tell a fresh event needs a new banner. Source repos
+        # have no .agent-config/ to write to; they fall back to prompt-level
+        # banner compliance per AGENTS.md Session Start Check.
+        write_session_event(consumer_root)
+
+        # Resolve the bootstrap subprocess command from the consumer root so
+        # a nested-cwd launch still runs the correct .agent-config/bootstrap.*.
+        if platform.system() == "Windows":
+            script = os.path.join(consumer_root, ".agent-config", "bootstrap.ps1")
+            if os.path.isfile(script):
+                cmd: list[str] | None = [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script,
+                ]
+            else:
+                cmd = None
+        else:
+            script = os.path.join(consumer_root, ".agent-config", "bootstrap.sh")
+            if os.path.isfile(script):
+                cmd = ["bash", script]
+            else:
+                cmd = None
+    else:
+        cmd = None  # source repo: no bootstrap subprocess to run
 
     if cmd is None:
         return 0

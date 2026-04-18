@@ -373,14 +373,18 @@ import shutil
 import tempfile
 
 
-def run_guard_with_payload(payload, env=None):
+def run_guard_with_payload(payload, env=None, cwd=None):
     """Run guard.py with a full hook payload (includes tool_name) and optional
     env overrides. Returns parsed response JSON or None if no output.
 
     Scrubs AGENT_CONFIG_GATES from the inherited environment so that a
     developer shell or CI environment with the escape hatch set cannot
     silently disable the new gates during tests. Callers that want the
-    escape-hatch on must pass it explicitly via env=."""
+    escape-hatch on must pass it explicitly via env=.
+
+    Pass cwd to run the subprocess inside a specific directory (so guard.py's
+    os.getcwd() sees that directory, which lets _find_consumer_root resolve
+    the per-project flag files for banner-gate tests)."""
     env_dict = dict(os.environ)
     env_dict.pop("AGENT_CONFIG_GATES", None)
     if env:
@@ -392,6 +396,7 @@ def run_guard_with_payload(payload, env=None):
         text=True,
         check=False,
         env=env_dict,
+        cwd=cwd,
     )
     if result.returncode != 0:
         raise AssertionError(
@@ -556,28 +561,39 @@ class WritingStyleGateTests(unittest.TestCase):
 
 
 class BannerGateTests(unittest.TestCase):
+    """Per-project flag-file behavior. Each test sets up a fake consumer repo
+    in a temp dir, runs guard.py with cwd=<consumer>, and writes/reads
+    session-event.json / banner-emitted.json under <consumer>/.agent-config/.
+    HOME/USERPROFILE are overridden to a separate temp dir so the legacy-flag
+    cleanup cannot touch the developer's real ~/.claude/hooks/*.json.
+    """
+
     def setUp(self):
-        self.tmp_home = tempfile.mkdtemp(prefix="guard-banner-")
-        self.hooks_dir = Path(self.tmp_home) / ".claude" / "hooks"
-        self.hooks_dir.mkdir(parents=True)
-        # Override both HOME (POSIX) and USERPROFILE (Windows) so
-        # os.path.expanduser("~") inside the hook resolves to our temp dir.
+        self.tmp_home = tempfile.mkdtemp(prefix="guard-banner-home-")
+        self.tmp_project = tempfile.mkdtemp(prefix="guard-banner-proj-")
+        self.agent_dir = Path(self.tmp_project) / ".agent-config"
+        self.agent_dir.mkdir(parents=True)
+        # Marker so _find_consumer_root treats this as a consumer repo.
+        (self.agent_dir / "bootstrap.sh").write_text("# marker\n")
         self.env = {"HOME": self.tmp_home, "USERPROFILE": self.tmp_home}
 
     def tearDown(self):
         shutil.rmtree(self.tmp_home, ignore_errors=True)
+        shutil.rmtree(self.tmp_project, ignore_errors=True)
 
-    def _run(self, payload, extra_env=None):
+    def _run(self, payload, extra_env=None, cwd=None):
         env = dict(self.env)
         if extra_env:
             env.update(extra_env)
-        return run_guard_with_payload(payload, env=env)
+        return run_guard_with_payload(
+            payload, env=env, cwd=cwd or self.tmp_project
+        )
 
     def _write_event(self, ts):
-        (self.hooks_dir / "session-event.json").write_text(json.dumps({"ts": ts}))
+        (self.agent_dir / "session-event.json").write_text(json.dumps({"ts": ts}))
 
     def _write_emitted(self, ts):
-        (self.hooks_dir / "banner-emitted.json").write_text(json.dumps({"ts": ts}))
+        (self.agent_dir / "banner-emitted.json").write_text(json.dumps({"ts": ts}))
 
     def test_denies_bash_when_event_pending(self):
         self._write_event(100)
@@ -597,26 +613,72 @@ class BannerGateTests(unittest.TestCase):
         resp = self._run({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}})
         self.assertIsNone(resp)
 
-    def test_allows_write_to_banner_emitted_posix(self):
+    def test_allows_skill_when_event_pending(self):
+        self._write_event(100)
+        resp = self._run({"tool_name": "Skill", "tool_input": {"skill": "implement-review"}})
+        self.assertIsNone(resp)
+
+    def test_allows_task_when_event_pending(self):
+        self._write_event(100)
+        resp = self._run({"tool_name": "Task", "tool_input": {"description": "x"}})
+        self.assertIsNone(resp)
+
+    def test_allows_todowrite_when_event_pending(self):
+        self._write_event(100)
+        resp = self._run({"tool_name": "TodoWrite", "tool_input": {"todos": []}})
+        self.assertIsNone(resp)
+
+    def test_allows_ls_when_event_pending(self):
+        self._write_event(100)
+        resp = self._run({"tool_name": "LS", "tool_input": {"path": "/tmp"}})
+        self.assertIsNone(resp)
+
+    def test_allows_notebookread_when_event_pending(self):
+        self._write_event(100)
+        resp = self._run({"tool_name": "NotebookRead", "tool_input": {"notebook_path": "/tmp/x.ipynb"}})
+        self.assertIsNone(resp)
+
+    def test_allows_write_to_exact_ack_path(self):
+        self._write_event(100)
+        ack_path = str(self.agent_dir / "banner-emitted.json")
+        resp = self._run({
+            "tool_name": "Write",
+            "tool_input": {"file_path": ack_path, "content": json.dumps({"ts": 100})},
+        })
+        self.assertIsNone(resp)
+
+    def test_denies_write_to_wrong_ack_path(self):
+        # Path ends in .agent-config/banner-emitted.json but is OUTSIDE the
+        # resolved consumer root. 0.1.9 exact-path comparison must deny.
         self._write_event(100)
         resp = self._run({
             "tool_name": "Write",
             "tool_input": {
-                "file_path": os.path.join(self.tmp_home, ".claude", "hooks", "banner-emitted.json"),
-                "content": json.dumps({"ts": 100}),
+                "file_path": "/tmp/random/.agent-config/banner-emitted.json",
+                "content": "{}",
             },
         })
-        self.assertIsNone(resp)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
 
-    def test_allows_write_to_banner_emitted_windows_separator(self):
+    def test_denies_write_to_different_consumer_ack_path(self):
+        # Consumer A pending event. Agent tries to Write consumer B's ack.
+        # Must deny — exact-path check rejects any path outside A's root.
         self._write_event(100)
-        # Simulate a path with Windows-style backslashes.
-        win_path = self.tmp_home.replace("/", "\\") + "\\.claude\\hooks\\banner-emitted.json"
-        resp = self._run({
-            "tool_name": "Write",
-            "tool_input": {"file_path": win_path, "content": "{}"},
-        })
-        self.assertIsNone(resp)
+        other_project = tempfile.mkdtemp(prefix="guard-other-")
+        try:
+            other_agent = Path(other_project) / ".agent-config"
+            other_agent.mkdir(parents=True)
+            (other_agent / "bootstrap.sh").write_text("# marker\n")
+            ack_path_b = str(other_agent / "banner-emitted.json")
+            resp = self._run({
+                "tool_name": "Write",
+                "tool_input": {"file_path": ack_path_b, "content": "{}"},
+            })
+            self.assertIsNotNone(resp)
+            self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+        finally:
+            shutil.rmtree(other_project, ignore_errors=True)
 
     def test_allows_when_event_file_missing(self):
         resp = self._run({"tool_name": "Bash", "tool_input": {"command": "ls"}})
@@ -632,11 +694,52 @@ class BannerGateTests(unittest.TestCase):
 
     def test_legacy_payload_without_tool_name_falls_through(self):
         self._write_event(100)
-        # Legacy payload has only tool_input.command, no tool_name. The new
-        # gates skip, falling through to the Bash-only checks (which will
-        # return None for a safe command like `ls`).
         resp = self._run({"tool_input": {"command": "ls"}})
         self.assertIsNone(resp)
+
+    def test_source_repo_skips_gate(self):
+        # cwd has no .agent-config/ → _find_consumer_root returns None → gate
+        # skipped regardless of any legacy or foreign state files.
+        source_dir = tempfile.mkdtemp(prefix="guard-source-")
+        try:
+            resp = self._run(
+                {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+                cwd=source_dir,
+            )
+            self.assertIsNone(resp)
+        finally:
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+    def test_per_project_isolation(self):
+        # Two separate consumer dirs. Project A has a pending event; project B
+        # does not. Each subprocess call with cwd=<proj> sees only its own
+        # state, so a guard invocation in project B passes even though project
+        # A still has a pending banner.
+        self._write_event(100)
+        other_project = tempfile.mkdtemp(prefix="guard-proj-b-")
+        try:
+            other_agent = Path(other_project) / ".agent-config"
+            other_agent.mkdir(parents=True)
+            (other_agent / "bootstrap.sh").write_text("# marker\n")
+            resp = self._run(
+                {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+                cwd=other_project,
+            )
+            self.assertIsNone(resp)
+        finally:
+            shutil.rmtree(other_project, ignore_errors=True)
+
+    def test_walks_up_from_nested_cwd(self):
+        # cwd is deep inside the consumer; walk-up must resolve the root.
+        self._write_event(100)
+        nested = Path(self.tmp_project) / "src" / "nested"
+        nested.mkdir(parents=True)
+        resp = self._run(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            cwd=str(nested),
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 if __name__ == "__main__":

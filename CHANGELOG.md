@@ -11,6 +11,32 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.1.9] — 2026-04-18
+
+Stabilization of 0.1.8's mechanical enforcement. 0.1.8 shipped writing-style and banner gates backed by user-level global flag files at `~/.claude/hooks/`, which caused three production regressions within hours: multi-session ping-pong between different consumer projects, `Skill` / `Task` / `TodoWrite` dispatch blocked on turn-1 slash commands, and source-repo maintenance friction. 0.1.9 moves the banner-gate state per-project, expands the exempt list to cover observation and dispatch tools, and tightens the ack-file path exemption to exact equality.
+
+### Fixed
+
+- **Multi-session ping-pong** between different consumer projects. Flag files move from `~/.claude/hooks/session-event.json` / `banner-emitted.json` (global) to `<project-root>/.agent-config/session-event.json` / `banner-emitted.json` (per-project). `<project-root>` is resolved by walking up from `os.getcwd()` until a directory with `.agent-config/bootstrap.{sh,ps1}` is found. Same helper duplicated in `guard.py` and `session_bootstrap.py` so both ends of the contract agree. Opening Claude Code in two different consumer repos no longer cross-invalidates each other's banner acks.
+- **Banner gate blocked slash-command dispatch on turn 1.** `BANNER_GATE_EXEMPT_TOOLS` now also exempts `Skill`, `Task`, `TodoWrite`, `BashOutput`, `WebFetch`, `WebSearch`, `ToolSearch`, `LS`, `NotebookRead`. `/implement-review`, `/loop`, `/schedule` and similar slash commands dispatch without a forced round-trip. User-visible write tools (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `KillShell`, MCP mutating tools) remain gated.
+- **Source-repo maintenance hit the banner gate.** `_find_consumer_root()` returns `None` in `agent-config` / `anywhere-agents` themselves (no `.agent-config/` at the root), so the banner gate skips and maintainers can edit without friction. The writing-style gate is unchanged — `.md` / `.tex` / `.rst` / `.txt` writes still block banned AI-tell words, in source repos as well as consumer repos.
+- **Ack-file path exemption tightened.** 0.1.8 exempted any `Write`/`Edit`/`MultiEdit` whose path ended in `.agent-config/banner-emitted.json`, which allowed off-root or cross-project ack writes to bypass the gate. 0.1.9 resolves `consumer_root` first and requires exact normalized equality (`normcase(normpath(abspath(...)))`) with `<consumer_root>/.agent-config/banner-emitted.json`.
+
+### Added
+
+- **`tests/test_session_bootstrap.py`** — subprocess-based tests covering per-project event write from cwd and nested-cwd launches, no-op behavior in unrelated directories, legacy-flag cleanup with temp `HOME`/`USERPROFILE`, and source-repo no-event-write.
+- **Expanded banner-gate tests in `tests/test_guard.py`** — per-project isolation across two tmp consumer dirs, walk-up from nested cwd, exact-path ack exemption (with off-root and cross-project denial), source-repo gate skip, and the new exempt tools (`Skill`, `Task`, `TodoWrite`, `LS`, `NotebookRead`).
+
+### Changed
+
+- **`scripts/session_bootstrap.py`** — now writes `session-event.json` at the walked-up consumer root (not raw `os.getcwd()`), so a nested-cwd launch still places the event file where `guard.py` will look for it. Also runs a one-time cleanup of 0.1.8's orphan global flag files.
+
+### Compatibility
+
+- **Transition note.** The first Claude Code session after upgrading from 0.1.8 to 0.1.9 may not be mechanically banner-gated. Mechanism: Claude Code's `SessionStart` hook invokes the old `session_bootstrap.py` (still 0.1.8 at the moment of the hook fire), which writes the legacy global flag; the old `session_bootstrap.py` then runs `bootstrap.sh`, which pulls upstream and deploys the new 0.1.9 `guard.py` + `session_bootstrap.py` to `~/.claude/hooks/`. For the remainder of that session, the new `guard.py` reads the per-project ack file, which has not been created yet by the (old) `session_bootstrap.py`, so the gate silently passes. Next `SessionStart` runs the new `session_bootstrap.py`, writes the per-project event, and the gate resumes normal operation. The banner rule still fires at prompt level during the transition session, so the banner itself should still appear.
+- **0.1.8's global flag files** under `~/.claude/hooks/` are obsoleted by 0.1.9. `session_bootstrap.py` cleans them up on each run. No user action required.
+- **`AGENT_CONFIG_GATES=off` escape hatch** still works identically.
+
 ## [0.1.8] — 2026-04-17
 
 Mechanical enforcement upgrade. Adds two `PreToolUse` gates to `scripts/guard.py` (deployed to `~/.claude/hooks/guard.py` by bootstrap) so that writing-style rules and the session-start banner are now enforced by hooks, not just prompt-level compliance. Session banner also re-emits on resume / compact / clear via a flag-file mechanism. Closes multiple observed gaps where 0.1.7's rules were skipped in practice.
@@ -326,7 +352,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.9
 [0.1.8]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.8
 [0.1.7]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.7
 [0.1.6]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.6
