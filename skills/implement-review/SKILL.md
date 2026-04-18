@@ -9,6 +9,52 @@ description: Review loop for staged changes. Detects content type, prepares a re
 
 A review loop for staged changes. Claude Code detects the content type, sends the changes to Codex for review, categorizes the feedback, revises, and iterates. Works through two Codex channels: terminal relay (default on all platforms) or IDE plugin.
 
+## When to plan-review first
+
+**Any complex task benefits from a plan review BEFORE execution**, not only writing or code. Plan-first catches architectural holes while they are still cheap to fix. The scope includes: system design, refactors, paper outlines, proposal structure, data-pipeline redesigns, multi-stage debugging strategies, teaching / curriculum planning, release-process changes, migration plans, and anything else where the shape of the work precedes and constrains the execution.
+
+**Plan-review is a Phase 0 before the staged-change loop below.** If the user asks for a plan review, or if the task clearly meets the signals below, do not apply the staged-change prerequisite in Phase 1 yet. Tell Codex to read the plan file directly (or paste the plan contents via the terminal path when Codex cannot access the file) and critique the design, not `git diff --cached`. After the plan has no High findings and no new design blockers, execute the work and resume the normal staged-output review flow at Prerequisites / Phase 1.
+
+### When to plan-first
+
+Signals that the round-trip pays off:
+
+- **Blast radius is large** -- multiple files, cross-cutting concerns, shared state, multiple stakeholders, or the organizing structure of a deliverable.
+- **Irreversible once executed** -- publishes, submissions, deployments, immutable packages, paper submissions, external commitments.
+- **History shows a pattern** -- "got the structure wrong, redo next cycle" has happened on this track before.
+- **Uncertainty in the approach** -- the user is weighing alternatives and wants the design validated, not the execution reviewed.
+- **Context is unfamiliar** -- new codebase, domain, audience, agency, collaborator workflow, or external constraint set, where a wrong assumption can shape the rest of the work.
+
+### When to skip plan-first
+
+- Change is small, local, reversible.
+- The design is already worked out and only execution feedback is wanted.
+- Plan and execution would be the same artifact (three-line bug fix, one-sentence footnote).
+
+### Process
+
+1. Write the plan to a scratch file `PLAN-<identifier>.md` in the most natural location for the task (repo root for code, paper-repo root for Overleaf-style docs, a local scratch directory beside the deliverable for tasks that do not live in git). If the plan lands inside a git worktree, add it to `.git/info/exclude` so `git add -A` does not accidentally stage it; outside git, keep it as a clearly named scratch file outside the final deliverable and delete it after review.
+2. Content varies by task but at minimum include: purpose, non-goals, structure, regression or failure analysis, validation plan, open questions. Keep it terse -- 1 to 3 pages.
+3. Send the plan through a plan-review prompt (not the staged-change template). Make clear this is a pre-execution design review and that the plan file path or pasted contents are what Codex should read; instruct Codex to critique the design rather than to run `git diff --cached`. Use the normal "Save your complete review to CodexReview.md" save-contract from Phase 1c.
+4. Iterate until the review has no High findings and no new design blockers.
+5. Then execute (code, draft, revise, deploy).
+6. Run the normal review cycle on the staged output. It is typically smaller because the architecture was already validated.
+7. After the work ships or is submitted, delete the PLAN file.
+
+### Illustrative examples (not exhaustive; the category is less important than the pattern)
+
+- System / code: hook or infra design, cross-cutting refactor, state-file schema, cross-platform behavior, release runbook revisions.
+- Research output: paper outline with specific aims, contribution claims before methods is written, figure-placement vs argument flow, reviewer response strategy, experiment design across multiple methods, ablation plan.
+- Proposal: full outline (aims alignment with merit-review criteria), budget-narrative coupling, broader-impacts framing.
+- Operational: migration plan, incident-response playbook, data-pipeline redesign.
+- Administrative / teaching: course syllabus structure, lab policy document, committee process design.
+
+The point is not which category -- it is whether the shape of the work precedes and constrains the execution.
+
+### Empirical note
+
+In the agent-config 0.1.9 release cycle, two plan-review rounds caught a High-severity design flaw before implementation. The later execution-review rounds were limited to documentation and test polish, avoiding a likely post-ship hotfix.
+
 ## Codex Channels
 
 Two paths to Codex are supported. The skill picks the best available path automatically.

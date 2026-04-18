@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Added
+
+- **`skills/implement-review/SKILL.md` gains a "When to plan-review first" section.** Formalizes plan-review as Phase 0 before the existing staged-change review loop, for complex tasks where the shape of the work precedes and constrains execution (code refactors, paper outlines, proposal structure, data-pipeline redesigns, migration plans, release-process changes, etc.). Process: write `PLAN-<identifier>.md` in the most natural location for the task (repo root for code, paper-repo root for Overleaf-style docs, local scratch directory for non-git work), send to Codex as a pre-execution design review that reads the plan path rather than `git diff --cached`, iterate until clean, then execute and run the normal review cycle on the staged output. In the agent-config 0.1.9 release cycle, two plan-review rounds caught a High-severity design flaw before implementation; the later execution-review rounds were limited to documentation and test polish, avoiding a likely post-ship hotfix. Will ship with the next real code release.
 
 ## [0.1.9] — 2026-04-18
 
