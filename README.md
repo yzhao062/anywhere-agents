@@ -31,13 +31,15 @@ A maintained, opinionated configuration that follows you across every project, e
 
 ## Why you want this
 
-You use AI coding agents across many projects. You have preferences — how reviews happen, what writing style to use, which Git operations must confirm, which AI-tell words to never emit. Today those preferences live in one of three broken states: scattered across per-repo `CLAUDE.md` files that drift over time, copy-pasted between projects diverging on every tweak, or only in your head — re-explained to every agent in every session.
+Your preferences for how AI agents work (how reviews happen, what writing style to use, which Git operations must confirm, which AI-tell words to never emit) today live in one of three broken states: scattered across per-repo `CLAUDE.md` files that drift over time, copy-pasted between projects diverging on every tweak, or only in your head and re-explained to every agent in every session.
 
-`anywhere-agents` publishes one curated, maintained configuration that any project inherits in two lines of setup. The maintainer improves one file; every consuming repo picks it up on the next session. Four shipped skills cover review, routing, figures, and READMEs. Fork it, swap pieces, keep upstream updates.
+I started using Claude Code and Codex daily across research code, paper writing, and admin work in early 2026. Daily use exposed which rules actually needed automation: a bootstrap that syncs config across repos and machines; a review workflow that stages a diff, sends it to Codex, iterates; and a set of rules that kept failing at the prompt level until they became hooks or checks. `anywhere-agents` ships that (portable sync, review workflow, and mechanical enforcement) as one maintained configuration. Four shipped skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`) cover review, routing, figures, and READMEs. Fork it, swap pieces, keep upstream updates.
+
+It is not only a style guide: hooks stop risky commands from proceeding silently and block flagged prose writes before they land.
 
 ## What it does in practice
 
-Five concrete scenarios. These are what actually changes when you use `anywhere-agents`, not the features that describe it.
+A typical day with this config: morning project setup (Scenario A), midday review when a feature is done (Scenario B), afternoon prose drafting with writing-style guardrails (Scenario C), evening safety check before pushing (Scenario D), and session defaults at the right effort and model level running in the background (Scenario E). The five scenarios below are not a feature list; they are the default behavior the author has lived with since early 2026.
 
 ### A. Add to any project
 
@@ -55,9 +57,11 @@ What appears in your project after bootstrap:
 ```text
 your-project/
 ├── AGENTS.md              # shared config (synced from upstream)
-├── AGENTS.local.md        # your per-project overrides (never overwritten)
+├── AGENTS.local.md        # your per-project overrides (optional, never overwritten)
+├── CLAUDE.md              # generated from AGENTS.md for Claude Code
+├── agents/codex.md        # generated from AGENTS.md for Codex
 ├── .claude/
-│   ├── commands/          # skill pointers — `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`
+│   ├── commands/          # skill pointers: `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`
 │   └── settings.json      # your project keys merged with shared keys
 └── .agent-config/         # upstream cache (auto-gitignored)
 ```
@@ -82,7 +86,7 @@ flowchart LR
     F -->|yes| G([merged])
 ```
 
-`my-router` picks the skill (`implement-review`), which then picks the content lens (code, paper, proposal, or general) based on what you staged. Codex reads the diff, writes `CodexReview.md` with findings tagged **High / Medium / Low** and exact `file:line` references. Claude Code applies the fixes and re-stages — the loop runs until there is nothing left to flag.
+`my-router` picks the skill (`implement-review`), which then picks the content lens (code, paper, proposal, or general) based on what you staged. Codex reads the diff, writes `CodexReview.md` with findings tagged **High / Medium / Low** and exact `file:line` references. Claude Code applies the fixes and re-stages — the loop runs until there is nothing left to flag. For larger changes, the loop can start with a plan-review phase that checks the approach before implementation.
 
 ### C. Writing that doesn't sound like an AI
 
@@ -100,13 +104,15 @@ _One sentence. 42 words. Ten highlighted AI-tell words. An em-dash used as casua
 
 _Three sentences. 33 words. Zero banned words. Semicolons and colons instead of em-dashes. One idea per sentence, and the last sentence actually says something about the contribution._
 
-The shared `AGENTS.md` bans ~40 AI-tell words by default (`delve`, `pivotal`, `underscore`, `paramount`, `paving`, `groundbreaking`, `trailblazing`, `garner`, `unprecedented`, `burgeoning`, and more). It preserves your format (LaTeX stays LaTeX, no bullet conversion of prose), avoids em-dashes as casual punctuation, and does not glue a summary sentence to the end of every paragraph.
+The shared `AGENTS.md` bans ~40 AI-tell words by default (`delve`, `pivotal`, `underscore`, `paramount`, `paving`, `groundbreaking`, `trailblazing`, `garner`, `unprecedented`, `burgeoning`, and more). It preserves your format (LaTeX stays LaTeX, no bullet conversion of prose), avoids em-dashes as casual punctuation, and does not glue a summary sentence to the end of every paragraph. The ban is enforced by a PreToolUse hook on `.md`/`.tex`/`.rst`/`.txt` writes; Scenario D covers the mechanism.
 
 Customize the banned list in your fork, or override per project in `AGENTS.local.md`.
 
-### D. Git safety catches mistakes before they happen
+### D. Mechanical enforcement
 
-The agent is about to force-push main. You have had a long day and were about to type `y` without reading.
+A PreToolUse hook (`scripts/guard.py`) runs before every agent tool call and intercepts four classes of action before they land.
+
+**Family 1: Destructive Git / GitHub confirmations.** The agent is about to force-push main. You have had a long day and were about to type `y` without reading.
 
 ```text
 [guard.py] ⛔ STOP! HAMMER TIME!
@@ -117,7 +123,15 @@ The agent is about to force-push main. You have had a long day and were about to
 This is destructive. Are you sure? (y/N)
 ```
 
-Every destructive Git or GitHub command (`push --force`, `reset --hard`, `gh pr merge`, `git branch -D`, `git rebase`, and similar) goes through `guard.py`, a PreToolUse hook that refuses to proceed silently. Read-only operations (`status`, `diff`, `log`) stay fast.
+Covers `git push`, `git commit`, `git merge`, `git rebase`, `git reset --hard`, `gh pr merge`, `gh pr create`, and related. Read-only operations (`status`, `diff`, `log`) stay fast.
+
+**Family 2: Command-shape guard for compound `cd` chains.** `cd <path> && <cmd>` is denied at tool-call time because it triggers Claude Code's built-in approval prompts even when both halves are individually allowed, and hides the underlying tool call. Suggestion: use `git -C <path>` or pass the target path as an argument.
+
+**Family 3: Writing-style deny on prose files.** Any `Write` / `Edit` / `MultiEdit` to `.md` / `.tex` / `.rst` / `.txt` files whose outgoing content contains a banned AI-tell word from `AGENTS.md` Writing Defaults is denied at tool-call time, not merely requested. The deny message lists the offending words so the agent can revise. Code files (`.py`, `.js`, etc.) are not checked.
+
+**Family 4: Session-banner gate.** Until the agent has emitted the session-start banner at the top of a session, user-visible mutating tool calls (`Write` / `Edit` / `Bash` / `MultiEdit` / etc.) are denied; read-only and dispatch tools (`Read` / `Grep` / `Glob` / `Skill` / `Task` / `TodoWrite` and similar) stay available so the agent can inspect state and route work. Prevents silent skipping of the bootstrap status report.
+
+`AGENT_CONFIG_GATES=off` in the `env` block of `~/.claude/settings.json` disables only Families 3 and 4. Families 1 and 2 stay on; they guard irreversible loss and hidden command shapes, with no false-positive cost worth the opt-out.
 
 Shell deletes (`rm -rf`) are gated separately through Claude Code's built-in permission prompts configured in `user/settings.json`.
 
@@ -136,7 +150,7 @@ You would have to read a dozen docs pages to discover these individually. `anywh
 |---|---|
 | `CLAUDE_CODE_EFFORT_LEVEL=max` persistent across every session | Merged into `~/.claude/settings.json` by bootstrap |
 | Recommended Codex `config.toml` (`model = "gpt-5.4"`, `model_reasoning_effort = "xhigh"`, `service_tier = "fast"`) | Documented and verified by session-start check |
-| `guard.py` PreToolUse hook blocks muscle-memory destructive commands | Deployed to `~/.claude/hooks/guard.py` |
+| `guard.py` PreToolUse hook intercepts destructive Git/GitHub commands (asks for confirmation), plus compound `cd` chains, writing-style banned words in prose files, and user-visible mutating tool calls before the session banner lands (all deny) | Deployed to `~/.claude/hooks/guard.py` |
 | `session_bootstrap.py` SessionStart hook keeps the config fresh every session | Deployed to `~/.claude/hooks/session_bootstrap.py` |
 | Session-start check flags outdated Actions pins, missing Codex config, and session model/effort below preference | Runs on every new session |
 
@@ -262,9 +276,9 @@ Git is the subscription engine. Cherry-pick what you want, skip what you do not.
 
 | Opinion | Why |
 |---------|-----|
-| **Safety-first by default** | `git commit` / `push` always confirm. Guard hook has no bypass mode. |
-| **Dual-agent review is default** | Claude Code implements; Codex reviews. Either solo still works; the second opinion is where the value is. |
-| **Strong writing style** | ~40 banned words, no em-dashes as casual punctuation, no bullet-conversion of prose, no summary sentence at the end of every paragraph. Sound like you, not a chatbot. |
+| **Safety-first by default** | `git commit` / `push` always confirm. Destructive Git/GitHub (ask) and compound-command shapes (deny) have no bypass; writing-style and banner gates have an `AGENT_CONFIG_GATES=off` escape hatch for false positives. |
+| **Dual-agent review is default** | Claude Code implements; Codex reviews. Either solo still works; the second opinion is where the value is. Includes an optional Phase 0 plan-review for complex work where the shape precedes the code. |
+| **Strong writing style** | ~40 banned words (enforced by PreToolUse hook on `.md` / `.tex` / `.rst` / `.txt` writes), no em-dashes as casual punctuation, no bullet-conversion of prose, no summary sentence at the end of every paragraph. Sound like you, not a chatbot. |
 | **Session checks report, not fix** | Flags outdated Actions versions, wrong Codex config, model preferences — agents never silently change anything without telling you. |
 
 Disagree with any of this? Fork it and edit.
@@ -277,29 +291,42 @@ Disagree with any of this? Fork it and edit.
 ```text
 anywhere-agents/
 ├── AGENTS.md                      # central source: tagged rule file (curated defaults)
-├── CLAUDE.md                      # generated from AGENTS.md (Claude-specific + shared)
+├── CLAUDE.md                      # generated from AGENTS.md (Claude Code)
 ├── agents/
-│   └── codex.md                   # generated from AGENTS.md (Codex-specific + shared)
+│   └── codex.md                   # generated from AGENTS.md (Codex)
 ├── bootstrap/
 │   ├── bootstrap.sh               # idempotent sync for macOS/Linux
 │   └── bootstrap.ps1              # idempotent sync for Windows
 ├── scripts/
-│   ├── guard.py                   # PreToolUse hook: blocks destructive commands
+│   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
-│   └── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
+│   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
+│   ├── pre-push-smoke.sh          # pre-push real-agent smoke (validates current checkout)
+│   └── remote-smoke.sh            # post-publish real-agent smoke (validates published install)
 ├── skills/
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
-│   ├── implement-review/          # structured dual-agent review loop (signature skill)
+│   ├── implement-review/          # dual-agent review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
 │   └── readme-polish/             # audit + rewrite GitHub READMEs with modern patterns
+├── packages/
+│   ├── pypi/                      # anywhere-agents PyPI CLI (pipx run anywhere-agents)
+│   └── npm/                       # anywhere-agents npm CLI (npx anywhere-agents)
 ├── .claude/
 │   ├── commands/                  # pointer files so Claude Code discovers the skills
 │   └── settings.json              # project-level permissions
 ├── user/
 │   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, CLAUDE_CODE_EFFORT_LEVEL=max
-├── docs/                          # README hero assets + Read the Docs source
-├── tests/                         # bootstrap contract + smoke tests (Ubuntu + Windows CI)
-└── .github/workflows/             # validation CI
+├── docs/                          # Read the Docs source + README hero assets
+├── tests/                         # bootstrap / guard / generator / session-bootstrap tests (Ubuntu + Windows + macOS CI, Python 3.9-3.13)
+├── .github/workflows/             # validate, real-agent-smoke, package-smoke CI
+├── .githooks/
+│   └── pre-push                   # opt-in pre-push smoke (enable via `git config core.hooksPath .githooks`)
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── RELEASING.md
+├── LICENSE
+├── mkdocs.yml                     # Read the Docs config
+└── .readthedocs.yaml
 ```
 
 </details>
@@ -332,6 +359,7 @@ If you want a general-purpose multi-agent sync tool or a broader skill catalog, 
 - Primary support is Claude Code + Codex. Cursor, Aider, Gemini CLI may work via `AGENTS.md` but are untested here.
 - Requires `git` everywhere. Requires Python (stdlib only) for settings merge; bootstrap continues without merge if Python is unavailable.
 - Guard hook deploys to `~/.claude/hooks/guard.py` and modifies `~/.claude/settings.json`. To opt out of user-level modifications, remove the user-level section from `bootstrap/bootstrap.sh` / `bootstrap/bootstrap.ps1` in your fork.
+- `AGENT_CONFIG_GATES=off` in the `env` block of `~/.claude/settings.json` disables only the writing-style and banner gates. Destructive Git/GitHub and compound-command guards stay active.
 
 </details>
 

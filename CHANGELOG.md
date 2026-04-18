@@ -9,9 +9,40 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-18
+
+README and RTD redesign on top of the plan-first workflow in `implement-review`. The README is re-centered around three pillars (portable sync, review workflow, mechanical enforcement) earned from daily use, and the 0.1.8 PreToolUse gates are surfaced as a first-class feature via a reframed Scenario D covering four reader-facing gate families. The RTD `/skills/` rendering bug (Material icon shortcodes showing as literal text) is fixed.
+
 ### Added
 
-- **`skills/implement-review/SKILL.md` gains a "When to plan-review first" section.** Formalizes plan-review as Phase 0 before the existing staged-change review loop, for complex tasks where the shape of the work precedes and constrains execution (code refactors, paper outlines, proposal structure, data-pipeline redesigns, migration plans, release-process changes, etc.). Process: write `PLAN-<identifier>.md` in the most natural location for the task (repo root for code, paper-repo root for Overleaf-style docs, local scratch directory for non-git work), send to Codex as a pre-execution design review that reads the plan path rather than `git diff --cached`, iterate until clean, then execute and run the normal review cycle on the staged output. In the agent-config 0.1.9 release cycle, two plan-review rounds caught a High-severity design flaw before implementation; the later execution-review rounds were limited to documentation and test polish, avoiding a likely post-ship hotfix. Will ship with the next real code release.
+- **`skills/implement-review/SKILL.md` "When to plan-review first" section.** Formalizes plan-review as Phase 0 before the existing staged-change review loop, for complex tasks where the shape of the work precedes and constrains execution (code refactors, paper outlines, proposal structure, data-pipeline redesigns, migration plans, release-process changes, etc.). Process: write `PLAN-<identifier>.md` in the most natural location for the task (repo root for code, paper-repo root for Overleaf-style docs, local scratch directory for non-git work), send to Codex as a pre-execution design review that reads the plan path rather than `git diff --cached`, iterate until clean, then execute and run the normal review cycle on the staged output. Scenario B in both READMEs gains a one-sentence mention.
+- **Pre-scenarios "A day in this config" prelude** in `README.md` and `README.zh-CN.md`. Light phase-of-day rhythm (morning setup, midday review, afternoon drafting, evening safety check, session defaults in the background) so the scenarios read as daily behavior, not a feature list.
+- **Section 0 benefit-preview sentence**: *"It is not only a style guide: hooks stop risky commands from proceeding silently and block flagged prose writes before they land."* Sets up the enforcement story before the scenarios. Covers both ask-behavior (destructive Git/GitHub) and deny-behavior (compound `cd`, writing-style, banner).
+- **Scenario C enforcement cross-reference.** One sentence noting the ~40-word AI-tell ban is enforced by a PreToolUse hook on `.md`/`.tex`/`.rst`/`.txt` writes; pointer to Scenario D for the mechanism.
+- **Limitations escape-hatch entry.** `AGENT_CONFIG_GATES=off` documented in both the English and Chinese Limitations sections for discoverability when a false positive blocks real work. Pairs with the Scenario D footer coverage.
+
+### Changed
+
+- **Section 0 "Why you want this" rewrite** in `README.md` and `README.zh-CN.md`. Keeps the cross-project drift opener (scattered per-repo `CLAUDE.md`, copy-paste divergence, only-in-your-head) and adds a daily-use evolution paragraph naming the three shipped pillars (portable sync, review workflow, mechanical enforcement) as the output of daily use rather than a curated feature list.
+- **Scenario D renamed: "Git safety catches mistakes before they happen" → "Mechanical enforcement."** Restructured around four reader-facing gate families: destructive Git/GitHub asks for confirmation; compound `cd` is denied; writing-style banned-word writes on `.md`/`.tex`/`.rst`/`.txt` are denied; user-visible mutating tool calls before the session banner lands are denied (read-only and dispatch tools like `Read`, `Grep`, `Skill`, `Task` stay available so the agent can inspect state). Organizing idea: *what the hook intercepts before an agent action proceeds.* Keeps the force-push deny example as the vivid lead.
+- **Scenario E default-stack table.** Guard-hook row expanded to describe all four gate families (asks for confirmation on destructive Git/GitHub; denies compound `cd`, writing-style banned words, and pre-banner user-visible mutating tool calls) instead of only "muscle-memory destructive commands."
+- **`mkdocs.yml` adds `pymdownx.emoji` block** with Material's `emoji_index` and `emoji_generator`. Required by mkdocs-material to render `:material-*:` and `:octicons-*:` shortcodes as SVG icons; without it, `attr_list` alone leaves the shortcodes as literal text.
+- **Reference-section sweep (both READMEs).** Repo layout now lists `packages/` (PyPI + npm CLI sources), `.githooks/`, all 5 files in `scripts/` (including `pre-push-smoke.sh` and `remote-smoke.sh`), root-level `CHANGELOG.md`/`CONTRIBUTING.md`/`RELEASING.md`/`LICENSE`/`mkdocs.yml`/`.readthedocs.yaml`, and the expanded CI matrix (Ubuntu + Windows + macOS, Python 3.9-3.13, 3 workflows). `scripts/guard.py` description upgraded from "blocks destructive commands" to the four-family framing; `skills/implement-review/` description mentions Phase 0 plan-review. "What is opinionated and why" table refreshed: safety-first row acknowledges the `AGENT_CONFIG_GATES=off` escape hatch; dual-agent row mentions optional Phase 0 plan-review; writing-style row notes PreToolUse enforcement. Scenario A "what appears in your project" tree adds `CLAUDE.md` and `agents/codex.md` (generated at bootstrap since 0.1.3).
+- **`README.zh-CN.md` Fork step 3 catch-up.** The Chinese README had been carrying a pre-0.1.6 one-liner ("改他们 bootstrap 块里的 URL"). Replaced with the full argv / `AGENT_CONFIG_UPSTREAM` env var / persisted-file cascade explanation already in the English README since 0.1.6.
+
+### Fixed
+
+- **RTD `/skills/` page icon-shortcode rendering.** Material icon shortcodes in the skills card grid (`:material-magnify-scan:`, `:material-routes:`, `:material-image-frame:`, `:material-book-open-outline:`, `:octicons-arrow-right-24:`) rendered as literal text. Adding the `pymdownx.emoji` block restores icons on all four skill cards and the "Deep docs" arrows.
+
+### Review history
+
+0.2.0 went through two rounds of `implement-review` Phase 0 plan-review (plan-first mode against `agent-config/PLAN-readme-redesign.md`) plus the execution-phase staged-diff review.
+
+- **Plan-review Round 1**: 5 findings (2 Medium + 3 Low) covering release-scope inconsistency on plan-first, "three gates" undercounting the canonical Mechanical Enforcement table, escape-hatch discoverability, Section 0 implementation-first wording, and a `zh-CN` scope-statement mismatch. All Fixed in Revision 2 of the plan.
+- **Plan-review Round 2**: 5 findings (2 Medium + 3 Low) covering Section 0 over-centering on enforcement (dropping the portability story and the self-defeating "eventually give up" phrasing), prelude restating scenarios too literally, Move 3 (origin markers on scenario headings) not worth the cost, benefit-sentence accuracy across ask/deny families, and collapsing release-scope branches once 0.2.0 was accepted. All Fixed in Revision 3; Move 3 deferred.
+- **Maintainer spot-check** (between Round 2 and execution review): caught stale content in reference collapsibles that the plan-review rounds did not scope — the Repo layout tree, the "What is opinionated and why" Safety-first row, the Scenario A project tree (both EN + zh-CN), and `README.zh-CN.md` Fork step 3 which had been carrying a pre-0.1.6 one-liner. Fixed in-place before the execution review.
+- **Execution review Round 3**: 2 findings (1 Medium + 1 Low) covering banner-gate wording that overstated "all tool calls" (canonical behavior exempts read-only and dispatch tools like `Read`, `Grep`, `Skill`, `Task`, so only user-visible mutating tools are denied) and this review-history list's completeness. All Fixed.
+- No High-priority findings in any round.
 
 ## [0.1.9] — 2026-04-18
 
@@ -354,7 +385,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.2.0
 [0.1.9]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.9
 [0.1.8]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.8
 [0.1.7]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.7
