@@ -57,7 +57,10 @@ jobs:
             exit 1
           fi
           PROMPT='List the shipped skills from CLAUDE.md by directory name, comma-separated, no other text.'
-          RESP=$(claude -p "$PROMPT")
+          # --model sonnet: handshake probe verifies config loading + skill
+          # enumeration, not prose quality; Sonnet is ~5x cheaper than Opus
+          # and predictable across Claude Code CLI default-model drift.
+          RESP=$(claude -p --model sonnet "$PROMPT")
           echo "::group::claude response"
           echo "$RESP"
           echo "::endgroup::"

@@ -256,6 +256,39 @@ npx anywhere-agents@X.Y.Z --version
 - Update `[Unreleased]` section of `CHANGELOG.md` to start fresh (`_No unreleased changes queued._`).
 - Delete the local `vX.Y.Z-release-notes.md` scratch file.
 
+## CI API cost exposure (for humans and agents)
+
+Every workflow in `.github/workflows/` that calls a model API has a documented per-dispatch cost. Before any `gh workflow run` on a workflow that is not free, **agents MUST confirm with the user** — "the user approved a larger task" is not blanket approval for paid dispatch. Each workflow click is a separate billable action. The same table applies to the twin `agent-config` repo because `real-agent-smoke.yml` and `validate.yml` are STRICT byte-identical mirrors between the two repos (see cross-repo parity check under Pre-release checks).
+
+### Workflow cost table
+
+| Workflow | Trigger(s) | Cost per run | Safeguards |
+|---|---|---|---|
+| `validate.yml` | push + PR | $0 (no API calls) | — |
+| `docs-strict-build.yml` | push + PR | $0 (no API calls) | — |
+| `real-agent-smoke.yml` | `release: published` + manual | ~$0.04 | Sonnet pin on `claude -p`; handshake-only (skill-roster enumeration) |
+| `package-smoke.yml` | `release: published` + weekly cron + manual | $0 (install/verify only, no API keys) | 12-attempt retry loop absorbs PyPI/npm CDN lag |
+
+### Dispatch-approval policy (for agents)
+
+Any `gh workflow run` on a workflow whose per-dispatch cost is **above $0.01** requires explicit per-dispatch user approval, even inside a broader approved task. Before dispatching:
+
+1. Name the workflow and the measured or estimated cost for this specific set of inputs.
+2. State the hypothesis you expect the run to verify.
+3. Wait for an explicit `dispatch` / `go` / `yes` from the user.
+
+`validate.yml`, `docs-strict-build.yml`, and `package-smoke.yml` (all $0) may be dispatched inside an approved task without per-run confirmation. Only `real-agent-smoke.yml` meets the approval threshold today.
+
+### Annual cost forecast
+
+| Category | Typical year |
+|---|---|
+| `real-agent-smoke` auto-triggered on release (both twin repos, ~4-6 releases each/year) | ~$0.40-$0.50 |
+| Manual `real-agent-smoke` dispatches for debugging | ~$0-$0.50 |
+| **Total (both repos)** | **~$0.50-$1.00** |
+
+If a future workflow adds API-calling logic, update this table and the policy threshold in the same commit — the commit diff is the signal to humans + agents that the cost model changed.
+
 ## Common gotchas
 
 - **PyPI CDN cache.** After `twine upload`, a fresh `pip install --upgrade` may still report the previous version for a minute or two. Use `--force-reinstall --no-cache-dir` with an explicit `==X.Y.Z` to verify.
