@@ -140,10 +140,17 @@ if ($pyCmd) {
 if ($composeOk) {
     $composeArgs = @("--root", ".")
     if ($NoCache) { $composeArgs += "--no-cache" }
+    # Prefer the v0.4.0 unified composer. Fall back to the v0.3.x rule-pack
+    # composer on pre-v0.4.0 sparse clones that predate compose_packs.py.
+    if (Test-Path .agent-config/repo/scripts/compose_packs.py) {
+        $composer = ".agent-config/repo/scripts/compose_packs.py"
+    } else {
+        $composer = ".agent-config/repo/scripts/compose_rule_packs.py"
+    }
     $global:LASTEXITCODE = $null
-    & $pyCmd.Path .agent-config/repo/scripts/compose_rule_packs.py @composeArgs
+    & $pyCmd.Path $composer @composeArgs
     if (-not $? -or $LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("error: rule-pack composition failed; AGENTS.md not updated")
+        [Console]::Error.WriteLine("error: pack composition failed; AGENTS.md not updated")
         exit 1
     }
 } else {

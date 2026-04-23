@@ -137,9 +137,16 @@ fi
 if $_compose_ok; then
   _NO_CACHE_FLAG=""
   [ -n "$NO_CACHE" ] && _NO_CACHE_FLAG="--no-cache"
+  # Prefer the v0.4.0 unified composer. Fall back to the v0.3.x rule-pack
+  # composer on pre-v0.4.0 sparse clones that predate compose_packs.py.
+  if [ -f .agent-config/repo/scripts/compose_packs.py ]; then
+    _composer=.agent-config/repo/scripts/compose_packs.py
+  else
+    _composer=.agent-config/repo/scripts/compose_rule_packs.py
+  fi
   # shellcheck disable=SC2086
-  if ! "$_py" .agent-config/repo/scripts/compose_rule_packs.py --root . $_NO_CACHE_FLAG; then
-    echo "error: rule-pack composition failed; AGENTS.md not updated" >&2
+  if ! "$_py" "$_composer" --root . $_NO_CACHE_FLAG; then
+    echo "error: pack composition failed; AGENTS.md not updated" >&2
     exit 1
   fi
 else

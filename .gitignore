@@ -20,7 +20,8 @@ site/
 # wildcards keep the committed tree clean without needing per-file edits.
 PLAN-*.md
 CodexReview.md
+Review-*.md
 
 # Local-only archive of shipped planning docs and review logs. Move old
-# PLAN-*.md / CodexReview.md here at release time to declutter the root.
+# PLAN-*.md / Review-*.md here at release time to declutter the root.
 /archive/
