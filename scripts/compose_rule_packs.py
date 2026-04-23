@@ -69,7 +69,7 @@ class RulePackError(RuntimeError):
 
 
 def parse_manifest(path: Path) -> dict[str, dict[str, Any]]:
-    """Parse bootstrap/rule-packs.yaml. Returns {pack_name: entry_dict}."""
+    """Parse bootstrap/packs.yaml (or legacy rule-packs.yaml). Returns {pack_name: entry_dict}."""
     if not path.exists():
         raise RulePackError(f"manifest not found: {path}")
     try:
@@ -330,7 +330,7 @@ def compose_agents_md(
             raise RulePackError(
                 f"unknown rule pack '{name}'; known packs in manifest: "
                 f"{known}. Check spelling in agent-config.yaml or add the "
-                f"pack to bootstrap/rule-packs.yaml in anywhere-agents."
+                f"pack to bootstrap/packs.yaml in anywhere-agents."
             )
         entry = manifest[name]
         ref = sel.get("ref") or entry["default-ref"]
@@ -444,8 +444,9 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "path to rule-packs.yaml manifest "
-            "(default: <root>/.agent-config/repo/bootstrap/rule-packs.yaml)"
+            "path to packs.yaml manifest (legacy rule-packs.yaml also accepted; "
+            "default: <root>/.agent-config/repo/bootstrap/packs.yaml, falling back "
+            "to rule-packs.yaml if packs.yaml is absent)"
         ),
     )
     parser.add_argument(
@@ -465,11 +466,17 @@ def main(argv: list[str] | None = None) -> int:
         return do_print_yaml(args.print_yaml)
 
     root = args.root.resolve()
-    manifest_path = (
-        args.manifest
-        if args.manifest is not None
-        else root / ".agent-config" / "repo" / "bootstrap" / "rule-packs.yaml"
-    )
+    if args.manifest is not None:
+        manifest_path = args.manifest
+    else:
+        # Loader alias: prefer new packs.yaml; fall back to legacy rule-packs.yaml
+        # so pre-v0.4.0 bootstrap caches continue to compose correctly.
+        bootstrap_dir = root / ".agent-config" / "repo" / "bootstrap"
+        candidate = bootstrap_dir / "packs.yaml"
+        if candidate.exists():
+            manifest_path = candidate
+        else:
+            manifest_path = bootstrap_dir / "rule-packs.yaml"
     return do_compose(root, manifest_path, args.no_cache)
 
 

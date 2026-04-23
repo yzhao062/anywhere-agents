@@ -846,12 +846,20 @@ class DoComposeTests(unittest.TestCase):
 
 
 class ShippedManifestTests(unittest.TestCase):
-    """Sanity checks on the real bootstrap/rule-packs.yaml we ship."""
+    """Sanity checks on the real bootstrap/packs.yaml we ship."""
 
-    MANIFEST = ROOT / "bootstrap" / "rule-packs.yaml"
+    MANIFEST = ROOT / "bootstrap" / "packs.yaml"
 
     def test_manifest_file_exists(self) -> None:
         self.assertTrue(self.MANIFEST.exists())
+
+    def test_legacy_rule_packs_yaml_absent(self) -> None:
+        """After v0.4.0 rename, only packs.yaml is shipped; rule-packs.yaml is gone."""
+        legacy = ROOT / "bootstrap" / "rule-packs.yaml"
+        self.assertFalse(
+            legacy.exists(),
+            "bootstrap/rule-packs.yaml should be renamed to packs.yaml in v0.4.0",
+        )
 
     def test_manifest_parses(self) -> None:
         packs = crp.parse_manifest(self.MANIFEST)
