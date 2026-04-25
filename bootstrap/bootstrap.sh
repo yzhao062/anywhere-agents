@@ -84,6 +84,39 @@ EOF
   exit 0
 fi
 
+
+# Find a real Python interpreter, avoiding the Windows Store App Execution
+# Alias shim under %LOCALAPPDATA%\Microsoft\WindowsApps\ (which prints
+# "Python was not found; install from Store" and exits non-zero on call).
+# Order: env override > deployed wrapper > sparse-clone wrapper > PATH lookup
+# with shim skip. See https://github.com/yzhao062/anywhere-agents/issues/2.
+_find_python() {
+  if [ -n "${ANYWHERE_AGENTS_PYTHON:-}" ] && [ -x "$ANYWHERE_AGENTS_PYTHON" ]; then
+    echo "$ANYWHERE_AGENTS_PYTHON"; return 0
+  fi
+  if [ -x "$HOME/.claude/hooks/_python" ]; then
+    echo "$HOME/.claude/hooks/_python"; return 0
+  fi
+  if [ -x ".agent-config/repo/scripts/_python" ]; then
+    echo ".agent-config/repo/scripts/_python"; return 0
+  fi
+  for cmd in python3 python; do
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      resolved="$candidate"
+      if command -v readlink >/dev/null 2>&1; then
+        maybe=$(readlink -f "$candidate" 2>/dev/null || true)
+        [ -n "$maybe" ] && resolved="$maybe"
+      fi
+      case "$resolved" in
+        *WindowsApps*|*windowsapps*) continue ;;
+      esac
+      echo "$candidate"; return 0
+    done < <(type -a -p "$cmd" 2>/dev/null || true)
+  done
+  return 1
+}
+
 # Upstream cascade: argv > env var > persisted file > hardcoded default.
 # Forkers can persist a different default in their fork; consumers can pass
 # upstream via `bash .agent-config/bootstrap.sh <user>/<repo>` or the
@@ -122,7 +155,7 @@ git -C .agent-config/repo sparse-checkout set skills .claude scripts user bootst
 # PyYAML still aren't available, we fall back to the verbatim upstream
 # AGENTS.md and print a one-line tip unless the consumer has explicitly
 # referenced rule_packs themselves.
-_py=$(command -v python3 || command -v python)
+_py=$(_find_python || true)
 _compose_ok=false
 if [ -n "$_py" ]; then
   if ! "$_py" -c "import yaml" >/dev/null 2>&1; then
@@ -169,7 +202,7 @@ fi
 # Generate per-agent config files (CLAUDE.md, agents/codex.md) from AGENTS.md.
 # Generator preserves hand-authored files (no GENERATED header) and warns loudly.
 if [ -f .agent-config/repo/scripts/generate_agent_configs.py ]; then
-  _py=$(command -v python3 || command -v python)
+  _py=$(_find_python || true)
   if [ -n "$_py" ]; then
     "$_py" .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet || true
   fi
@@ -179,7 +212,7 @@ if [ -d .agent-config/repo/.claude/commands ]; then
 fi
 if [ -f .agent-config/repo/.claude/settings.json ]; then
   if [ -f .claude/settings.json ]; then
-    _py=$(command -v python3 || command -v python)
+    _py=$(_find_python || true)
     if [ -n "$_py" ]; then
       "$_py" -c "
 import json, pathlib as P
@@ -202,6 +235,11 @@ fi
 # This section modifies ~/.claude/ (user-level, not project-level).
 # It deploys a PreToolUse hook guard and merges shared permission settings.
 # Remove this section if you do not want bootstrap to modify user-level config.
+if [ -f .agent-config/repo/scripts/_python ]; then
+  mkdir -p "$HOME/.claude/hooks"
+  cp -f .agent-config/repo/scripts/_python "$HOME/.claude/hooks/_python"
+  chmod +x "$HOME/.claude/hooks/_python" 2>/dev/null || true
+fi
 if [ -f .agent-config/repo/scripts/guard.py ]; then
   mkdir -p "$HOME/.claude/hooks"
   cp -f .agent-config/repo/scripts/guard.py "$HOME/.claude/hooks/guard.py"
@@ -213,7 +251,7 @@ fi
 if [ -f .agent-config/repo/user/settings.json ]; then
   mkdir -p "$HOME/.claude"
   if [ -f "$HOME/.claude/settings.json" ]; then
-    _py=$(command -v python3 || command -v python)
+    _py=$(_find_python || true)
     if [ -n "$_py" ]; then
       "$_py" -c "
 import json, pathlib as P
@@ -236,7 +274,7 @@ fi
 # for the why. To genuinely disable auto-updates, set DISABLE_AUTOUPDATER=1
 # via the env block in ~/.claude/settings.json.
 if [ -f "$HOME/.claude.json" ]; then
-  _py=$(command -v python3 || command -v python)
+  _py=$(_find_python || true)
   if [ -n "$_py" ]; then
     "$_py" -c "
 import json, os, pathlib as P, tempfile

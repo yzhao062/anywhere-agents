@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/guard.py\" 2>/dev/null || python \"$HOME/.claude/hooks/guard.py\"",
+            "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/hooks/guard.py\"",
             "statusMessage": "Checking for compound cd and destructive commands..."
           }
         ]
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/session_bootstrap.py\" 2>/dev/null || python \"$HOME/.claude/hooks/session_bootstrap.py\"",
+            "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/hooks/session_bootstrap.py\"",
             "statusMessage": "Running anywhere-agents bootstrap if present..."
           }
         ]

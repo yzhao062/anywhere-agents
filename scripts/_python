@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# _python — robustly find a real Python interpreter on Windows / macOS / Linux.
+#
+# Why this exists:
+#   On Windows, %LOCALAPPDATA%\Microsoft\WindowsApps\ ships a python.exe and
+#   python3.exe shim (App Execution Aliases) that prints
+#   "Python was not found; install from the Microsoft Store" and exits non-zero.
+#   When a Claude Code hook subshell inherits default system PATH, the shim wins
+#   ahead of any real interpreter (miniforge, regular Python install). The
+#   "python3 ... 2>/dev/null || python ..." chain that the bare hook commands
+#   used previously hit the shim twice and silently failed, leaving rule-pack
+#   composition skipped. See https://github.com/yzhao062/anywhere-agents/issues/2.
+#
+# What this does:
+#   1. Honor explicit override via $ANYWHERE_AGENTS_PYTHON if set and executable.
+#   2. Probe well-known miniforge / conda layouts under $HOME (env name `py312`
+#      first, then bare miniforge3 / anaconda3 root).
+#   3. Fall through to the first python3 / python on PATH whose realpath is NOT
+#      under WindowsApps (filtering out the App Execution Alias shim).
+#   4. Final fallback: vanilla python3 / python (preserves existing behavior on
+#      macOS / Linux where there is no shim issue).
+#
+# Usage from settings.json hook commands:
+#   "$HOME/.claude/hooks/_python" "$HOME/.claude/hooks/guard.py"
+#
+# Bootstrap deploys this script to ~/.claude/hooks/_python alongside guard.py
+# and session_bootstrap.py.
+
+set -e
+
+# 1. Explicit override.
+if [ -n "${ANYWHERE_AGENTS_PYTHON:-}" ] && [ -x "$ANYWHERE_AGENTS_PYTHON" ]; then
+  exec "$ANYWHERE_AGENTS_PYTHON" "$@"
+fi
+
+# 2. Probe well-known miniforge / conda layouts under $HOME.
+for layout in \
+    "$HOME/miniforge3/envs/py312/python.exe" \
+    "$HOME/miniforge3/envs/py312/bin/python" \
+    "$HOME/miniforge3/envs/py312/bin/python3" \
+    "$HOME/miniforge3/python.exe" \
+    "$HOME/miniforge3/bin/python" \
+    "$HOME/miniforge3/bin/python3" \
+    "$HOME/anaconda3/envs/py312/python.exe" \
+    "$HOME/anaconda3/envs/py312/bin/python" \
+    "$HOME/anaconda3/python.exe" \
+    "$HOME/anaconda3/bin/python" \
+    "$HOME/.conda/envs/py312/python.exe" \
+    "$HOME/.conda/envs/py312/bin/python"; do
+  if [ -x "$layout" ]; then
+    exec "$layout" "$@"
+  fi
+done
+
+# 3. PATH lookup, skipping Windows Store shim. type -a -p enumerates ALL
+#    candidates of a name on PATH so that a shim hit at position 1 does not
+#    skip a real interpreter at position 2+.
+for cmd in python3 python; do
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    resolved="$candidate"
+    if command -v readlink >/dev/null 2>&1; then
+      maybe=$(readlink -f "$candidate" 2>/dev/null || true)
+      [ -n "$maybe" ] && resolved="$maybe"
+    fi
+    case "$resolved" in
+      *WindowsApps*|*windowsapps*) continue ;;
+    esac
+    exec "$candidate" "$@"
+  done < <(type -a -p "$cmd" 2>/dev/null || true)
+done
+
+# 4. Last resort. On non-Windows machines this is the normal path; on Windows
+#    it surfaces the shim issue rather than silent skip.
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$@"
+fi
+exec python "$@"

@@ -8,6 +8,30 @@ param(
     [Alias("h")][switch]$Help
 )
 
+# Find a real Python interpreter, avoiding the Windows Store App Execution
+# Alias shim under %LOCALAPPDATA%\Microsoft\WindowsApps\ that prints
+# "Python was not found; install from Store" and exits non-zero on call.
+# See https://github.com/yzhao062/anywhere-agents/issues/2.
+function Find-RealPython {
+  if ($env:ANYWHERE_AGENTS_PYTHON) {
+    $override = Resolve-Path -LiteralPath $env:ANYWHERE_AGENTS_PYTHON -ErrorAction SilentlyContinue
+    if ($override) {
+      $cmd = Get-Command $override.ProviderPath -ErrorAction SilentlyContinue
+      if ($cmd) { return $cmd }
+    }
+  }
+  $candidates = @()
+  $candidates += Get-Command python3 -All -ErrorAction SilentlyContinue
+  $candidates += Get-Command python -All -ErrorAction SilentlyContinue
+  foreach ($c in $candidates) {
+    if (-not $c) { continue }
+    if ($c.Source -and ($c.Source -notmatch 'WindowsApps')) {
+      return $c
+    }
+  }
+  return $null
+}
+
 if ($Help) {
     Write-Output "Usage: .\bootstrap.ps1 [UPSTREAM] [-RulePacks PACK] [-NoCache]"
     Write-Output "  UPSTREAM      user/repo form; overrides AGENT_CONFIG_UPSTREAM env and persisted file"
@@ -116,13 +140,9 @@ function Test-PythonHasYaml([string]$PythonPath) {
     return ($? -and $LASTEXITCODE -eq 0)
 }
 
-$pyCmd = $null
-foreach ($name in @("python", "python3")) {
-    $candidate = Get-Command $name -ErrorAction SilentlyContinue
-    if ($candidate -and (Test-PythonRuns $candidate.Path)) {
-        $pyCmd = $candidate
-        break
-    }
+$pyCmd = Find-RealPython
+if ($pyCmd -and -not (Test-PythonRuns $pyCmd.Path)) {
+    $pyCmd = $null
 }
 
 $composeOk = $false
@@ -173,8 +193,7 @@ if ($composeOk) {
 # Generate per-agent config files (CLAUDE.md, agents/codex.md) from AGENTS.md.
 # Generator preserves hand-authored files (no GENERATED header) and warns loudly.
 if (Test-Path .agent-config/repo/scripts/generate_agent_configs.py) {
-  $genPy = Get-Command python -ErrorAction SilentlyContinue
-  if (-not $genPy) { $genPy = Get-Command python3 -ErrorAction SilentlyContinue }
+  $genPy = Find-RealPython
   if ($genPy) {
     & $genPy.Path .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet
   }
@@ -197,6 +216,11 @@ if (Test-Path .agent-config/repo/.claude/settings.json) {
 # It deploys a PreToolUse hook guard and merges shared permission settings.
 # Remove this section if you do not want bootstrap to modify user-level config.
 $userClaude = Join-Path $env:USERPROFILE '.claude'
+if (Test-Path .agent-config/repo/scripts/_python) {
+  $hooksDir = Join-Path $userClaude 'hooks'
+  New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
+  Copy-Item .agent-config/repo/scripts/_python (Join-Path $hooksDir '_python') -Force
+}
 if (Test-Path .agent-config/repo/scripts/guard.py) {
   $hooksDir = Join-Path $userClaude 'hooks'
   New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
