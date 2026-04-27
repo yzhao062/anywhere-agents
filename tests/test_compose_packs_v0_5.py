@@ -64,7 +64,11 @@ class _V2ManifestFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # Canonicalize: macOS resolves /var → /private/var, Windows resolves
+        # 8.3 short paths (RUNNER~1) → long paths. The composer calls
+        # Path.resolve() internally; if the test uses the unresolved form,
+        # called-path equality assertions fail on CI runners.
+        self.root = Path(self.tmp.name).resolve()
         self.bootstrap_dir = self.root / ".agent-config" / "repo" / "bootstrap"
         self.bootstrap_dir.mkdir(parents=True)
         # v2 manifest with one minimal pack so schema parsing succeeds.
