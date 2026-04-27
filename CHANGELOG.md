@@ -9,9 +9,22 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+_No unreleased changes queued._
+
+## [0.5.1] — 2026-04-27
+
 ### Added
 
-- `anywhere-agents pack verify [--fix]`: audits pack deployment state across user-level config, project-level `rule_packs:` in `agent-config.yaml`, and `pack-lock.json`, by `(name, source_url, requested_ref)` identity. Exit codes: 0 (all deployed), 1 (gaps), 2 (parse error). `--fix` writes matching `rule_packs:` entries to `agent-config.yaml` for `user-level only` packs (atomic write; never modifies `pack-lock.json`). Banner Session check line gains a `⚠ N user-level pack(s) not deployed (run anywhere-agents pack verify)` warning when the count is non-zero.
+- `anywhere-agents pack verify [--fix]`: audits pack deployment state across user-level config, project-level `rule_packs:` in `agent-config.yaml`, and `pack-lock.json`, by `(name, source_url, requested_ref)` identity. Seven priority-ordered states: `deployed`, `user-level only`, `config mismatch`, `declared, not bootstrapped`, `broken state`, `lock schema stale`, `orphan`. Exit codes: 0 (all deployed), 1 (any gap), 2 (parse error). `--fix` writes matching `rule_packs:` entries to `agent-config.yaml` for `user-level only` packs under the project repo lock; the lock-held write re-gathers state and exits with rc=1 + named packs if any `user_only`, `mismatch`, `broken`, `orphan`, or `lock_stale` row remains after the write. Atomic write via temp + `os.replace`; never modifies `pack-lock.json` or generated outputs. Credential URLs (`https://TOKEN@host/...`) are case-insensitively rejected before any print or write so token-bearing entries cannot leak to stdout or get persisted.
+- **Session Start Check item 7 — pack-deployment audit.** The session-start banner gains a Session check line entry that compares user-level pack identity tuples against project-level identity tuples (after URL normalization via `normalize_pack_source_url`) and emits `⚠ N user-level pack(s) not deployed (run anywhere-agents pack verify)` when the count is non-zero. Mirrors byte-for-byte across aa+ac `AGENTS.md` plus the generated `CLAUDE.md` and `agents/codex.md` per repo (six files total). `tests/test_check_parity.py` pins the cross-variant equality.
+
+### Internals
+
+- Vendored `scripts/packs/locks.py` into the PyPI wheel so `pipx install anywhere-agents` always has a working repo-lock helper. `scripts/vendor-packs.py` now lists `locks.py` alongside `auth.py`, `source_fetch.py`, and `schema.py`.
+- `auth.reject_credential_url` and `auth.redact_url_userinfo` are now case-insensitive on URL schemes (`HTTPS://`, `Git+SSH://`, etc.) per RFC 3986; uppercase token URLs are rejected and redacted the same as lowercase forms.
+- `source_fetch.normalize_pack_source_url` lowercases GitHub host case and owner/repo case for identity-tuple comparison; non-GitHub hosts get a minimal lowercase-host normalization.
+- `_load_project_observations` preserves same-file duplicate names so two `profile` rows in `agent-config.yaml` with different refs surface as `config mismatch` instead of last-wins collapse. Cross-file local-overrides-tracked semantics preserved.
+- `_identity_for_default_selection` reads `.agent-config/repo/bootstrap/packs.yaml` so default-seeded packs (`agent-style`, `aa-core-skills`) compare against the same source/ref the composer writes into the lock. Malformed bundled `packs.yaml` now propagates as exit 2 instead of silent fallback.
 
 ## [0.5.0] — 2026-04-26
 
@@ -460,7 +473,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.2.0...v0.3.0
