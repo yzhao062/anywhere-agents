@@ -117,6 +117,23 @@ _find_python() {
   return 1
 }
 
+# Legacy AC -> AA migration for direct shell-bootstrap runs. If the
+# persisted upstream or cached repo origin still points at agent-config
+# and the caller did not pass an explicit upstream, delete the old cache
+# so the normal clone path below re-clones anywhere-agents.
+_legacy_ac=0
+if [ -z "$_POS_UPSTREAM" ] && [ -z "${AGENT_CONFIG_UPSTREAM:-}" ]; then
+  if [ -f .agent-config/upstream ] && [ "$(tr -d '\r\n\t ' < .agent-config/upstream)" = "yzhao062/agent-config" ]; then
+    _legacy_ac=1
+  elif [ -f .agent-config/repo/.git/config ] && git -C .agent-config/repo remote get-url origin 2>/dev/null | grep -Eiq '(^|[:/])yzhao062/agent-config(\.git)?/?$'; then
+    _legacy_ac=1
+  fi
+fi
+if [ "$_legacy_ac" = "1" ]; then
+  printf '%s\n' '[anywhere-agents] Migrating from agent-config bootstrap to anywhere-agents...' >&2
+  rm -rf .agent-config/repo .agent-config/upstream .agent-config/bootstrap.sh .agent-config/bootstrap.ps1
+fi
+
 # Upstream cascade: argv > env var > persisted file > hardcoded default.
 # Forkers can persist a different default in their fork; consumers can pass
 # upstream via `bash .agent-config/bootstrap.sh <user>/<repo>` or the
@@ -317,7 +334,16 @@ fi
 # one. Without this, a consumer that initially fetched an older bootstrap.sh
 # stays on that version forever; future bootstrap improvements added upstream
 # would never reach them automatically.
+#
+# v0.5.2 cross-OS fix: copy BOTH bootstrap.sh AND bootstrap.ps1. Previously
+# the .sh entry only refreshed itself, so a Windows user running this bash
+# entry on Git Bash / WSL would never land bootstrap.ps1 at all. Symmetric
+# in bootstrap.ps1 (copies both). Cheap and covers cross-OS dev workflows.
 if [ -f .agent-config/repo/bootstrap/bootstrap.sh ]; then
   cp -f .agent-config/repo/bootstrap/bootstrap.sh .agent-config/bootstrap.sh || \
     printf '%s\n' 'warning: could not self-update .agent-config/bootstrap.sh' >&2
+fi
+if [ -f .agent-config/repo/bootstrap/bootstrap.ps1 ]; then
+  cp -f .agent-config/repo/bootstrap/bootstrap.ps1 .agent-config/bootstrap.ps1 || \
+    printf '%s\n' 'warning: could not copy .agent-config/bootstrap.ps1' >&2
 fi

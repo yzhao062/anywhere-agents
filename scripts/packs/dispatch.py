@@ -77,6 +77,14 @@ class DispatchContext:
     # from "empty default".
     pack_hosts: list[str] | None = None
 
+    # v0.5.2: optional head + fetched timestamp recorded after a fresh
+    # fetch. ``latest_known_head`` equals ``pack_resolved_commit`` at
+    # write time (banner item 7's update detector compares the two);
+    # ``pack verify`` updates ``latest_known_head`` later when ``git
+    # ls-remote`` shows upstream movement. ``None`` for bundled packs.
+    pack_latest_known_head: str | None = None
+    pack_fetched_at: str | None = None
+
     # Handler outputs: per-pack file entries collected as handlers run,
     # then copied into pack_lock.packs[pack_name].files after all active
     # entries for this pack have been dispatched.
@@ -108,16 +116,28 @@ class DispatchContext:
         if not self._file_entries:
             return
         packs = self.pack_lock.setdefault("packs", {})
-        pack_entry = packs.setdefault(
-            self.pack_name,
-            {
-                "source_url": self.pack_source_url,
-                "requested_ref": self.pack_requested_ref,
-                "resolved_commit": self.pack_resolved_commit,
-                "pack_update_policy": self.pack_update_policy,
-                "files": [],
-            },
-        )
+        default_entry: dict[str, Any] = {
+            "source_url": self.pack_source_url,
+            "requested_ref": self.pack_requested_ref,
+            "resolved_commit": self.pack_resolved_commit,
+            "pack_update_policy": self.pack_update_policy,
+            "files": [],
+        }
+        # v0.5.2: thread the optional head/fetched_at fields so the lock
+        # records what we just fetched. Composer sets both at fetch time
+        # (head equals resolved_commit because we just hit the remote).
+        if self.pack_latest_known_head is not None:
+            default_entry["latest_known_head"] = self.pack_latest_known_head
+        if self.pack_fetched_at is not None:
+            default_entry["fetched_at"] = self.pack_fetched_at
+        pack_entry = packs.setdefault(self.pack_name, default_entry)
+        # When the entry already existed (a previous active/passive call
+        # set it up), refresh the optional fields so the latest fetch
+        # reflects in the lock even if dispatch ran in two passes.
+        if self.pack_latest_known_head is not None:
+            pack_entry["latest_known_head"] = self.pack_latest_known_head
+        if self.pack_fetched_at is not None:
+            pack_entry["fetched_at"] = self.pack_fetched_at
         pack_entry["files"].extend(self._file_entries)
         self._file_entries.clear()
 

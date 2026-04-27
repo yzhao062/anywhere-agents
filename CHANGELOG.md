@@ -11,6 +11,40 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.5.2] — 2026-04-27
+
+### Highlights
+
+- **One-shot pack lifecycle.** v0.5.1's nine-command pack-deploy dance collapses into one invocation per command. `anywhere-agents pack add <url>` now writes user-level config, project-level `agent-config.yaml`, and runs the composer subprocess in a single shot, replacing the v0.5.1 split where `pack add` only registered. `pack verify --fix` similarly reconciles user ↔ project configs bidirectionally and invokes the composer; `pack remove <name>` deletes from both configs and runs the new single-pack composer uninstall mode. Identity rules apply at every layer: same `(name, normalized_url, ref)` is idempotent; same `name` with different identity returns rc=1 with no writes.
+- **AC→AA migration on `anywhere-agents` (no subcommand).** When the cwd has a legacy `agent-config` bootstrap state — `.agent-config/repo/.git/config` pointing at `yzhao062/agent-config` OR `.agent-config/upstream` containing `yzhao062/agent-config` — the CLI silently wipes the cached repo + bootstrap files and re-clones from anywhere-agents. Removes the v0.5.1 silent no-op where the existing-dir check skipped re-clone and the AA composer never landed.
+- **Cross-OS bootstrap entries.** Both `bootstrap/bootstrap.sh` and `bootstrap/bootstrap.ps1` now copy each other from the sparse clone after the clone completes. A Windows user running Git Bash / WSL on a project bootstrapped from PowerShell no longer hits "No such file or directory" on `.agent-config/bootstrap.sh`, and vice versa.
+- **Banner item 7 reports pack updates.** Session start banner item 7 now shows both `gap_count` (user-level packs not deployed in project) and `update_count` (packs whose remote HEAD has moved past `resolved_commit`). The composer records `latest_known_head = resolved_commit` at fetch time; `pack verify` runs `git ls-remote --exit-code` opportunistically (5s per-pack timeout, mutable refs only — 40-char SHAs skip the network call) and lock-bracket-merges the resolved head into `.agent-config/pack-lock.json`.
+
+### Added
+
+- **`scripts/packs/transaction.py` drift gate.** `Transaction.commit()` accepts an `expected_prestate` map keyed by absolute target path; each value is a `(category, recorded_sha256)` tuple. Five categories: pack outputs (recorded sha256 must match current), internal state files / composer-owned core / declared JSON merge targets (stage-time hash must equal commit-time hash — optimistic concurrency), and unmanaged (existing file → reject as collision; absent → allow). The composer builds the map after every staged write, before commit. Mismatches raise `DriftAbort` with a per-path reason; the staging dir is rolled back so no on-disk target is mutated. Empty `expected_prestate` (the v0.4.0/v0.5.0 default) preserves the previous behavior unchanged.
+- **`scripts/packs/uninstall.py:run_uninstall_pack(name)`.** Single-pack uninstall path used by `pack remove`. Filters user-state owners by composite key `(repo_id, pack)` so two repos installing the same pack name from different upstreams don't decrement each other; computes remaining-output-claims from other lock entries before deleting shared outputs; preserves drift-safe retry semantics (any owned output whose hash drifted leaves the pack's lock + state ownership records intact). File-like user-level outputs follow the empty-owners-AND-hash-match delete rule; active-permission entries only prune state-side owner records and never touch `~/.claude/settings.json` (JSON unmerge stays out of v0.5.2 scope).
+- **Lock schema fields `latest_known_head` + `fetched_at`.** Both optional. Composer populates them at fetch time (head equals `resolved_commit` because the fetch just happened); `pack verify` updates `latest_known_head` later. Old locks without these fields parse cleanly and contribute zero to `update_count`.
+- **`compose_packs.py uninstall <name>` mode.** New subcommand on the composer subprocess that drives `run_uninstall_pack`. Used by `pack remove`. Composer self-locks; the CLI does not hold outer locks across the subprocess invocation.
+
+### Changed
+
+- **`pack add` behavior split**. Outside a bootstrapped project (no `.agent-config/repo/scripts/compose_packs.py` and no bootstrap scripts in `.agent-config/`) the CLI registers user-level only and prints `ℹ Registered globally. Run anywhere-agents in a bootstrapped project to deploy.` In-project the CLI also writes `agent-config.yaml` and invokes the composer.
+- **`pack verify --fix` is now bidirectional.** User-only rows write to `agent-config.yaml`; project-only rows write to user-level config; mismatch rows return rc=1 with no writes. Bundled-default packs (`agent-style`, `aa-core-skills`) are excluded from reconcile to avoid churn since the composer always materializes them via `DEFAULT_V2_SELECTIONS`. After config writes, the composer subprocess runs.
+- **`pack remove` is cascade delete.** Now removes from user-level config + project `rule_packs:` + invokes composer's uninstall mode for the single pack. v0.5.1's user-level-only behavior is gone. Not-found (in any of user / project / lock) now returns rc=1 instead of rc=0.
+- **`pack verify` writes the lock.** Round-tripping `git ls-remote` results into `pack-lock.json` is the only side effect; the audit logic itself is unchanged. Network failures and timeouts skip per-pack so an offline `pack verify` still classifies the local state cleanly.
+
+### Internals
+
+- **DispatchContext gains `pack_latest_known_head` + `pack_fetched_at`.** Both default to `None`; composer populates them when threading inline-source archives. `finalize_pack_lock` writes the optional fields into the per-pack lock entry.
+- **Five-category drift-gate classification in `_do_compose_v2`.** Pack outputs (from prior `pack-state.json`), internal state files (`pack-lock.json`, `pack-state.json`, user-level `pack-state.json`), composer-owned core (`AGENTS.md`), declared JSON merge targets (user-level `settings.json` from `active-permission` entries), and unmanaged. The fifth category prevents the permission handler's full-file rewrite of an existing `settings.json` from being rejected as an unmanaged collision.
+- **CLI banner item 7 update path.** `_pack_verify` snapshots the lock before issuing `git ls-remote`, then takes the repo lock, re-reads, and merges per-entry by `(source_url, requested_ref, resolved_commit)` identity tuple. Concurrent composer / pack add writes between snapshot and merge cause that result to be skipped — no overwrite of a moved `resolved_commit`.
+
+### Migration
+
+- v0.5.1 users who scripted `pack add` then `pack verify --fix` then `bootstrap.sh` see redundant work but no failure. The new one-shot `pack add` does it all in one invocation; the legacy three-step recipe still works.
+- A composer drift-abort after CLI's config writes have landed leaves a "registered but not deployed" intermediate state. Recovery: back up local edits to managed files, then rerun `pack add` (idempotent on configs) or `pack verify --fix`. Cross-command atomicity (true WAL-style commit-or-fail-together) is deferred to v0.5.3+.
+
 ## [0.5.1] — 2026-04-27
 
 ### Added

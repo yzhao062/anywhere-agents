@@ -57,7 +57,7 @@ A **pack** is a small bundle (a rule set, a skill, or a permission policy) that 
 
 `bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
 
-`update_policy` defaults to `prompt`: every bootstrap surfaces upstream drift and asks before applying. `update_policy: locked` opts a pack out for content that must never auto-refresh. The `anywhere-agents pack add | remove | list` CLI writes a forward-compat user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`; consuming those rows in bootstrap selection assembly is staged for v0.5.x.
+`update_policy` defaults to `prompt`: every bootstrap surfaces upstream drift and asks before applying. `update_policy: locked` opts a pack out for content that must never auto-refresh. The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`. As of v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command.
 
 `bootstrap` is the sync step. Re-run it on any machine or repo, and `bootstrap` reproduces the shipped defaults plus the bootstrap-active project-level selections.
 
@@ -148,13 +148,30 @@ The guard covers `git push`, `git commit`, `git merge`, `git rebase`, `git reset
 > [!TIP]
 > The simplest install is to tell your AI agent: _"Install anywhere-agents in this project."_ It will pick the right command from PyPI or npm.
 
-```bash
-# Python (zero-install with pipx)
-pipx run anywhere-agents
+**Recommended:**
 
-# Node.js (zero-install with Node 14+)
-npx anywhere-agents
+```bash
+# One-time per machine:
+pipx install anywhere-agents     # or: uv tool install anywhere-agents
+
+# Per-project (run in any repo):
+anywhere-agents                          # bootstrap shared config + hooks + settings
+anywhere-agents pack add <pack-repo-url>  # add a pack (one-shot: fetch, install, deploy)
 ```
+
+**Choosing an install path:**
+
+| Path | Best for |
+|------|----------|
+| `pipx install anywhere-agents` | **Daily use, full CLI** (bootstrap + pack mgmt) |
+| `pipx run anywhere-agents` | One-shot zero-install bootstrap (e.g. CI, trying it out) |
+| `npx anywhere-agents` | One-shot zero-install bootstrap, Node-native |
+| `npm install -g anywhere-agents` | Persistent bootstrap, Node-first machines |
+| Raw `curl` / `Invoke-WebRequest` | No package manager available (see collapsed block below) |
+
+All paths run `bootstrap`. For `pack add | remove | verify | list | update`, install the Python CLI via `pipx install anywhere-agents`. The npm package is bootstrap-only; if you need pack commands, install the Python CLI separately on the same machine.
+
+**Why `pipx` and not plain `pip install`?** `anywhere-agents` is a CLI tool with its own dependencies. Plain `pip install` either lands in the active venv (per-project, not per-machine) or hits PEP 668 / `externally-managed-environment` errors on modern Ubuntu / Debian / Homebrew Python. `pipx` gives each CLI tool its own isolated venv and exposes the binary on PATH globally; it is clean to upgrade, clean to remove, and avoids dependency conflicts. It is the [PyPA-recommended approach](https://packaging.python.org/en/latest/guides/installing-stand-alone-command-line-tools/) for Python CLI applications.
 
 ### How to Update
 
@@ -203,7 +220,7 @@ Source: [PyPI](https://pypi.org/project/anywhere-agents/) · [npm](https://www.n
 
 ## Pack Management CLI
 
-Install the `anywhere-agents` CLI (via `pipx install anywhere-agents` or `pip install`) to manage packs without editing per-project YAML.
+Install the `anywhere-agents` CLI (via `pipx install anywhere-agents`) to manage packs without editing per-project YAML.
 
 ![anywhere-agents pack CLI demo: list (empty), add with --ref, list again, remove, list again](docs/pack-cli-demo.gif)
 
@@ -220,22 +237,26 @@ anywhere-agents uninstall --all             # clean everything from the current 
 
 ### Audit Pack Deployment
 
-After `pack add` writes to user-level config, the project still needs `rule_packs:` in `agent-config.yaml` for the bootstrap composer to pick up the pack. Use `pack verify` to confirm everything is wired:
+`pack add` is one-shot in v0.5.2: it writes user-level config rows and runs the composer to deploy into the current project in a single command. Use `pack verify` to audit existing state or reconcile drift across machines:
 
 ```bash
-anywhere-agents pack verify              # read-only audit
-anywhere-agents pack verify --fix --yes  # write missing rule_packs entries
-bash .agent-config/bootstrap.sh          # actually deploy
+anywhere-agents pack verify              # read-only audit (user, project, lock)
+anywhere-agents pack verify --fix --yes  # write missing project rows + run the composer
 ```
 
-**Migrating from a project that bootstrapped from `agent-config`?** Switch upstream once with the bootstrap argv override:
+`verify --fix` in v0.5.2 collapses the previous "write rows + re-run bootstrap" two-step into a single command.
+
+**Migrating from a project that bootstrapped from `agent-config`?** As of v0.5.2, just run `anywhere-agents` (or `bash .agent-config/bootstrap.sh` directly). The CLI auto-detects the legacy `yzhao062/agent-config` upstream from `.agent-config/upstream` or the cached `.git/config`, deletes the legacy cache, and bootstraps from anywhere-agents. The detection lives in both the Python CLI and the raw shell scripts, so any entry path triggers the migration once.
+
+Then bring back the User Profile, paper workflow, and 3 academic skills (`bibref-filler`, `dual-pass-workflow`, `figure-prompt-builder`) that previously lived in `agent-config` by adding [`agent-pack`](https://github.com/yzhao062/agent-pack):
 
 ```bash
-# bootstrap persists the new upstream to .agent-config/upstream
-bash .agent-config/bootstrap.sh yzhao062/anywhere-agents
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
 ```
 
-Then register `agent-pack` in your project's `agent-config.yaml` to bring back the User Profile, paper workflow, and 3 academic skills (`bibref-filler`, `dual-pass-workflow`, `figure-prompt-builder`) that lived in `agent-config`:
+This expands to three user-level rows (`profile`, `paper-workflow`, `acad-skills`) and deploys all three in a single command.
+
+For projects that prefer to declare packs in `agent-config.yaml` instead of using `pack add`:
 
 ```yaml
 rule_packs:
@@ -247,15 +268,15 @@ rule_packs:
     source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
 ```
 
-The next `bootstrap` applies them. See [`MIGRATIONS.md`](MIGRATIONS.md) for the bootstrap-cache seed-refresh that runs once on first v0.5.0 use. If `pack add` did not seem to take effect after `bootstrap.sh`, run `anywhere-agents pack verify` to see the deployment state at a glance and `--fix` to write the missing `rule_packs:` entries.
+The next `bootstrap` applies them, or run `anywhere-agents pack verify --fix` to deploy immediately.
 
 For the rule-pack composition contract that backs project-level `rule_packs:`, including cache, offline behavior, and failure modes, see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
 
 ## What's Next
 
-`v0.5.0` ships direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback), the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.x` wires user-level `packs:` rows into bootstrap selection assembly so `pack add | remove | list` drives bootstrap end-to-end without project-level YAML edits. `v0.6.0` lands the end-to-end command-log harness for tighter CI token-leak coverage; v0.5.0 ships the redaction primitives and unit assertions that already cover the auth-chain primitive. Shipped-status details live in the [changelog](CHANGELOG.md).
+`v0.5.0` shipped direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback), the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.2` ships end-to-end pack management: `pack add` is one-shot install (writes user-level rows, runs composer, deploys), `pack verify --fix` reconciles drift in a single command, and the AC→AA migration is automatic. `v0.6.0` lands the end-to-end command-log harness for tighter CI token-leak coverage; v0.5.0 ships the redaction primitives and unit assertions that already cover the auth-chain primitive. Shipped-status details live in the [changelog](CHANGELOG.md).
 
-The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the canonical blueprint for any pack you author: profile, paper workflow conventions, team conventions, custom skills, anything you want to share across projects. The v2 manifest schema lives there in working form. Fork ap, replace its three packs (`profile`, `paper-workflow`, `acad-skills`) with your content, tag a release, then `anywhere-agents pack add https://github.com/<you>/<your-pack> --ref <tag>`. To make bootstrap apply your pack today, register it under `rule_packs:` in `agent-config.yaml`; the user-level path becomes bootstrap-active in v0.5.x.
+The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the canonical blueprint for any pack you author: profile, paper workflow conventions, team conventions, custom skills, anything you want to share across projects. The v2 manifest schema lives there in working form. Fork ap, replace its three packs (`profile`, `paper-workflow`, `acad-skills`) with your content, tag a release, then `anywhere-agents pack add https://github.com/<you>/<your-pack> --ref <tag>`. As of v0.5.2 this is one-shot: the CLI writes user-level config rows and runs the composer to deploy in a single command.
 
 ## Deeper Docs
 

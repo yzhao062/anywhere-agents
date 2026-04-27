@@ -123,6 +123,71 @@ class TransactionError(RuntimeError):
     errors that caused them."""
 
 
+# v0.5.2 drift gate categories. The composer classifies every staged
+# write target into one of these before calling :meth:`Transaction.commit`
+# so the pre-commit validation pass knows which validation rule applies.
+# See PLAN-aa-v0.5.2.md § "Write-path drift gate" for the full contract.
+PRESTATE_PACK_OUTPUT = "pack-output"
+"""Tracked pack output recorded in a prior pack-state.json. The recorded
+sha256 must match the current on-disk content; mismatch is hand-edit drift."""
+
+PRESTATE_INTERNAL_STATE = "internal-state"
+"""Internal state file (pack-lock.json, pack-state.json, user-level
+pack-state.json). The current on-disk hash captured at stage time must
+still match at commit time (optimistic concurrency for concurrent writers)."""
+
+PRESTATE_CORE_OUTPUT = "core-output"
+"""Composer-owned core output (e.g., AGENTS.md). Same optimistic-concurrency
+rule as ``internal-state``: stage-time hash must equal commit-time hash."""
+
+PRESTATE_JSON_MERGE = "json-merge"
+"""Declared JSON merge target for active-permission entries (typically
+~/.claude/settings.json). Same optimistic-concurrency rule as core-output.
+Without this category the permission handler's full-file rewrite of an
+existing settings.json would be rejected as an unmanaged collision."""
+
+PRESTATE_UNMANAGED = "unmanaged"
+"""Anything not classified above. If the path exists on disk, abort as
+an unmanaged collision; if absent, allow the write to proceed."""
+
+# Valid category strings. Used by the drift-gate validator to reject
+# typos in the composer's ``expected_prestate`` map.
+_VALID_PRESTATE_CATEGORIES = frozenset(
+    {
+        PRESTATE_PACK_OUTPUT,
+        PRESTATE_INTERNAL_STATE,
+        PRESTATE_CORE_OUTPUT,
+        PRESTATE_JSON_MERGE,
+        PRESTATE_UNMANAGED,
+    }
+)
+
+
+class DriftAbort(TransactionError):
+    """Raised by :meth:`Transaction.commit` when the pre-commit drift gate
+    rejects at least one staged write.
+
+    Carries the per-path category + reason so the composer can surface a
+    consumer-facing message that distinguishes managed-file drift (recorded
+    sha256 differs from current), optimistic-concurrency loss (stage-time
+    sha256 differs from commit-time sha256), and unmanaged-path collision
+    (a non-pack file already lives at a path the composer planned to
+    write). All three are recoverable: the user fixes the issue and reruns
+    the original command. No on-disk target has been modified at this
+    point — the staging dir contains the would-be commits.
+    """
+
+    def __init__(self, drift_paths: list[tuple[str, str, str]]) -> None:
+        self.drift_paths = list(drift_paths)
+        summary = "; ".join(
+            f"{path} ({category}: {reason})"
+            for path, category, reason in drift_paths
+        )
+        super().__init__(
+            f"drift gate rejected {len(drift_paths)} staged write(s): {summary}"
+        )
+
+
 class Transaction:
     """Staged recoverable transaction for a batch of pack lifecycle writes.
 
@@ -147,6 +212,13 @@ class Transaction:
         self.journal_path = staging_dir / JOURNAL_NAME
         self.ops: list[dict[str, Any]] = []
         self._committed = False
+        # v0.5.2 drift gate. The composer populates this map via
+        # :meth:`set_expected_prestate` (or directly) before calling
+        # :meth:`commit`. Keys are absolute target paths; values are
+        # ``(category, recorded_sha256_or_None)`` tuples. Empty dict (the
+        # default) disables the gate so callers that don't supply it
+        # see v0.4.0/v0.5.0 behavior.
+        self.expected_prestate: dict[str, tuple[str, str | None]] = {}
 
     # ------------------------------------------------------------------
     # Context management
@@ -233,8 +305,159 @@ class Transaction:
     # Commit / rollback
     # ------------------------------------------------------------------
 
+    def set_expected_prestate(
+        self, expected_prestate: dict[str, tuple[str, str | None]]
+    ) -> None:
+        """Install the v0.5.2 drift-gate classification map.
+
+        Keys are absolute target paths (matched after string-coercing
+        each op's ``target_path``); values are ``(category, recorded_sha256)``
+        pairs. ``recorded_sha256`` is meaningful only for
+        ``PRESTATE_PACK_OUTPUT`` (the prior recorded hash from
+        ``pack-state.json``); for ``PRESTATE_INTERNAL_STATE``,
+        ``PRESTATE_CORE_OUTPUT`` and ``PRESTATE_JSON_MERGE`` the validator
+        compares the stage-time hash captured by ``stage_write`` /
+        ``stage_restamp`` against the commit-time hash, so callers may pass
+        ``None``.
+
+        Raises ``TransactionError`` on unknown categories so a typo in the
+        composer's classification map fails fast rather than silently
+        downgrading to ``unmanaged`` and rejecting a normal install.
+        """
+        for path, value in expected_prestate.items():
+            if not (isinstance(value, tuple) and len(value) == 2):
+                raise TransactionError(
+                    f"expected_prestate[{path!r}] must be a (category, sha256) tuple"
+                )
+            category, _ = value
+            if category not in _VALID_PRESTATE_CATEGORIES:
+                raise TransactionError(
+                    f"expected_prestate[{path!r}] unknown category {category!r}; "
+                    f"expected one of {sorted(_VALID_PRESTATE_CATEGORIES)}"
+                )
+        self.expected_prestate = dict(expected_prestate)
+
+    def _validate_prestate(self) -> list[tuple[str, str, str]]:
+        """Pre-commit drift-gate pass.
+
+        Walks every queued op and applies the validation rule for its
+        classified category. Returns a list of ``(target_path, category,
+        reason)`` tuples for every staged write that fails its rule. An
+        empty list means commit may proceed.
+
+        Validation rules per PLAN-aa-v0.5.2.md § "Write-path drift gate":
+
+        - ``PRESTATE_PACK_OUTPUT``: recorded sha256 (from prior
+          pack-state.json) must equal the current on-disk hash; mismatch
+          is hand-edit drift on a tracked pack output.
+        - ``PRESTATE_INTERNAL_STATE`` / ``PRESTATE_CORE_OUTPUT`` /
+          ``PRESTATE_JSON_MERGE``: stage-time hash captured by
+          ``stage_write`` (op["pre_state_sha256"]) must equal current
+          on-disk hash. This is optimistic-concurrency: a concurrent
+          writer that mutated the file between stage_write and commit
+          loses.
+        - ``PRESTATE_UNMANAGED``: present-on-disk → unmanaged collision
+          (refuse to clobber); absent → allow.
+        - No classification → behave as ``PRESTATE_UNMANAGED`` (fail-safe).
+
+        Delete and restamp ops are validated against ``target_path`` /
+        ``new_path`` respectively; restamp's ``old_path`` is treated as
+        a delete (no validation needed beyond the existing journal
+        pre-state hash).
+        """
+        drift: list[tuple[str, str, str]] = []
+        for op in self.ops:
+            kind = op["op"]
+            if kind == OP_WRITE:
+                target_str = op["target_path"]
+                staged_pre = op.get("pre_state_sha256")
+            elif kind == OP_RESTAMP:
+                target_str = op["new_path"]
+                staged_pre = op.get("pre_state_new_sha256")
+            elif kind == OP_DELETE:
+                # Deletes do not write new content; the existing
+                # uninstall.py drift check already validates pre-state
+                # before we get here. Skip the gate for deletes.
+                continue
+            else:
+                continue
+            target_path = Path(target_str)
+            classification = self.expected_prestate.get(target_str)
+            if classification is None:
+                category = PRESTATE_UNMANAGED
+                recorded = None
+            else:
+                category, recorded = classification
+            current = _sha256_of_path(target_path)
+            if category == PRESTATE_PACK_OUTPUT:
+                # recorded is from pack-state.json; current must match.
+                if recorded is None:
+                    # Tracked pack output without a recorded hash = first
+                    # install of that path; treat as absent target (allow).
+                    if current is not None:
+                        drift.append(
+                            (
+                                target_str,
+                                category,
+                                "tracked output marked first-install but "
+                                "file already exists on disk",
+                            )
+                        )
+                    continue
+                if current is None:
+                    # Tracked output but missing on disk: re-install case;
+                    # allow (the transaction will recreate it).
+                    continue
+                if current != recorded:
+                    drift.append(
+                        (
+                            target_str,
+                            category,
+                            "tracked pack output content drifted from "
+                            "recorded sha256 (hand-edited)",
+                        )
+                    )
+            elif category in (
+                PRESTATE_INTERNAL_STATE,
+                PRESTATE_CORE_OUTPUT,
+                PRESTATE_JSON_MERGE,
+            ):
+                # Optimistic concurrency: stage-time hash must equal
+                # commit-time hash. Both being None (file absent both at
+                # stage and commit) is acceptable.
+                if staged_pre != current:
+                    drift.append(
+                        (
+                            target_str,
+                            category,
+                            "concurrent writer modified target between "
+                            "stage and commit",
+                        )
+                    )
+            else:
+                # PRESTATE_UNMANAGED. If the file already exists, refuse
+                # to clobber.
+                if current is not None:
+                    drift.append(
+                        (
+                            target_str,
+                            category,
+                            "unmanaged file already exists at target path",
+                        )
+                    )
+        return drift
+
     def commit(self) -> None:
         """Apply all queued ops in order with per-file atomic rename.
+
+        v0.5.2 adds a pre-commit drift-gate pass when
+        ``expected_prestate`` has been populated by the caller. The gate
+        runs before any disk mutation: if any staged write violates its
+        category's validation rule, raises :class:`DriftAbort` carrying
+        the offending paths, calls ``rollback()`` to clean staging, and
+        leaves on-disk targets untouched. Empty ``expected_prestate``
+        (the default) skips the gate so v0.4.0/v0.5.0 callers see
+        unchanged behavior.
 
         On success, deletes the journal and staging directory. If a
         rename fails partway, raises ``TransactionError``; the partially
@@ -245,6 +468,15 @@ class Transaction:
             raise TransactionError(
                 f"transaction {self.txn_id} already committed"
             )
+        # v0.5.2: drift-gate pre-commit validation. Skipped when
+        # ``expected_prestate`` is empty (v0.4.0/v0.5.0 callers).
+        if self.expected_prestate:
+            drift = self._validate_prestate()
+            if drift:
+                # Roll back the staging dir before raising so the caller's
+                # __exit__ doesn't re-rollback an already-cleaned dir.
+                self._cleanup()
+                raise DriftAbort(drift)
         for idx, op in enumerate(self.ops):
             try:
                 self._apply_op(op)

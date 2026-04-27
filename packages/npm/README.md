@@ -2,7 +2,7 @@
 
 Install the [**anywhere-agents**](https://github.com/yzhao062/anywhere-agents) AI agent config into any project, in one command.
 
-Zero-install (recommended):
+Zero-install (recommended for one-shot bootstrap):
 
 ```bash
 npx anywhere-agents
@@ -14,6 +14,8 @@ Or install once, reuse:
 npm install -g anywhere-agents
 anywhere-agents
 ```
+
+> **Pack management requires the Python CLI.** This npm package covers `bootstrap` only. For `anywhere-agents pack add | remove | verify | list | update` and `anywhere-agents uninstall`, install the Python CLI: `pipx install anywhere-agents` from [PyPI](https://pypi.org/project/anywhere-agents/). For full feature coverage (bootstrap + pack management) on a single install, prefer `pipx install anywhere-agents` over npm.
 
 ## What it does
 

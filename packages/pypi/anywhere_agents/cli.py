@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,80 @@ def choose_script() -> tuple[str, list[str]]:
     return "bootstrap.sh", [bash]
 
 
+def _detect_legacy_ac() -> bool:
+    """Detect a legacy ``agent-config`` (AC) bootstrap state.
+
+    Returns True when **either** signal is present:
+
+    1. ``.agent-config/repo/.git/config`` has a ``[remote "origin"]``
+       URL matching ``yzhao062/agent-config(\\.git)?$``.
+    2. ``.agent-config/upstream`` content (whitespace + CR stripped)
+       equals ``yzhao062/agent-config``.
+
+    Either signal → legacy AC; ``anywhere-agents`` should auto-migrate
+    rather than the no-op path that v0.5.1 took.
+
+    Both unreadable / unrecognized → returns False (fall through to
+    the existing AA bootstrap path).
+    """
+    cwd = Path.cwd()
+    upstream_file = cwd / ".agent-config" / "upstream"
+    if upstream_file.exists():
+        try:
+            content = upstream_file.read_text(encoding="utf-8")
+            stripped = content.replace("\r", "").strip()
+            if stripped == "yzhao062/agent-config":
+                return True
+        except OSError:
+            pass
+    git_config = cwd / ".agent-config" / "repo" / ".git" / "config"
+    if git_config.exists():
+        try:
+            text = git_config.read_text(encoding="utf-8", errors="replace")
+            # Scan only lines under the [remote "origin"] section so a
+            # repo with origin = fork.git and a separate `upstream` remote
+            # pointing at agent-config is NOT classified as legacy AC.
+            import re
+            in_origin = False
+            origin_re = re.compile(r'^\s*\[\s*remote\s+"origin"\s*\]\s*$', flags=re.IGNORECASE)
+            other_section_re = re.compile(r'^\s*\[')
+            url_re = re.compile(r'^\s*url\s*=\s*(\S+)', flags=re.IGNORECASE)
+            ac_re = re.compile(r'(^|[:/])yzhao062/agent-config(\.git)?/?$', flags=re.IGNORECASE)
+            for line in text.splitlines():
+                if origin_re.match(line):
+                    in_origin = True
+                    continue
+                if in_origin and other_section_re.match(line):
+                    in_origin = False
+                    continue
+                if in_origin:
+                    m = url_re.match(line)
+                    if m and ac_re.search(m.group(1)):
+                        return True
+        except OSError:
+            pass
+    return False
+
+
+def _migrate_legacy_ac() -> None:
+    """Cross-platform delete of legacy AC bootstrap artifacts.
+
+    Removes ``.agent-config/repo``, ``.agent-config/upstream``, and
+    both bootstrap scripts in ``.agent-config/`` so the subsequent AA
+    bootstrap re-clones from anywhere-agents.
+    """
+    import contextlib
+    cwd = Path.cwd()
+    for rel in ("repo",):
+        target = cwd / ".agent-config" / rel
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=False)
+    for rel in ("upstream", "bootstrap.sh", "bootstrap.ps1"):
+        target = cwd / ".agent-config" / rel
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(target)
+
+
 def _bootstrap_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="anywhere-agents",
@@ -122,6 +197,19 @@ def _bootstrap_main(argv: list[str]) -> int:
         log(f"Would write: {out_path}")
         log(f"Would run:   {' '.join(interpreter_argv + [str(out_path)])}")
         return 0
+
+    # v0.5.2: legacy AC detection. If the project was bootstrapped from
+    # ``yzhao062/agent-config`` (the old upstream), wipe the cached repo
+    # and bootstrap files so the AA bootstrap below re-clones from
+    # ``yzhao062/anywhere-agents``.
+    if _detect_legacy_ac():
+        log("ℹ Migrating from agent-config bootstrap to anywhere-agents...")
+        try:
+            _migrate_legacy_ac()
+        except OSError as exc:
+            log(f"error: legacy AC delete failed: {exc}")
+            return 2
+        log("✓ Migration complete; proceeding with AA bootstrap.")
 
     config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -220,7 +308,7 @@ def _pack_main(path: Path | None, argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="action", required=True)
 
     p_add = sub.add_parser("add", help="Add a pack to user-level config")
-    p_add.add_argument("source", help="Pack source (GitHub URL or registered name)")
+    p_add.add_argument("source", help="Pack source (GitHub repository URL)")
     p_add.add_argument("--name", help="Override derived pack name (single-pack only)")
     p_add.add_argument("--ref", help="Pin to a specific ref (default: main)")
     p_add.add_argument(
@@ -401,16 +489,237 @@ def _write_user_config(path: Path, data: dict[str, Any]) -> None:
     _save_user_config(path, data)
 
 
-def _pack_add_v0_5(user_config_path: Path, args) -> int:
-    """Extended ``pack add``: fetches the remote pack.yaml, expands to
-    one user-level selection per remote pack (filtered by ``--pack`` and
-    ``--type``).
+def _is_in_project() -> bool:
+    """Return True when the cwd looks like a bootstrapped consumer project.
 
-    The remote manifest may declare multiple packs (e.g. ``profile`` +
-    ``paper-workflow`` + ``acad-skills`` in agent-pack). Each selected
-    pack becomes a row in the user-level config keyed by name. Missing
-    pack names print a warning to stderr and skip; ``--type rule``
-    excludes packs that declare an ``active:`` slot (passive-only filter).
+    Per PLAN-aa-v0.5.2.md § 1 step 2 the project signal is the presence
+    of the bootstrapped composer at
+    ``.agent-config/repo/scripts/compose_packs.py``. As a fallback, the
+    presence of either bootstrap script also counts (covers a stale
+    sparse clone where compose_packs.py is gated on a future sparse
+    pattern). ``agent-config.yaml`` is intentionally NOT a signal: a
+    consumer can declare packs in YAML without ever bootstrapping, and
+    we don't want to pretend they're in-project.
+    """
+    cwd = Path.cwd()
+    if (cwd / ".agent-config" / "repo" / "scripts" / "compose_packs.py").exists():
+        return True
+    if (cwd / ".agent-config" / "bootstrap.sh").exists():
+        return True
+    if (cwd / ".agent-config" / "bootstrap.ps1").exists():
+        return True
+    return False
+
+
+def _identity_tuple(entry: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(normalized_url, ref)`` for a user-config entry.
+
+    The composite tuple is the v0.5.2 identity key. Used by the same-name
+    detection pass: same name AND matching identity is idempotent;
+    matching name with different identity is rc=1.
+    """
+    from anywhere_agents.packs import source_fetch as _src
+    source = entry.get("source")
+    if isinstance(source, dict):
+        url = source.get("url") or source.get("repo") or ""
+        # Source-backed entries default to "main" when ref is omitted, so
+        # config rows authored without an explicit ref classify identical
+        # to the lock entry the composer writes (which also defaults to "main").
+        ref = source.get("ref") or entry.get("ref") or ("main" if url else "")
+    elif isinstance(source, str):
+        url = source
+        ref = entry.get("ref") or "main"
+    else:
+        url = ""
+        ref = entry.get("ref") or ""
+    return (_src.normalize_pack_source_url(url), ref)
+
+
+def _user_config_lock_path(user_config_path: Path) -> Path:
+    """Sibling lock file for user-config rewrites.
+
+    Used to serialize concurrent ``pack add`` / ``pack remove`` against
+    each other on the same machine. The composer also takes its own
+    user-level lock for state mutations (``~/.claude/pack-state.json``);
+    those two locks are independent so a config-only rewrite doesn't
+    block a composer in another project.
+    """
+    return user_config_path.with_name(user_config_path.name + ".lock")
+
+
+def _append_to_user_config(
+    user_config_path: Path,
+    selected_packs: list[tuple[str, dict]],
+    source_url: str,
+    requested_ref: str,
+) -> tuple[int, list[str]]:
+    """Append packs to user-level config with idempotent / mismatch rules.
+
+    Returns ``(rc, names)``. ``rc=0`` is success; ``rc=1`` is identity
+    mismatch (same name, different ``(url, ref)``). ``names`` lists the
+    pack names that were either appended or already present with
+    matching identity.
+
+    Caller is expected to hold the user-level config lock around this
+    call so a concurrent ``pack add`` cannot interleave between read
+    and write.
+    """
+    user_config = _load_or_create_user_config(user_config_path)
+    existing = user_config.get("packs", []) or []
+    existing_by_name: dict[str, dict] = {}
+    for entry in existing:
+        if isinstance(entry, dict) and "name" in entry:
+            existing_by_name[entry["name"]] = entry
+    incoming_identity = (
+        _identity_tuple({"source": {"url": source_url, "ref": requested_ref}})
+    )
+    new_entries: list[dict] = []
+    appended_or_idempotent: list[str] = []
+    for name, _pack_def in selected_packs:
+        new_row = {
+            "name": name,
+            "source": {"url": source_url, "ref": requested_ref},
+        }
+        if name in existing_by_name:
+            existing_identity = _identity_tuple(existing_by_name[name])
+            if existing_identity == incoming_identity:
+                # Idempotent: same identity already registered.
+                appended_or_idempotent.append(name)
+                continue
+            # Same name, different identity → rc=1, no writes.
+            log(
+                f"error: pack {name!r} already registered with different "
+                f"identity ({existing_identity[0]} @ {existing_identity[1]}); "
+                f"incoming ({incoming_identity[0]} @ {incoming_identity[1]}). "
+                "Use `pack remove` first if you intended to replace."
+            )
+            return 1, []
+        new_entries.append(new_row)
+        appended_or_idempotent.append(name)
+    if new_entries:
+        user_config.setdefault("packs", []).extend(new_entries)
+        _write_user_config(user_config_path, user_config)
+    return 0, appended_or_idempotent
+
+
+def _append_to_project_config(
+    project_yaml: Path,
+    selected_packs: list[tuple[str, dict]],
+    source_url: str,
+    requested_ref: str,
+) -> int:
+    """Append packs to ``agent-config.yaml`` ``rule_packs:`` list.
+
+    Same identity rules as ``_append_to_user_config``: matching name
+    with matching identity is idempotent; matching name with different
+    identity is rc=1. Creates the file as ``{rule_packs: [...]}`` when
+    missing.
+    """
+    try:
+        import yaml
+    except ImportError:
+        log("error: PyYAML is required (install: `pip install pyyaml`)")
+        return 2
+    if project_yaml.exists():
+        try:
+            text = project_yaml.read_text(encoding="utf-8")
+            data = yaml.safe_load(text) if text.strip() else {}
+        except Exception as exc:
+            log(f"error: {project_yaml} is not valid YAML ({exc}); refusing to overwrite")
+            return 2
+        if not isinstance(data, dict):
+            log(
+                f"error: {project_yaml}: top level must be a mapping; "
+                "refusing to overwrite."
+            )
+            return 2
+    else:
+        data = {}
+    existing = data.get("rule_packs") or []
+    if not isinstance(existing, list):
+        log(
+            f"error: {project_yaml}: 'rule_packs' must be a list; "
+            "refusing to overwrite."
+        )
+        return 2
+    existing_by_name: dict[str, dict] = {}
+    for entry in existing:
+        if isinstance(entry, dict) and "name" in entry:
+            existing_by_name[entry["name"]] = entry
+        elif isinstance(entry, str):
+            existing_by_name[entry] = {"name": entry}
+    incoming_identity = (
+        _identity_tuple({"source": {"url": source_url, "ref": requested_ref}})
+    )
+    new_entries = []
+    for name, _pack_def in selected_packs:
+        new_row = {
+            "name": name,
+            "source": {"url": source_url, "ref": requested_ref},
+        }
+        if name in existing_by_name:
+            existing_identity = _identity_tuple(existing_by_name[name])
+            if existing_identity == incoming_identity:
+                continue  # idempotent
+            log(
+                f"error: pack {name!r} already in {project_yaml.name} with "
+                f"different identity ({existing_identity[0]} @ "
+                f"{existing_identity[1]}); incoming ({incoming_identity[0]} "
+                f"@ {incoming_identity[1]}). Edit the file manually if you "
+                "intended to replace."
+            )
+            return 1
+        new_entries.append(new_row)
+    if not new_entries:
+        return 0
+    existing.extend(new_entries)
+    data["rule_packs"] = existing
+    out_text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+    project_yaml.parent.mkdir(parents=True, exist_ok=True)
+    tmp = project_yaml.with_name(project_yaml.name + ".tmp")
+    tmp.write_text(out_text, encoding="utf-8")
+    os.replace(str(tmp), str(project_yaml))
+    return 0
+
+
+def _invoke_composer(project_root: Path, *args: str) -> int:
+    """Subprocess invocation of ``.agent-config/repo/scripts/compose_packs.py``.
+
+    The composer self-locks (per-user + per-repo) so the CLI must NOT
+    hold any outer lock across this call. ``args`` are passed through
+    verbatim (e.g., ``"uninstall <name>"`` for the v0.5.2 single-pack
+    uninstall mode).
+    """
+    composer = project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+    if not composer.exists():
+        log(
+            f"error: composer not found at {composer}. Run bootstrap first."
+        )
+        return 2
+    cmd = [sys.executable, str(composer)] + list(args)
+    if not args:
+        cmd.extend(["--root", str(project_root)])
+    result = subprocess.run(cmd, cwd=str(project_root), check=False)
+    return result.returncode
+
+
+def _pack_add_v0_5(user_config_path: Path, args) -> int:
+    """``pack add <url>`` — one-shot install (v0.5.2).
+
+    Behavior split:
+
+    - **Outside a bootstrapped project**: append rows to user-level
+      config only; print a hint that the user must run ``anywhere-agents``
+      inside a project to deploy.
+    - **In a bootstrapped project**: append to user-level config,
+      append to project ``agent-config.yaml`` ``rule_packs:``, then
+      invoke the composer subprocess so the install lands on disk in
+      one shot.
+
+    Identity rules apply to both layers: same ``(name, normalized_url,
+    ref)`` is idempotent; same ``name`` with different identity is
+    rc=1. Composer drift-abort leaves config rows committed but no
+    on-disk install; recovery is to back up local edits and rerun.
     """
     # Credential-URL safety check first (no network).
     import re
@@ -449,13 +758,8 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
     remote_packs = remote_manifest.get("packs", [])
     packs_by_name = {p["name"]: p for p in remote_packs}
 
-    # Codex Round 2 M5: keep remote-lookup name and output name distinct.
-    # Pre-fix, ``selected_names = [args.name]`` overrode for single-pack
-    # manifests, but the remote lookup at the loop also keyed on
-    # ``args.name``, so when ``args.name != remote_pack["name"]`` the
-    # pack was reported missing and nothing was written. Use a list of
-    # ``(remote_name, output_name)`` pairs so the lookup uses the real
-    # remote name and the user-config row uses the override.
+    # Resolve --pack / --name / --type filters into the list of
+    # ``(output_name, pack_def)`` pairs to register.
     if args.pack:
         selected_pairs: list[tuple[str, str]] = [(name, name) for name in args.pack]
         if args.name:
@@ -474,9 +778,7 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
             )
         selected_pairs = [(p["name"], p["name"]) for p in remote_packs]
 
-    user_config_existed = user_config_path.exists()
-    user_config = _load_or_create_user_config(user_config_path)
-    written_names: list[str] = []
+    selected_packs: list[tuple[str, dict]] = []
     for remote_name, output_name in selected_pairs:
         pack = packs_by_name.get(remote_name)
         if pack is None:
@@ -486,31 +788,76 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
             )
             continue
         if args.type == "rule" and pack.get("active"):
-            # 'rule' filter excludes active packs (passive-only request).
             continue
-        user_config.setdefault("packs", []).append({
-            "name": output_name,
-            "source": {"url": args.source, "ref": args.ref or "main"},
-        })
-        written_names.append(output_name)
+        selected_packs.append((output_name, pack))
 
-    if not written_names and not user_config_existed:
-        # Filter excluded everything AND there was no pre-existing config —
-        # avoid creating an empty 'packs: []' file out of nothing.
+    if not selected_packs:
         log("warning: no packs matched the filter; nothing written")
         return 0
 
-    _write_user_config(user_config_path, user_config)
-    if written_names:
-        log(f"Added {len(written_names)} pack(s) to {user_config_path}: {', '.join(written_names)}")
+    requested_ref = args.ref or "main"
+
+    # Step 4a: take user-level config lock; idempotent append.
+    from anywhere_agents.packs import locks as locks_mod
+    user_lock = _user_config_lock_path(user_config_path)
+    user_config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with locks_mod.acquire(user_lock, timeout=30):
+            rc, written_names = _append_to_user_config(
+                user_config_path, selected_packs, args.source, requested_ref,
+            )
+    except locks_mod.LockTimeout as exc:
+        log(f"error: could not acquire user-config lock: {exc}")
+        return 10
+    if rc != 0:
+        return rc
+
+    in_project = _is_in_project()
+    if not in_project:
+        if written_names:
+            log(
+                f"Added {len(written_names)} pack(s) to {user_config_path}: "
+                f"{', '.join(written_names)}"
+            )
         log(
-            "note: this is user-level config only. To deploy in a project, "
-            "add matching `rule_packs:` entries to agent-config.yaml and run "
-            "`bash .agent-config/bootstrap.sh`. Run `anywhere-agents pack verify` "
-            "to audit the deployment state, or `pack verify --fix` to wire it up."
+            "ℹ Registered globally. Run `anywhere-agents` in a "
+            "bootstrapped project to deploy."
         )
-    else:
-        log("warning: no packs matched the filter; nothing written")
+        return 0
+
+    # Step 4b: in-project — atomic-write project agent-config.yaml.
+    project_root = Path.cwd().resolve()
+    project_yaml = project_root / "agent-config.yaml"
+    rc = _append_to_project_config(
+        project_yaml, selected_packs, args.source, requested_ref,
+    )
+    if rc != 0:
+        return rc
+
+    # Step 4c: invoke the composer subprocess. Composer self-locks.
+    rc = _invoke_composer(project_root)
+    if rc != 0:
+        log(
+            "error: pack add updated configs but composer failed "
+            f"(rc={rc}). Configs are persistent; back up local edits to "
+            "managed files and rerun `anywhere-agents pack add` (idempotent) "
+            "or `anywhere-agents pack verify --fix` to retry deploy."
+        )
+        return rc
+
+    summary_parts: list[str] = []
+    for name, pack_def in selected_packs:
+        n_rules = len(pack_def.get("passive", []) or [])
+        actives = pack_def.get("active", []) or []
+        n_skills = sum(1 for a in actives if a.get("kind") == "skill")
+        n_commands = sum(1 for a in actives if a.get("kind") == "command")
+        summary_parts.append(
+            f"{name} — {n_rules} rules, {n_skills} skills, {n_commands} commands"
+        )
+    log(
+        f"✓ Installed {len(selected_packs)} pack(s) from {args.source}:\n  "
+        + "\n  ".join(summary_parts)
+    )
     return 0
 
 
@@ -825,10 +1172,10 @@ def _identity_for_user_entry(entry):
     source = entry.get("source")
     if isinstance(source, dict):
         url = source.get("url") or source.get("repo") or ""
-        ref = source.get("ref") or entry.get("ref") or ""
+        ref = source.get("ref") or entry.get("ref") or ("main" if url else "")
     elif isinstance(source, str):
         url = source
-        ref = entry.get("ref") or ""
+        ref = entry.get("ref") or "main"
     else:
         if name in _DEFAULT_V2_SELECTIONS:
             return (
@@ -1310,27 +1657,182 @@ def _verify_gather(user_config_path, project_root):
     return rows, env_var_value
 
 
+def _looks_like_sha(ref: str) -> bool:
+    """Return True if ``ref`` is a 40-char hex SHA (immutable).
+
+    v0.5.2 banner item 7 + ``pack verify`` only run ``git ls-remote``
+    against mutable refs (branches, tags). A pinned 40-char SHA is
+    immutable so the network call is wasted.
+    """
+    if not isinstance(ref, str) or len(ref) != 40:
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in ref)
+
+
+def _ls_remote_head(url: str, ref: str, *, timeout: float = 5.0) -> str | None:
+    """Run ``git ls-remote --exit-code <url> <ref>`` with a hard timeout.
+
+    Returns the resolved 40-char SHA on success, or ``None`` on any
+    failure (network error, non-existent ref, timeout). The caller
+    silently skips packs that return ``None`` so an offline ``pack
+    verify`` still classifies the local state.
+    """
+    if _looks_like_sha(ref):
+        return None
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(
+            [git, "ls-remote", "--exit-code", url, ref],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # Output: "<sha>\t<refname>\n..." (possibly multiple matches; the
+    # first qualifying line wins).
+    for line in result.stdout.splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if _looks_like_sha(sha):
+            return sha
+    return None
+
+
+def _merge_latest_known_heads(
+    lock_path: Path,
+    snapshot_packs: dict[str, dict],
+    head_results: dict[str, str],
+) -> None:
+    """Lock-bracketed merge of ``latest_known_head`` into ``pack-lock.json``.
+
+    Matches each result by ``(source_url, requested_ref, resolved_commit)``
+    against the locked re-read of the lock so a concurrent composer
+    write between the snapshot read and the locked merge does not
+    overwrite the new ``resolved_commit``. Skipped (per-entry) when the
+    re-read shows the entry was modified or removed.
+    """
+    if not head_results:
+        return
+    try:
+        from anywhere_agents.packs import locks as locks_mod
+        from anywhere_agents.packs import state as state_mod
+    except ImportError:
+        return
+    repo_lock = locks_mod.repo_lock_path(lock_path.parent.parent)
+    try:
+        with locks_mod.acquire(repo_lock, timeout=5.0):
+            if not lock_path.exists():
+                return
+            try:
+                current = state_mod.load_pack_lock(lock_path)
+            except state_mod.StateError:
+                return
+            current_packs = current.get("packs", {}) or {}
+            mutated = False
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for name, head in head_results.items():
+                snap = snapshot_packs.get(name)
+                cur = current_packs.get(name)
+                if snap is None or cur is None:
+                    continue
+                # Identity tuple from snapshot must still match the
+                # locked re-read; if any field changed the entry was
+                # rewritten by a concurrent composer and we skip.
+                if (
+                    snap.get("source_url") != cur.get("source_url")
+                    or snap.get("requested_ref") != cur.get("requested_ref")
+                    or snap.get("resolved_commit") != cur.get("resolved_commit")
+                ):
+                    continue
+                if cur.get("latest_known_head") == head:
+                    continue
+                cur["latest_known_head"] = head
+                cur["fetched_at"] = now_iso
+                mutated = True
+            if mutated:
+                try:
+                    state_mod.save_pack_lock(lock_path, current)
+                except state_mod.StateError:
+                    return
+    except locks_mod.LockTimeout:
+        # Another composer / verify is running; skip the merge so we
+        # don't block the audit. Next ``pack verify`` will retry.
+        return
+
+
 def _pack_verify(user_config_path, project_root, args):
     """Read-only audit. Exit 0 when every identity is deployed (or
     nothing to check), 1 when any identity is in a non-deployed state,
     2 when a config or lock file is unparseable.
+
+    v0.5.2 also performs an opportunistic ``git ls-remote`` check
+    against every pack-lock entry whose ``requested_ref`` is mutable
+    (not a 40-char SHA), then lock-bracket-merges the resolved
+    ``latest_known_head`` into the lock so the session-start banner
+    can surface available updates.
     """
     try:
         rows, env_var_value = _verify_gather(user_config_path, project_root)
     except _VerifyParseError as exc:
         log(f"error: {exc}")
         return 2
+
+    # v0.5.2 step 3: per-lock-entry ls-remote with 5s timeout. Snapshot
+    # the lock contents BEFORE issuing the network calls so the
+    # locked-merge step can match by identity tuple if a concurrent
+    # composer rewrites between snapshot and merge.
+    lock_path = project_root / ".agent-config" / "pack-lock.json"
+    snapshot_packs: dict[str, dict] = {}
+    head_results: dict[str, str] = {}
+    update_count = 0
+    if lock_path.exists():
+        try:
+            import json
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            snapshot_packs = data.get("packs") or {}
+        except (OSError, json.JSONDecodeError):
+            snapshot_packs = {}
+        for name, body in snapshot_packs.items():
+            if not isinstance(body, dict):
+                continue
+            url = body.get("source_url", "")
+            ref = body.get("requested_ref", "")
+            resolved = body.get("resolved_commit", "")
+            if not url or not ref or url == "bundled:aa":
+                continue
+            if _looks_like_sha(ref):
+                continue
+            head = _ls_remote_head(url, ref)
+            if head is None:
+                continue
+            head_results[name] = head
+            if resolved and head != resolved:
+                update_count += 1
+
+    _merge_latest_known_heads(lock_path, snapshot_packs, head_results)
     _print_verify_table(rows, env_var_value)
 
     bad = [r for r in rows if r["state"] != _VERIFY_STATE_DEPLOYED]
+    if update_count > 0:
+        print("", file=sys.stdout)
+        print(
+            f"ℹ {update_count} pack(s) have updates available "
+            "(run `pack verify --fix` to apply).",
+            file=sys.stdout,
+        )
     if not bad:
         return 0
     if any(r["state"] == _VERIFY_STATE_USER_ONLY for r in bad):
         print("", file=sys.stdout)
         print(
-            "To deploy: run `anywhere-agents pack verify --fix` (writes "
-            "rule_packs: entries\nto agent-config.yaml) then "
-            "`bash .agent-config/bootstrap.sh`.",
+            "To deploy: run `anywhere-agents pack verify --fix` "
+            "(writes rule_packs: entries to agent-config.yaml and "
+            "invokes the composer).",
             file=sys.stdout,
         )
     return 1
@@ -1351,16 +1853,44 @@ def _user_only_rule_pack_entry(row):
     return entry
 
 
-def _pack_verify_fix(user_config_path, project_root, args):
-    """Verify + repair user-level-only entries by writing matching
-    ``rule_packs:`` blocks to ``agent-config.yaml``.
+def _project_only_user_pack_entry(row):
+    """Return the user-level config entry to write for a project-only row.
 
-    - Atomic write (temp + ``os.replace``).
-    - Refuses to overwrite a malformed YAML file (exits 2).
-    - Holds the project repo lock for the read-classify-write sequence.
-    - Never modifies ``pack-lock.json`` or generated output files.
-    - Mismatch / orphan / broken / declared-not-bootstrapped are
-      reported but not auto-repaired.
+    Mirrors :func:`_user_only_rule_pack_entry` but emits the user-config
+    shape (uses ``source: {url, ref}`` for inline-source packs; bundled
+    packs get ``{name}`` only).
+    """
+    p = row.get("p")
+    if p is None:
+        return None
+    name, _norm_url, _ref, raw_url, raw_ref = p
+    entry: dict[str, Any] = {"name": name}
+    if raw_url and raw_url != _BUNDLED_IDENTITY_URL:
+        source = {"url": raw_url}
+        if raw_ref:
+            source["ref"] = raw_ref
+        entry["source"] = source
+    return entry
+
+
+def _pack_verify_fix(user_config_path, project_root, args):
+    """v0.5.2 ``pack verify --fix`` — bidirectional reconcile + materialize.
+
+    1. Read configs + lock (snapshot).
+    2. Plan reconcile:
+       - User has X but project doesn't → plan a project ``rule_packs`` append.
+       - Project has X but user doesn't → plan a user-level append.
+       - Same name with different identity (``MISMATCH``) → rc=1, no writes.
+    3. Take user-level lock; atomic-write user config if planned changes;
+       release.
+    4. Atomic-write project ``agent-config.yaml`` if planned changes.
+    5. Invoke ``compose_packs.py`` as a subprocess. Composer self-locks
+       and runs its own drift gate; on rc=1 the CLI surfaces rc=1 too.
+    6. Composer's lock write populates ``latest_known_head =
+       resolved_commit`` for fetched entries — no extra step here.
+
+    Recovery for composer drift-abort: same as ``pack add``. Config
+    rows are persistent; the user backs up local edits and reruns ``--fix``.
     """
     project_yaml = project_root / "agent-config.yaml"
     if project_yaml.exists():
@@ -1379,53 +1909,125 @@ def _pack_verify_fix(user_config_path, project_root, args):
         log(f"error: {exc}")
         return 2
 
-    user_only_rows = [
-        r for r in rows if r["state"] == _VERIFY_STATE_USER_ONLY
-    ]
-
     _print_verify_table(rows, env_var_value)
 
-    if not user_only_rows:
+    # Mismatch → rc=1 with no writes (per plan § 2 step 2 last bullet).
+    mismatch_rows = [r for r in rows if r["state"] == _VERIFY_STATE_MISMATCH]
+    if mismatch_rows:
         print("", file=sys.stdout)
+        names = ", ".join(sorted({r["name"] for r in mismatch_rows}))
         print(
-            "--fix: nothing to repair (no user-level-only packs).",
+            f"--fix: {len(mismatch_rows)} pack(s) have identity mismatch "
+            f"({names}); refusing to auto-resolve. Edit "
+            f"{project_yaml} and {user_config_path} to align identities.",
             file=sys.stdout,
         )
-        bad = [r for r in rows if r["state"] != _VERIFY_STATE_DEPLOYED]
-        return 0 if not bad else 1
+        return 1
 
-    # H3: reject credential-bearing URLs in user-level config BEFORE
-    # printing them or writing them to project YAML, so a hand-edited
-    # legacy entry like ``https://ghp_TOKEN@github.com/...`` cannot
-    # leak the token to stdout or get persisted to agent-config.yaml.
+    def _is_bundled_default_row(row: dict) -> bool:
+        """Bundled-default packs (aa-core-skills, agent-style) are
+        composer-seeded; they appear in project-side observations even
+        when neither user nor project YAML names them. Reconciling
+        them across layers would create churn (write the synthetic
+        bundled identity into user-level config, then on the next run
+        write it back into the project YAML, ad infinitum). Skip
+        bundled-default rows from --fix's reconcile plan; the
+        composer always materializes them via ``DEFAULT_V2_SELECTIONS``.
+        """
+        if row.get("name") not in _DEFAULT_V2_SELECTIONS:
+            return False
+        for layer_key in ("u", "p", "l"):
+            ident = row.get(layer_key)
+            if ident is None:
+                continue
+            raw_url = ident[3] if len(ident) >= 4 else ""
+            if raw_url and raw_url != _BUNDLED_IDENTITY_URL:
+                # The user explicitly named a non-bundled source for
+                # one of the default-seed names — reconcile that row.
+                return False
+        return True
+
+    user_only_rows = [
+        r for r in rows
+        if r["state"] == _VERIFY_STATE_USER_ONLY
+        and not _is_bundled_default_row(r)
+    ]
+    # ``DECLARED`` = project has it, no lock entry, may or may not have
+    # user-level. Filter to project-only-no-user via the layers.
+    project_only_rows = [
+        r for r in rows
+        if r.get("p") is not None and r.get("u") is None
+        and r["state"] != _VERIFY_STATE_MISMATCH
+        and not _is_bundled_default_row(r)
+    ]
+
+    # Reject credential-bearing URLs before printing or writing.
     from anywhere_agents.packs import auth as _pack_auth_check
-    for r in user_only_rows:
-        u = r.get("u")
-        raw_url = u[3] if (u is not None and len(u) >= 4) else ""
-        if not raw_url:
-            continue
-        try:
-            _pack_auth_check.reject_credential_url(
-                raw_url, source_layer="user-level config"
+    for r in user_only_rows + project_only_rows:
+        for layer_key in ("u", "p"):
+            ident = r.get(layer_key)
+            raw_url = (
+                ident[3] if (ident is not None and len(ident) >= 4) else ""
             )
-        except _pack_auth_check.CredentialURLError as exc:
-            log(f"error: {exc}")
-            return 2
+            if not raw_url:
+                continue
+            try:
+                _pack_auth_check.reject_credential_url(
+                    raw_url, source_layer="config layer"
+                )
+            except _pack_auth_check.CredentialURLError as exc:
+                log(f"error: {exc}")
+                return 2
 
+    if not user_only_rows and not project_only_rows:
+        bad = [r for r in rows if r["state"] != _VERIFY_STATE_DEPLOYED]
+        # No reconcile needed; if any DECLARED rows exist, run composer
+        # to materialize them.
+        declared = [
+            r for r in rows if r["state"] == _VERIFY_STATE_DECLARED
+        ]
+        if not bad:
+            print("", file=sys.stdout)
+            print("--fix: nothing to repair.", file=sys.stdout)
+            return 0
+        if declared:
+            print("", file=sys.stdout)
+            print(
+                "--fix: invoking composer to deploy declared-but-not-"
+                "bootstrapped packs...",
+                file=sys.stdout,
+            )
+            rc = _invoke_composer(project_root)
+            if rc != 0:
+                log(
+                    f"error: composer failed (rc={rc}). Recovery: back up "
+                    "local edits to managed files and rerun "
+                    "`pack verify --fix`."
+                )
+                return rc
+            print("✓ Deployed.", file=sys.stdout)
+            return 0
+        return 1
+
+    # Confirmation prompt (shared with v0.5.1 UX).
     print("", file=sys.stdout)
     print("--fix planned changes:", file=sys.stdout)
     for r in user_only_rows:
         entry = _user_only_rule_pack_entry(r)
         if entry:
-            # Display via the redacting formatter so even hypothetical
-            # credential-bearing rows (which would have been rejected
-            # above) cannot leak to stdout.
             display_src = _format_source(r.get("u"))
             print(
                 f"  + add to {project_yaml}: name={entry['name']}, source={display_src}",
                 file=sys.stdout,
             )
-
+    for r in project_only_rows:
+        entry = _project_only_user_pack_entry(r)
+        if entry:
+            display_src = _format_source(r.get("p"))
+            print(
+                f"  + add to {user_config_path}: name={entry['name']}, source={display_src}",
+                file=sys.stdout,
+            )
     if not args.yes:
         if sys.stdin.isatty():
             print("", file=sys.stdout)
@@ -1447,256 +2049,274 @@ def _pack_verify_fix(user_config_path, project_root, args):
             )
             return 0
 
-    # Repo lock: prefer the vendored copy in the PyPI package (always
-    # available); fall back to the project-local clone as a sanity path
-    # so a maintainer running directly off scripts/ still works.
-    locks_mod = None
+    # Step 3: take user-level config lock; write user-config additions.
     try:
         from anywhere_agents.packs import locks as locks_mod  # type: ignore[import-not-found]
     except ImportError:
-        locks_mod = None
-    if locks_mod is None:
-        packs_parent = project_root / ".agent-config" / "repo" / "scripts"
-        if packs_parent.exists():
-            sys.path.insert(0, str(packs_parent))
-            try:
-                from packs import locks as locks_mod  # type: ignore[import-not-found]
-            except ImportError:
-                locks_mod = None
-
-    write_summary = {"written": 0, "rows_locked": [], "final_rows": []}
-
-    def _apply_changes() -> int:
-        # Re-gather under the lock so a concurrent bootstrap or second
-        # `pack verify --fix` cannot interleave with the actual write:
-        # the planned-changes table shown above is best-effort, the
-        # final classification under lock is authoritative.
-        try:
-            rows_locked, _env_var_locked = _verify_gather(
-                user_config_path, project_root
-            )
-        except _VerifyParseError as exc:
-            log(f"error: {exc}")
-            return 2
-        write_summary["rows_locked"] = rows_locked
-        user_only_locked = [
-            r for r in rows_locked if r["state"] == _VERIFY_STATE_USER_ONLY
-        ]
-        # Re-validate credential URLs under the lock. A concurrent edit
-        # to user-level config could have introduced a token URL after
-        # the pre-lock check.
-        for r in user_only_locked:
-            u = r.get("u")
-            raw_url = u[3] if (u is not None and len(u) >= 4) else ""
-            if not raw_url:
-                continue
-            try:
-                _pack_auth_check.reject_credential_url(
-                    raw_url, source_layer="user-level config"
-                )
-            except _pack_auth_check.CredentialURLError as exc:
-                log(f"error: {exc}")
-                return 2
-        try:
-            import yaml
-        except ImportError:
-            log("error: PyYAML is required (install: `pip install pyyaml`)")
-            return 2
-        if project_yaml.exists():
-            text = project_yaml.read_text(encoding="utf-8")
-            data = yaml.safe_load(text) if text.strip() else {}
-            if data is None:
-                data = {}
-            if not isinstance(data, dict):
-                log(
-                    f"error: {project_yaml}: top level must be a mapping; "
-                    "refusing to overwrite."
-                )
-                return 2
-        else:
-            data = {}
-        existing = data.get("rule_packs")
-        if existing is None:
-            existing = []
-        elif not isinstance(existing, list):
-            log(
-                f"error: {project_yaml}: 'rule_packs' must be a list; "
-                "refusing to overwrite."
-            )
-            return 2
-        existing_names = {
-            e.get("name") for e in existing if isinstance(e, dict)
-        }
-        written_count = 0
-        for r in user_only_locked:
-            entry = _user_only_rule_pack_entry(r)
-            if entry and entry["name"] not in existing_names:
-                existing.append(entry)
-                existing_names.add(entry["name"])
-                written_count += 1
-        write_summary["written"] = written_count
-        if written_count == 0:
-            # No write happened; the pre-write locked state is also the
-            # final state for the outer success/failure decision.
-            write_summary["final_rows"] = rows_locked
-            return 0
-        data["rule_packs"] = existing
-        out_text = yaml.safe_dump(
-            data, sort_keys=False, default_flow_style=False
-        )
-        project_yaml.parent.mkdir(parents=True, exist_ok=True)
-        tmp = project_yaml.with_name(project_yaml.name + ".tmp")
-        tmp.write_text(out_text, encoding="utf-8")
-        os.replace(str(tmp), str(project_yaml))
-        # Re-classify post-write so the outer caller can detect rows
-        # that ``--fix`` does not own (config mismatch, broken state,
-        # orphan, lock schema stale, or new user-level only entries
-        # added concurrently). Without this, writing ``profile`` would
-        # report success even when an unrelated pack ``other`` is in
-        # ``config mismatch`` under the same lock.
-        try:
-            final_rows, _final_env = _verify_gather(
-                user_config_path, project_root
-            )
-        except _VerifyParseError as exc:
-            log(f"error after write: {exc}")
-            return 2
-        write_summary["final_rows"] = final_rows
-        return 0
-
-    if locks_mod is None:
-        # Fail closed: --fix writes durable project state and must not
-        # race with a concurrent composer / bootstrap. The vendored
-        # locks module is always present in the PyPI package, so this
-        # branch only fires under unusual setups (e.g., a partially
-        # broken install). Better to surface the problem than silently
-        # write without serialization.
         log(
-            "error: cannot acquire repo lock (locks module unavailable); "
-            "refusing to write."
+            "error: cannot import locks module; refusing to write."
         )
         return 2
-    try:
-        lock_path = locks_mod.repo_lock_path(project_root)
-        with locks_mod.acquire(lock_path):
-            rc = _apply_changes()
-    except Exception as exc:
-        log(f"error: failed to acquire repo lock: {exc}")
-        return 2
 
-    if rc != 0:
-        return rc
+    if project_only_rows:
+        user_lock = _user_config_lock_path(user_config_path)
+        try:
+            with locks_mod.acquire(user_lock, timeout=30):
+                user_data = _load_or_create_user_config(user_config_path)
+                packs_list = user_data.setdefault("packs", [])
+                if not isinstance(packs_list, list):
+                    log(
+                        f"error: {user_config_path}: 'packs' must be a "
+                        "list; refusing to overwrite."
+                    )
+                    return 2
+                existing_names = {
+                    e.get("name") for e in packs_list
+                    if isinstance(e, dict)
+                }
+                added = 0
+                for r in project_only_rows:
+                    entry = _project_only_user_pack_entry(r)
+                    if entry and entry["name"] not in existing_names:
+                        packs_list.append(entry)
+                        existing_names.add(entry["name"])
+                        added += 1
+                if added:
+                    _write_user_config(user_config_path, user_data)
+                    print(
+                        f"--fix: wrote {added} pack(s) to {user_config_path}",
+                        file=sys.stdout,
+                    )
+        except locks_mod.LockTimeout as exc:
+            log(f"error: could not acquire user-config lock: {exc}")
+            return 10
 
-    written = write_summary["written"]
-    final_rows = write_summary["final_rows"]
-    # Classify the final locked state once. ``--fix`` only owns
-    # user-level-only rows; any row in user_only / mismatch / broken /
-    # orphan / lock_stale that survives the write needs further user
-    # action (resolve mismatch by hand, re-run bootstrap to repair
-    # broken outputs, clean up orphan via uninstall --all, etc.).
-    final_problems = [
-        r for r in final_rows
-        if r["state"] in (
-            _VERIFY_STATE_USER_ONLY,
-            _VERIFY_STATE_MISMATCH,
-            _VERIFY_STATE_BROKEN,
-            _VERIFY_STATE_ORPHAN,
-            _VERIFY_STATE_LOCK_STALE,
-        )
-    ]
+    # Step 4: write project agent-config.yaml additions under repo lock.
+    repo_lock = locks_mod.repo_lock_path(project_root)
+    if user_only_rows:
+        try:
+            with locks_mod.acquire(repo_lock, timeout=30):
+                try:
+                    import yaml
+                except ImportError:
+                    log("error: PyYAML is required (install: `pip install pyyaml`)")
+                    return 2
+                if project_yaml.exists():
+                    text = project_yaml.read_text(encoding="utf-8")
+                    data = yaml.safe_load(text) if text.strip() else {}
+                    if data is None:
+                        data = {}
+                    if not isinstance(data, dict):
+                        log(
+                            f"error: {project_yaml}: top level must be a "
+                            "mapping; refusing to overwrite."
+                        )
+                        return 2
+                else:
+                    data = {}
+                existing = data.get("rule_packs") or []
+                if not isinstance(existing, list):
+                    log(
+                        f"error: {project_yaml}: 'rule_packs' must be a "
+                        "list; refusing to overwrite."
+                    )
+                    return 2
+                existing_names = {
+                    e.get("name") for e in existing if isinstance(e, dict)
+                }
+                added = 0
+                for r in user_only_rows:
+                    entry = _user_only_rule_pack_entry(r)
+                    if entry and entry["name"] not in existing_names:
+                        existing.append(entry)
+                        existing_names.add(entry["name"])
+                        added += 1
+                if added:
+                    data["rule_packs"] = existing
+                    out_text = yaml.safe_dump(
+                        data, sort_keys=False, default_flow_style=False
+                    )
+                    project_yaml.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = project_yaml.with_name(project_yaml.name + ".tmp")
+                    tmp.write_text(out_text, encoding="utf-8")
+                    os.replace(str(tmp), str(project_yaml))
+                    print(
+                        f"--fix: wrote {added} rule_packs entry/entries to "
+                        f"{project_yaml}",
+                        file=sys.stdout,
+                    )
+        except locks_mod.LockTimeout as exc:
+            log(f"error: could not acquire repo lock: {exc}")
+            return 10
+
+    # Step 5: invoke composer.
     print("", file=sys.stdout)
-    if written > 0:
-        print(
-            f"--fix: wrote {written} rule_packs "
-            f"entry/entries to {project_yaml}",
-            file=sys.stdout,
-        )
-        if final_problems:
-            names = ", ".join(sorted({r["name"] for r in final_problems}))
-            print(
-                f"--fix: {len(final_problems)} pack(s) still need attention "
-                f"({names}); re-run `pack verify` for details.",
-                file=sys.stdout,
-            )
-            return 1
-        print(
-            "Now run `bash .agent-config/bootstrap.sh` to deploy.",
-            file=sys.stdout,
-        )
-        return 0
-
-    # Zero writes under the lock — distinguish "concurrent writer
-    # already covered the planned changes" (success) from "state
-    # changed into a different non-deployed state that --fix cannot
-    # repair" (failure). Only all-deployed or declared-not-bootstrapped
-    # (rule_packs already there, just not bootstrapped yet) is
-    # genuinely up-to-date for what --fix is responsible for.
-    if final_problems:
-        names = ", ".join(sorted({r["name"] for r in final_problems}))
-        print(
-            f"--fix: state changed under lock; planned changes not applied. "
-            f"{len(final_problems)} pack(s) still need attention ({names}). "
-            f"Re-run `pack verify` to see the current state.",
-            file=sys.stdout,
-        )
-        return 1
-    declared = [
-        r for r in final_rows if r["state"] == _VERIFY_STATE_DECLARED
-    ]
-    if declared:
-        print(
-            f"--fix: state changed under lock; rule_packs already had "
-            f"matching entries (no write needed).",
-            file=sys.stdout,
-        )
-        print(
-            "Now run `bash .agent-config/bootstrap.sh` to deploy.",
-            file=sys.stdout,
-        )
-        return 0
     print(
-        f"--fix: state already up-to-date under lock; "
-        f"no rule_packs entries written to {project_yaml}.",
+        "--fix: invoking composer to deploy...",
+        file=sys.stdout,
+    )
+    rc = _invoke_composer(project_root)
+    if rc != 0:
+        log(
+            f"error: composer failed (rc={rc}). Configs are persistent; "
+            "back up local edits to managed files and rerun "
+            "`pack verify --fix`."
+        )
+        return rc
+    repaired = len(user_only_rows) + len(project_only_rows)
+    print(
+        f"✓ Repaired {repaired} mismatches; deployed.",
         file=sys.stdout,
     )
     return 0
 
 
 def _pack_remove(path: Path, name: str) -> int:
-    if not path.exists():
-        log(f"{path} does not exist; nothing to remove")
-        return 0
-    data = _load_user_config(path)
+    """``pack remove <name>`` — cascade delete (v0.5.2).
 
-    # Normalize legacy rule_packs: → packs: (same migration as pack_add
-    # so `pack remove` can edit a legacy-only file).
+    1. Locate ``name`` in user config, project ``rule_packs:``, and
+       prior pack-lock. Not found in any → rc=1.
+    2. Take user-level config lock; remove user-level entry; release.
+    3. Atomic-write project ``agent-config.yaml`` removing from
+       ``rule_packs:``.
+    4. Invoke ``compose_packs.py uninstall <name>`` so the new single-
+       pack uninstall path runs (deletes physical outputs, prunes
+       state, decrements user-level owners with composite-key filter).
+    5. Print summary.
+    """
+    project_root = Path.cwd().resolve()
+    project_yaml = project_root / "agent-config.yaml"
+    lock_path = project_root / ".agent-config" / "pack-lock.json"
+
+    found_in_user = False
+    found_in_project = False
+    found_in_lock = False
+
+    # Probe user config (do not mutate yet).
+    user_data = _load_user_config(path) if path.exists() else {}
+    user_packs = user_data.get("packs") or user_data.get("rule_packs") or []
+    if isinstance(user_packs, list):
+        for entry in user_packs:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                found_in_user = True
+                break
+            if isinstance(entry, str) and entry == name:
+                found_in_user = True
+                break
+
+    # Probe project YAML.
+    if project_yaml.exists():
+        try:
+            project_data = _read_yaml_or_none(project_yaml) or {}
+        except _VerifyParseError:
+            project_data = {}
+        for entry in project_data.get("rule_packs") or []:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                found_in_project = True
+                break
+            if isinstance(entry, str) and entry == name:
+                found_in_project = True
+                break
+
+    # Probe pack-lock.
+    if lock_path.exists():
+        try:
+            import json
+            lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(lock_data, dict)
+                and isinstance(lock_data.get("packs"), dict)
+                and name in lock_data["packs"]
+            ):
+                found_in_lock = True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if not (found_in_user or found_in_project or found_in_lock):
+        log(f"error: pack {name!r} not in user config, project rule_packs, or pack-lock")
+        return 1
+
+    # Step 2: lock user-level config and remove the entry.
+    if found_in_user:
+        try:
+            from anywhere_agents.packs import locks as locks_mod  # type: ignore[import-not-found]
+        except ImportError:
+            locks_mod = None
+        user_lock = _user_config_lock_path(path)
+        try:
+            if locks_mod is not None:
+                with locks_mod.acquire(user_lock, timeout=30):
+                    _remove_from_user_config(path, name)
+            else:
+                _remove_from_user_config(path, name)
+        except Exception as exc:
+            log(f"error: could not acquire user-config lock: {exc}")
+            return 10
+
+    # Step 3: rewrite project YAML.
+    if found_in_project:
+        try:
+            import yaml
+        except ImportError:
+            log("error: PyYAML is required (install: `pip install pyyaml`)")
+            return 2
+        text = project_yaml.read_text(encoding="utf-8") if project_yaml.exists() else ""
+        data = yaml.safe_load(text) if text.strip() else {}
+        if not isinstance(data, dict):
+            data = {}
+        rule_packs = data.get("rule_packs") or []
+        if isinstance(rule_packs, list):
+            data["rule_packs"] = [
+                e for e in rule_packs
+                if not (isinstance(e, dict) and e.get("name") == name)
+                and not (isinstance(e, str) and e == name)
+            ]
+            out_text = yaml.safe_dump(
+                data, sort_keys=False, default_flow_style=False
+            )
+            tmp = project_yaml.with_name(project_yaml.name + ".tmp")
+            tmp.write_text(out_text, encoding="utf-8")
+            os.replace(str(tmp), str(project_yaml))
+
+    # Step 4: invoke composer's uninstall mode for the single pack.
+    if found_in_lock:
+        rc = _invoke_composer(project_root, "uninstall", name)
+        if rc not in (0,):
+            log(
+                f"error: composer uninstall failed (rc={rc}). Configs "
+                "have been removed; on-disk artifacts may remain. Resolve "
+                "any drift and rerun `pack remove`."
+            )
+            return rc
+
+    log(f"✓ Removed {name!r}")
+    return 0
+
+
+def _remove_from_user_config(path: Path, name: str) -> None:
+    """Atomic in-place rewrite of the user-config to drop ``name``.
+
+    Caller holds the user-config lock. No-op when the file is missing
+    or the entry is absent (idempotent).
+    """
+    if not path.exists():
+        return
+    data = _load_user_config(path)
     if "packs" not in data and "rule_packs" in data:
         legacy = data.pop("rule_packs")
-        if legacy is None:
-            legacy = []
-        if not isinstance(legacy, list):
-            log(f"error: {path} has a malformed 'rule_packs' entry (not a list)")
-            return 2
-        data["packs"] = list(legacy)
+        if isinstance(legacy, list):
+            data["packs"] = list(legacy)
     elif "packs" in data and "rule_packs" in data:
         data.pop("rule_packs", None)
-
     packs = data.get("packs", [])
     if not isinstance(packs, list):
-        log(f"error: {path} has a malformed 'packs' entry (not a list)")
-        return 2
-    before = len(packs)
+        return
     data["packs"] = [
         p for p in packs
         if not (isinstance(p, dict) and p.get("name") == name)
         and not (isinstance(p, str) and p == name)
     ]
-    if len(data["packs"]) == before:
-        log(f"Pack {name!r} not found in {path}")
-        return 0
     _save_user_config(path, data)
-    log(f"Removed {name!r} from {path}")
-    return 0
 
 
 def _pack_list(path: Path) -> int:

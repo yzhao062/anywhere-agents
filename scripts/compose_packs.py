@@ -443,6 +443,14 @@ def _process_selection(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # v0.5.2: ``compose_packs.py uninstall <name>`` is a sibling mode used
+    # by ``anywhere-agents pack remove`` to drive the new single-pack
+    # uninstall path. Keep the dispatch out of argparse so the existing
+    # compose flag set is unchanged for v0.4.0/v0.5.0 callers.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "uninstall":
+        return _uninstall_main(raw[1:])
+
     parser = argparse.ArgumentParser(
         description="unified pack composer for anywhere-agents (v0.4.0+)"
     )
@@ -585,6 +593,64 @@ def main(argv: list[str] | None = None) -> int:
             f"compose aborted by ANYWHERE_AGENTS_UPDATE=fail: {exc}\n"
         )
         return 11
+
+
+# v0.5.2: ``compose_packs.py uninstall <name>`` mode. Self-locks via the
+# uninstall engine's own per-user + per-repo acquire path; the CLI does
+# NOT hold outer locks across the subprocess invocation.
+_UNINSTALL_EXIT_CODES = {
+    "clean": 0,
+    "no-op": 0,
+    "lock-timeout": 10,
+    "drift": 20,
+    "malformed-state": 30,
+    "partial-cleanup": 40,
+}
+
+
+def _uninstall_main(argv: list[str]) -> int:
+    """``compose_packs.py uninstall <name>`` — single-pack uninstall mode.
+
+    Drives the new :func:`scripts.packs.uninstall.run_uninstall_pack`
+    helper. Used by ``anywhere-agents pack remove`` (v0.5.2). The CLI
+    invokes this as a subprocess so the composer self-locks and runs
+    drift checks in the same process that would otherwise install.
+    """
+    parser = argparse.ArgumentParser(
+        prog="compose_packs.py uninstall",
+        description="single-pack uninstall mode (v0.5.2)",
+    )
+    parser.add_argument("name", help="Pack name to remove")
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+
+    root = args.root.resolve()
+    from packs import uninstall as uninstall_mod
+    outcome = uninstall_mod.run_uninstall_pack(root, args.name)
+
+    sys.stderr.write(f"uninstall status: {outcome.status}\n")
+    if outcome.packs_removed:
+        sys.stderr.write(
+            f"packs removed: {', '.join(outcome.packs_removed)}\n"
+        )
+    if outcome.files_deleted:
+        sys.stderr.write(f"files deleted: {len(outcome.files_deleted)}\n")
+    if outcome.owners_decremented:
+        sys.stderr.write(
+            f"owners decremented: {len(outcome.owners_decremented)}\n"
+        )
+    if outcome.drift_paths:
+        sys.stderr.write(
+            f"drift: {len(outcome.drift_paths)} path(s) left in place\n"
+        )
+        for p in outcome.drift_paths:
+            sys.stderr.write(f"  - {p}\n")
+    if outcome.lock_holder_pid is not None:
+        sys.stderr.write(f"lock holder PID: {outcome.lock_holder_pid}\n")
+    for detail in outcome.details:
+        sys.stderr.write(f"{detail}\n")
+
+    return _UNINSTALL_EXIT_CODES.get(outcome.status, 40)
 
 
 def _do_compose_v2(
@@ -811,6 +877,22 @@ def _do_compose_v2(
     # ----- Phase 8 main compose loop (uses resolved + maybe-reverted archives) -----
     outcomes: dict[str, str] = {}
     pending_names = {sel["name"] for (sel, _arc, _pack) in pending_updates}
+    # v0.5.2: pre-compute the set of paths previously recorded in
+    # ``pack-state.json`` so the drift gate can mark them as
+    # ``PRESTATE_PACK_OUTPUT``. The previous project-state may be empty
+    # (first install) — in that case nothing tracked, and unmanaged
+    # collisions still get caught.
+    prior_pack_outputs: dict[str, str] = {}
+    if project_state_path.exists():
+        try:
+            prior_project_state = state_mod.load_project_state(project_state_path)
+        except state_mod.StateError:
+            prior_project_state = state_mod.empty_project_state()
+        for entry in prior_project_state.get("entries", []) or []:
+            output_path = entry.get("output_path")
+            sha = entry.get("sha256")
+            if isinstance(output_path, str) and isinstance(sha, str):
+                prior_pack_outputs[str((root / output_path).resolve())] = sha
     try:
         with txn_mod.Transaction(staging_dir, lock_path) as txn:
             for selection, pack, archive, recorded in resolved:
@@ -875,6 +957,103 @@ def _do_compose_v2(
             txn.stage_write(
                 root / "AGENTS.md", composed_agents.encode("utf-8")
             )
+
+            # v0.5.2: build the drift-gate ``expected_prestate`` map and
+            # install it on the transaction before commit. The five
+            # categories (per PLAN-aa-v0.5.2.md § "Write-path drift gate"):
+            #
+            # 1. PRESTATE_PACK_OUTPUT — paths recorded in the prior
+            #    project-state's ``entries[*].output_path``. The recorded
+            #    sha256 must match current on-disk content.
+            # 2. PRESTATE_INTERNAL_STATE — pack-lock.json, project + user
+            #    pack-state.json. Optimistic-concurrency check against the
+            #    stage-time hash.
+            # 3. PRESTATE_CORE_OUTPUT — composer-owned files like
+            #    AGENTS.md. Same optimistic-concurrency rule.
+            # 4. PRESTATE_JSON_MERGE — declared JSON merge targets from
+            #    active-permission entries; user-level settings.json is
+            #    the canonical case (the permission handler stages a
+            #    full-file rewrite). Without this category a normal
+            #    install would be rejected as an unmanaged collision.
+            # 5. PRESTATE_UNMANAGED — anything else; if the file already
+            #    exists, the gate refuses to clobber.
+            internal_state_paths = {
+                str(project_lock_path.resolve()),
+                str(project_state_path.resolve()),
+                str(user_state_path.resolve()),
+            }
+            core_output_paths = {
+                str((root / "AGENTS.md").resolve()),
+            }
+            # Active-permission entries declare their JSON merge target
+            # via the user-state entries the permission handler creates.
+            # The handler's full-file rewrite of settings.json is keyed
+            # by the leading path component before the first ``#``.
+            json_merge_paths: set[str] = set()
+            for ent in user_state.get("entries", []) or []:
+                if ent.get("kind") != "active-permission":
+                    continue
+                target_path = ent.get("target_path", "")
+                if "#" in target_path:
+                    json_path = target_path.split("#", 1)[0]
+                else:
+                    json_path = target_path
+                if json_path:
+                    try:
+                        json_merge_paths.add(str(Path(json_path).resolve()))
+                    except OSError:
+                        json_merge_paths.add(json_path)
+
+            expected_prestate: dict[str, tuple[str, str | None]] = {}
+            for op in txn.ops:
+                kind = op["op"]
+                if kind == txn_mod.OP_WRITE:
+                    target_str = op["target_path"]
+                elif kind == txn_mod.OP_RESTAMP:
+                    target_str = op["new_path"]
+                else:
+                    continue
+                # Resolve once so the keys match how the validator looks
+                # them up. Both sides must agree on case + symlink form.
+                try:
+                    resolved_target = str(Path(target_str).resolve())
+                except OSError:
+                    resolved_target = target_str
+                if resolved_target in internal_state_paths:
+                    expected_prestate[target_str] = (
+                        txn_mod.PRESTATE_INTERNAL_STATE,
+                        None,
+                    )
+                elif resolved_target in core_output_paths:
+                    expected_prestate[target_str] = (
+                        txn_mod.PRESTATE_CORE_OUTPUT,
+                        None,
+                    )
+                elif resolved_target in json_merge_paths:
+                    expected_prestate[target_str] = (
+                        txn_mod.PRESTATE_JSON_MERGE,
+                        None,
+                    )
+                elif resolved_target in prior_pack_outputs:
+                    expected_prestate[target_str] = (
+                        txn_mod.PRESTATE_PACK_OUTPUT,
+                        prior_pack_outputs[resolved_target],
+                    )
+                else:
+                    expected_prestate[target_str] = (
+                        txn_mod.PRESTATE_UNMANAGED,
+                        None,
+                    )
+            txn.set_expected_prestate(expected_prestate)
+    except txn_mod.DriftAbort as exc:
+        sys.stderr.write(f"error: composer drift gate aborted commit:\n")
+        for path, category, reason in exc.drift_paths:
+            sys.stderr.write(f"  {path} ({category}): {reason}\n")
+        sys.stderr.write(
+            "Recovery: back up local edits, then rerun the original "
+            "command (pack add, pack verify --fix, or anywhere-agents).\n"
+        )
+        return 1
     except ComposeError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
@@ -961,6 +1140,11 @@ def _build_ctx(
         pack_ref = archive.ref
         pack_resolved_commit = archive.resolved_commit
         pack_source_dir = archive.archive_dir
+        # v0.5.2 banner item 7: at fetch time the resolved_commit IS the
+        # current head. Record both so subsequent ``pack verify`` (network
+        # ls-remote) or banner detection knows whether upstream has moved.
+        pack_latest_known_head = archive.resolved_commit
+        pack_fetched_at = datetime.now(timezone.utc).isoformat()
     else:
         source = pack.get("source")
         if isinstance(source, dict):
@@ -981,6 +1165,10 @@ def _build_ctx(
             archive_dir if archive_dir is not None
             else root / ".agent-config" / "repo"
         )
+        # Bundled packs have no remote head to track for v0.5.2 update
+        # detection; leave both fields ``None``.
+        pack_latest_known_head = None
+        pack_fetched_at = None
 
     # Pack-level hosts default (pack-architecture.md:199) is explicitly
     # threaded into the context so dispatch._effective_hosts() can
@@ -1003,6 +1191,8 @@ def _build_ctx(
         user_state=user_state,
         pack_hosts=pack_hosts_default,
         current_host=host,
+        pack_latest_known_head=pack_latest_known_head,
+        pack_fetched_at=pack_fetched_at,
     )
 
 

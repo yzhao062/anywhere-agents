@@ -3,15 +3,18 @@
 Install the [**anywhere-agents**](https://github.com/yzhao062/anywhere-agents) AI agent config into any project, in one command.
 
 ```bash
-pip install anywhere-agents
-anywhere-agents
+pipx install anywhere-agents
+anywhere-agents                          # bootstrap shared config + hooks + settings
+anywhere-agents pack add <pack-repo-url>  # add a pack (one-shot: fetch, install, deploy)
 ```
 
-Or zero-install:
+Or zero-install for one-off bootstrap:
 
 ```bash
 pipx run anywhere-agents
 ```
+
+> **Why `pipx`, not `pip`?** `anywhere-agents` is a CLI tool with its own dependencies. Plain `pip install` either lands in the active venv (per-project, not per-machine) or hits PEP 668 / `externally-managed-environment` errors on modern Ubuntu / Debian / Homebrew Python. `pipx` gives each CLI tool its own isolated venv and exposes the binary on PATH globally; it is the [PyPA-recommended approach](https://packaging.python.org/en/latest/guides/installing-stand-alone-command-line-tools/) for Python CLI applications. `uv tool install anywhere-agents` works equivalently.
 
 ## What it does
 
@@ -24,7 +27,7 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 - Deploys the safety guard hook to `~/.claude/hooks/guard.py` and merges user-level permissions
 - Adds `.agent-config/` to `.gitignore`
 
-All install logic lives in the shell bootstrap scripts at [`yzhao062/anywhere-agents/bootstrap/`](https://github.com/yzhao062/anywhere-agents/tree/main/bootstrap). This Python package is a thin CLI wrapper so that agents and users in a Python-first workflow can invoke the same mechanism without reaching for `curl`.
+Bootstrap logic lives in the shell bootstrap scripts at [`yzhao062/anywhere-agents/bootstrap/`](https://github.com/yzhao062/anywhere-agents/tree/main/bootstrap); the Python CLI invokes them so that agents and users in a Python-first workflow can run the same mechanism without reaching for `curl`. Pack management (`pack add | remove | verify | list | update`) and `uninstall` are implemented directly in the Python CLI.
 
 ## Options
 

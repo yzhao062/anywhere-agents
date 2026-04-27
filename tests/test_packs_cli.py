@@ -208,9 +208,12 @@ class PackRemoveTests(_TmpHome):
         names = [p.get("name") if isinstance(p, dict) else p for p in data["packs"]]
         self.assertNotIn("foo", names)
 
-    def test_remove_nonexistent_is_noop(self) -> None:
+    def test_remove_nonexistent_returns_1(self) -> None:
+        # v0.5.2: pack remove returns rc=1 when the pack is not in any
+        # of (user config, project rule_packs, pack-lock). Plan § 3
+        # step 1: "Not found in any → rc=1".
         rc, _, _ = _invoke(["pack", "remove", "never-added"], env=self.env)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
 
 
 class PackListTests(_TmpHome):

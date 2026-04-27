@@ -199,6 +199,26 @@ def _validate_lock_pack_entry(
             f"pack-lock {path}: packs[{pack_name!r}] unknown "
             f"'pack_update_policy' {policy!r}"
         )
+    # v0.5.2: optional ``latest_known_head`` + ``fetched_at`` fields. Both
+    # are populated by the composer after a successful fetch (head equals
+    # ``resolved_commit`` at write time) and updated by ``pack verify``
+    # when ``git ls-remote`` reveals upstream movement. Old locks predating
+    # v0.5.2 omit both; banner item 7's update detector treats their
+    # absence as "no update info" rather than a parse error.
+    if "latest_known_head" in entry:
+        head = entry["latest_known_head"]
+        if not isinstance(head, str) or not head:
+            raise StateError(
+                f"pack-lock {path}: packs[{pack_name!r}] 'latest_known_head' "
+                "must be a non-empty string when present"
+            )
+    if "fetched_at" in entry:
+        fetched = entry["fetched_at"]
+        if not isinstance(fetched, str) or not fetched:
+            raise StateError(
+                f"pack-lock {path}: packs[{pack_name!r}] 'fetched_at' "
+                "must be a non-empty ISO-8601 string when present"
+            )
     files = entry.get("files", [])
     if not isinstance(files, list):
         raise StateError(

@@ -67,6 +67,30 @@ After committing agent-config.yaml, run:
     exit 0
 }
 
+# Legacy AC -> AA migration for direct PowerShell-bootstrap runs. If the
+# persisted upstream or cached repo origin still points at agent-config
+# and the caller did not pass an explicit upstream, delete the old cache
+# so the normal clone path below re-clones anywhere-agents.
+$explicitUpstream = $PSBoundParameters.ContainsKey('Upstream') -or $env:AGENT_CONFIG_UPSTREAM
+$legacyAC = $false
+if (-not $explicitUpstream) {
+  if (Test-Path .agent-config/upstream) {
+    $persisted = (Get-Content .agent-config/upstream -Raw).Replace("`r", "").Replace("`n", "").Trim()
+    if ($persisted -eq 'yzhao062/agent-config') { $legacyAC = $true }
+  }
+  if (-not $legacyAC -and (Test-Path .agent-config/repo/.git/config)) {
+    try {
+      $originUrl = git -C .agent-config/repo remote get-url origin 2>$null
+      if ($originUrl -match '(^|[:/])yzhao062/agent-config(\.git)?/?$') { $legacyAC = $true }
+    } catch {}
+  }
+}
+if ($legacyAC) {
+  [Console]::Error.WriteLine('[anywhere-agents] Migrating from agent-config bootstrap to anywhere-agents...')
+  Remove-Item -LiteralPath .agent-config/repo -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath .agent-config/upstream, .agent-config/bootstrap.sh, .agent-config/bootstrap.ps1 -Force -ErrorAction SilentlyContinue
+}
+
 # Upstream cascade: argv > env var > persisted file > hardcoded default.
 # Forkers can persist a different default in their fork; consumers can pass
 # upstream via `.\.agent-config\bootstrap.ps1 <user>/<repo>` or the
@@ -284,10 +308,22 @@ if (-not (Test-Path .gitignore) -or -not (Select-String -Quiet -Pattern '^\/?age
 # one. Without this, a consumer that initially fetched an older bootstrap.ps1
 # stays on that version forever; future bootstrap improvements added upstream
 # (e.g. the 2026-04-16 generator step) would never reach them automatically.
+#
+# v0.5.2 cross-OS fix: copy BOTH bootstrap.ps1 AND bootstrap.sh. Previously
+# the .ps1 entry only refreshed itself, so a developer who later switched
+# to Git Bash / WSL on the same project would hit "No such file or
+# directory" on .agent-config/bootstrap.sh. Symmetric in bootstrap.sh.
 if (Test-Path .agent-config/repo/bootstrap/bootstrap.ps1) {
   try {
     Copy-Item .agent-config/repo/bootstrap/bootstrap.ps1 .agent-config/bootstrap.ps1 -Force -ErrorAction Stop
   } catch {
     Write-Warning "Could not self-update .agent-config/bootstrap.ps1: $($_.Exception.Message)"
+  }
+}
+if (Test-Path .agent-config/repo/bootstrap/bootstrap.sh) {
+  try {
+    Copy-Item .agent-config/repo/bootstrap/bootstrap.sh .agent-config/bootstrap.sh -Force -ErrorAction Stop
+  } catch {
+    Write-Warning "Could not copy .agent-config/bootstrap.sh: $($_.Exception.Message)"
   }
 }

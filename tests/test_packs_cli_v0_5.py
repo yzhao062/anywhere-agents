@@ -1254,7 +1254,15 @@ class PackVerifyTests(unittest.TestCase):
             cwd_before = os.getcwd()
             try:
                 os.chdir(project)
+                # v0.5.2: --fix invokes the composer subprocess after
+                # config rewrites. Mock it to a successful no-op so we
+                # can observe the YAML write and exit code 0 without
+                # needing a real composer in the test fixture.
                 with patch("sys.stdin.isatty", return_value=False), \
+                     patch(
+                         "anywhere_agents.cli._invoke_composer",
+                         return_value=0,
+                     ), \
                      redirect_stdout(out_buf), redirect_stderr(err_buf):
                     rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
             finally:
@@ -1288,27 +1296,32 @@ class PackVerifyTests(unittest.TestCase):
             cwd_before = os.getcwd()
             try:
                 os.chdir(project)
-                # First --fix run.
-                out1 = io.StringIO()
-                with patch("sys.stdin.isatty", return_value=False), \
-                     redirect_stdout(out1), redirect_stderr(io.StringIO()):
-                    rc1 = _pack_main(user_path, ["verify", "--fix", "--yes"])
-                # File contents must persist between calls.
-                content_after_first = project_yaml.read_text(encoding="utf-8")
-                # Second --fix run.
-                out2 = io.StringIO()
-                with patch("sys.stdin.isatty", return_value=False), \
-                     redirect_stdout(out2), redirect_stderr(io.StringIO()):
-                    rc2 = _pack_main(user_path, ["verify", "--fix", "--yes"])
+                # v0.5.2: mock the composer so --fix can succeed without a
+                # real bootstrap fixture. Both runs see the mock as 0.
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    return_value=0,
+                ):
+                    # First --fix run.
+                    out1 = io.StringIO()
+                    with patch("sys.stdin.isatty", return_value=False), \
+                         redirect_stdout(out1), redirect_stderr(io.StringIO()):
+                        rc1 = _pack_main(user_path, ["verify", "--fix", "--yes"])
+                    # File contents must persist between calls.
+                    content_after_first = project_yaml.read_text(encoding="utf-8")
+                    # Second --fix run.
+                    out2 = io.StringIO()
+                    with patch("sys.stdin.isatty", return_value=False), \
+                         redirect_stdout(out2), redirect_stderr(io.StringIO()):
+                        rc2 = _pack_main(user_path, ["verify", "--fix", "--yes"])
             finally:
                 os.chdir(cwd_before)
             # First run repairs the user-only row → rc 0.
             self.assertEqual(rc1, 0)
             # On the second run, the pack now appears in user + project but
             # has no pack-lock entry yet (--fix never writes the lock), so
-            # the row is "declared, not bootstrapped" → rc 1. The
-            # idempotency claim is about file content, not exit code: the
-            # second run must NOT change agent-config.yaml.
+            # the row is "declared, not bootstrapped". v0.5.2 invokes the
+            # composer in this state → rc 0 with the mocked composer.
             self.assertIn(rc2, (0, 1))
             content_after_second = project_yaml.read_text(encoding="utf-8")
             self.assertEqual(
@@ -1316,8 +1329,15 @@ class PackVerifyTests(unittest.TestCase):
                 content_after_second,
                 "second --fix run must not change the file content",
             )
-            # Second run must explicitly say "nothing to repair".
-            self.assertIn("nothing to repair", out2.getvalue())
+            # Second run must explicitly say "nothing to repair" or
+            # "deploying declared-but-not-bootstrapped" (v0.5.2).
+            out2_text = out2.getvalue()
+            self.assertTrue(
+                "nothing to repair" in out2_text
+                or "declared-but-not-bootstrapped" in out2_text
+                or "Deployed" in out2_text,
+                f"output:\n{out2_text}",
+            )
 
     def test_verify_fix_leaves_pack_lock_intact_on_orphan(self) -> None:
         from anywhere_agents.cli import _pack_main
@@ -1469,12 +1489,13 @@ class PackVerifyTests(unittest.TestCase):
         pass
 
     def test_verify_fix_writes_some_but_other_problem_returns_1(self) -> None:
-        """Regression for Round 4 Codex M-reopened: when the locked
-        re-gather contains BOTH a writable user-only row AND a separate
-        non-repairable row (config mismatch), ``--fix`` writes the
-        user-only entry but must still return rc=1 and name the
-        unrepaired pack. Without this, the success path immediately
-        returns 0 after the write and hides the remaining problem.
+        """v0.5.2 contract: any identity mismatch blocks --fix entirely.
+
+        Plan § 2 step 2 last bullet: same name with different identity
+        → rc=1, print both identities, **no writes**. The v0.5.1
+        compromise that wrote some packs and reported others as
+        "still need attention" is gone — partial-write semantics
+        violated cross-command atomicity and made recovery harder.
         """
         from anywhere_agents.cli import _pack_main
         url = "https://github.com/yzhao062/agent-pack"
@@ -1483,8 +1504,8 @@ class PackVerifyTests(unittest.TestCase):
             project.mkdir()
             # Project YAML pre-populates ``other`` with ref ``main`` so
             # the user's ``other`` ref ``v0.1.0`` flips it to mismatch.
-            # ``profile`` has no project entry and is user-only — that's
-            # the row --fix will write.
+            # ``profile`` has no project entry and is user-only — but
+            # the mismatch on ``other`` blocks the whole fix.
             self._write_project(project, [
                 {"name": "other", "source": {"url": url, "ref": "main"}},
             ])
@@ -1493,6 +1514,9 @@ class PackVerifyTests(unittest.TestCase):
                 {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
                 {"name": "other", "source": {"url": url, "ref": "v0.1.0"}},
             ])
+            project_yaml_before = (project / "agent-config.yaml").read_text(
+                encoding="utf-8"
+            )
             out_buf, err_buf = io.StringIO(), io.StringIO()
             cwd_before = os.getcwd()
             try:
@@ -1505,56 +1529,53 @@ class PackVerifyTests(unittest.TestCase):
             output = out_buf.getvalue()
             self.assertEqual(
                 rc, 1,
-                f"--fix must rc=1 when an unrepaired mismatch remains "
-                f"after a successful write; output:\n{output}",
+                f"v0.5.2 --fix must rc=1 on identity mismatch; "
+                f"output:\n{output}",
             )
-            self.assertIn("wrote", output, "must report the write count")
-            self.assertIn("other", output, "must name the unrepaired pack")
-            self.assertIn("still need attention", output)
-            # The deploy hint is only correct when no problems remain.
-            self.assertNotIn(
-                "Now run `bash .agent-config/bootstrap.sh`",
-                output,
-                "deploy hint must not be printed while problems remain",
+            self.assertIn(
+                "identity mismatch", output,
+                "must surface the mismatch reason",
+            )
+            self.assertIn("other", output, "must name the conflicting pack")
+            # Project YAML must NOT be rewritten when any mismatch is
+            # in the row set.
+            project_yaml_after = (project / "agent-config.yaml").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(
+                project_yaml_before,
+                project_yaml_after,
+                "v0.5.2: identity mismatch blocks all writes",
             )
 
-    def test_verify_fix_state_changed_under_lock_returns_1(self) -> None:
-        """Regression for Round 3 Codex M-reopened: when the pre-lock
-        plan sees ``user-level only`` but the locked re-gather flips the
-        same pack to ``config mismatch`` (or any non-deployed,
-        non-declared state), ``--fix`` must NOT report success. It must
-        return rc=1 and print a state-changed message instead of
-        ``already up-to-date``.
+    def test_verify_fix_mismatch_blocks_writes(self) -> None:
+        """v0.5.2 contract: any identity mismatch in the row set blocks
+        the entire --fix invocation. No writes happen, rc=1 with a clear
+        message naming the conflicting pack.
+
+        Replaces the v0.5.1 ``test_verify_fix_state_changed_under_lock_returns_1``
+        which depended on the now-removed locked re-gather step. The
+        v0.5.2 implementation does not re-classify under lock; it
+        applies the planned writes once the user confirms (or --yes
+        bypass) and then invokes the composer subprocess.
         """
         from anywhere_agents.cli import (
             _pack_verify_fix,
-            _VERIFY_STATE_USER_ONLY,
             _VERIFY_STATE_MISMATCH,
         )
         import argparse
         url = "https://github.com/yzhao062/agent-pack"
-        # Stable identity tuples used in mock rows.
         u = self._ident("profile", url=url, ref="v0.1.0")
         p = self._ident("profile", url=url, ref="main")
-        pre_lock_rows = [{
-            "name": "profile",
-            "state": _VERIFY_STATE_USER_ONLY,
-            "u": u, "p": None, "l": None,
-            "sole": u, "note": None, "missing_paths": [],
-        }]
-        locked_rows = [{
+        rows = [{
             "name": "profile",
             "state": _VERIFY_STATE_MISMATCH,
             "u": u, "p": p, "l": None,
             "sole": None, "note": None, "missing_paths": [],
         }]
-        gather_calls = {"n": 0}
 
         def _fake_gather(user_path, project_root):
-            gather_calls["n"] += 1
-            if gather_calls["n"] == 1:
-                return pre_lock_rows, None
-            return locked_rows, None
+            return rows, None
 
         with tempfile.TemporaryDirectory() as d:
             project = pathlib.Path(d) / "project"
@@ -1575,18 +1596,20 @@ class PackVerifyTests(unittest.TestCase):
             output = out_buf.getvalue()
             self.assertEqual(
                 rc, 1,
-                f"--fix must rc=1 when locked re-gather shows mismatch; "
-                f"output:\n{output}",
+                f"v0.5.2: identity mismatch must rc=1; output:\n{output}",
             )
-            self.assertNotIn(
-                "already up-to-date", output,
-                "must not claim up-to-date when locked state has problems",
-            )
-            self.assertIn("state changed under lock", output)
-            # Both calls happened: pre-lock plan + locked re-gather.
-            self.assertGreaterEqual(gather_calls["n"], 2)
+            self.assertIn("identity mismatch", output)
 
-    def test_pack_remove_after_fix_only_removes_user_config(self) -> None:
+    def test_pack_remove_cascades_to_project_and_composer(self) -> None:
+        """v0.5.2: pack remove is now cascade delete.
+
+        Replaces v0.5.1's ``pack_remove_after_fix_only_removes_user_config``
+        which expected user-config-only removal. v0.5.2's contract:
+        remove from user config + project rule_packs + invoke composer
+        uninstall mode (which deletes outputs, prunes state, decrements
+        owners with composite-key filter). The composer subprocess is
+        mocked here so the test does not need a bootstrapped fixture.
+        """
         from anywhere_agents.cli import _pack_main
         with tempfile.TemporaryDirectory() as d:
             project = pathlib.Path(d) / "project"
@@ -1597,51 +1620,56 @@ class PackVerifyTests(unittest.TestCase):
             self._write_user(user_path, [
                 {"name": "profile", "source": {"url": url, "ref": ref}},
             ])
+            # Pre-populate project YAML with the same pack so the cascade
+            # has work to do at the project layer.
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+            ])
+            self._write_lock(project, {
+                "packs": {
+                    "profile": {
+                        "source_url": url,
+                        "requested_ref": ref,
+                        "resolved_commit": "ab" * 20,
+                        "output_paths": [".claude/skills/profile.md"],
+                    },
+                }
+            })
             cwd_before = os.getcwd()
             try:
                 os.chdir(project)
-                # Step 1: --fix writes the project-level rule_packs entry.
-                with patch("sys.stdin.isatty", return_value=False), \
-                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    rc1 = _pack_main(user_path, ["verify", "--fix", "--yes"])
-                self.assertEqual(rc1, 0)
-                # Step 2: write a pack-lock entry that matches the now-deployed
-                # project state so verify reports "deployed" rather than
-                # "declared, not bootstrapped".
-                output_file = project / ".claude" / "skills" / "profile.md"
-                output_file.parent.mkdir(parents=True, exist_ok=True)
-                output_file.write_text("placeholder", encoding="utf-8")
-                self._write_lock(project, {
-                    "packs": {
-                        "profile": {
-                            "source_url": url,
-                            "requested_ref": ref,
-                            "resolved_commit": "ab" * 20,
-                            "output_paths": [".claude/skills/profile.md"],
-                        },
-                    }
-                })
-                # Step 3: pack remove (only edits user-level config).
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    rc2 = _pack_main(user_path, ["remove", "profile"])
-                self.assertEqual(rc2, 0)
-                # User-level entry gone:
-                user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
-                user_names = {
-                    e.get("name") for e in user_data.get("packs", [])
-                    if isinstance(e, dict)
-                }
-                self.assertNotIn("profile", user_names)
-                # Step 4: re-verify → still deployed (project + lock are
-                # the deployment signal; user-level is the wishlist).
-                out_buf = io.StringIO()
-                with redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
-                    rc3 = _pack_main(user_path, ["verify"])
+                composer_calls = []
+
+                def _fake_composer(project_root, *args):
+                    composer_calls.append(args)
+                    return 0
+
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    side_effect=_fake_composer,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_main(user_path, ["remove", "profile"])
             finally:
                 os.chdir(cwd_before)
-            self.assertEqual(rc3, 0, f"final verify output:\n{out_buf.getvalue()}")
-            self.assertIn("profile", out_buf.getvalue())
-            self.assertIn("deployed", out_buf.getvalue())
+            self.assertEqual(rc, 0)
+            # Cascade: user, project, and composer-uninstall all triggered.
+            user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            user_names = {
+                e.get("name") for e in user_data.get("packs", [])
+                if isinstance(e, dict)
+            }
+            self.assertNotIn("profile", user_names)
+            project_data = yaml.safe_load(
+                (project / "agent-config.yaml").read_text(encoding="utf-8")
+            )
+            project_names = {
+                e.get("name") for e in (project_data.get("rule_packs") or [])
+                if isinstance(e, dict)
+            }
+            self.assertNotIn("profile", project_names)
+            # Composer was invoked in single-pack uninstall mode.
+            self.assertEqual(len(composer_calls), 1)
+            self.assertEqual(composer_calls[0], ("uninstall", "profile"))
 
     # ------------------------------------------------------------------
     # Group 5: Identity normalization
@@ -1731,6 +1759,41 @@ class PackVerifyTests(unittest.TestCase):
             self.assertNotEqual(idents_a[0][2], idents_b[0][2])  # ref
             self.assertNotEqual(idents_a[0], idents_b[0])
 
+    def test_verify_identity_omitted_ref_defaults_to_main(self) -> None:
+        """Round 1 regression: a user-config or rule_packs row that omits
+        ``source.ref`` must classify with the same identity tuple as one
+        that explicitly sets ``ref: main``. Composer also defaults inline
+        sources to ``main`` (`scripts/compose_packs.py:122, :402`), so the
+        CLI's identity tuple has to match or `pack verify --fix` would
+        falsely report identity-mismatch on hand-authored or pre-v0.5.2
+        rows.
+        """
+        from anywhere_agents.cli import _load_user_observations
+        url = "https://github.com/yzhao062/agent-pack"
+        with tempfile.TemporaryDirectory() as d:
+            user_no_ref = pathlib.Path(d) / "a.yaml"
+            user_no_ref.write_text(
+                yaml.safe_dump({"packs": [
+                    {"name": "p", "source": {"url": url}},
+                ]}, sort_keys=False),
+                encoding="utf-8",
+            )
+            user_main = pathlib.Path(d) / "b.yaml"
+            user_main.write_text(
+                yaml.safe_dump({"packs": [
+                    {"name": "p", "source": {"url": url, "ref": "main"}},
+                ]}, sort_keys=False),
+                encoding="utf-8",
+            )
+            idents_no_ref = _load_user_observations(user_no_ref)
+            idents_main = _load_user_observations(user_main)
+            self.assertEqual(len(idents_no_ref), 1)
+            self.assertEqual(len(idents_main), 1)
+            # Same URL, same name, omitted ref vs explicit "main" → must
+            # produce the SAME identity tuple (idempotency for re-add and
+            # no false config-mismatch in `pack verify --fix`).
+            self.assertEqual(idents_no_ref[0], idents_main[0])
+
     # ------------------------------------------------------------------
     # Group 6: Cross-platform user config path
     # ------------------------------------------------------------------
@@ -1754,6 +1817,301 @@ class PackVerifyTests(unittest.TestCase):
             self.assertIsNotNone(resolved)
             expected = pathlib.Path(d) / "anywhere-agents" / "config.yaml"
             self.assertEqual(resolved, expected)
+
+
+# ----------------------------------------------------------------------
+# v0.5.2: pack add one-shot, identity-mismatch, outside-project,
+# pack remove cascade
+# ----------------------------------------------------------------------
+
+
+class _OneSinglePackManifest:
+    """Helper: a manifest with a single passive pack named ``solo``."""
+    text = (
+        "version: 2\n"
+        "packs:\n"
+        "  - name: solo\n"
+        "    description: x\n"
+        "    source: {repo: https://github.com/yzhao062/agent-pack, ref: v0.1.0}\n"
+        "    passive: [{files: [{from: docs/x.md, to: AGENTS.md}]}]\n"
+    )
+
+
+class PackAddOneShotV052Tests(unittest.TestCase):
+    """v0.5.2 one-shot ``pack add``: user-config write + project-config
+    write + composer subprocess all in one invocation when in-project.
+    """
+
+    def _make_archive(self, archive_dir: pathlib.Path):
+        from anywhere_agents.packs import source_fetch
+        return source_fetch.PackArchive(
+            url="https://github.com/yzhao062/agent-pack",
+            ref="v0.1.0",
+            resolved_commit="ab" * 20,
+            method="anonymous",
+            archive_dir=archive_dir,
+            canonical_id="yzhao062/agent-pack",
+            cache_key="abcd1234/" + "ab" * 20,
+        )
+
+    def test_pack_add_in_project_writes_both_configs_and_invokes_composer(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        from anywhere_agents.packs import source_fetch
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Mark as bootstrapped: presence of compose_packs.py triggers
+            # the in-project branch.
+            (project / ".agent-config" / "repo" / "scripts").mkdir(parents=True)
+            (project / ".agent-config" / "repo" / "scripts" / "compose_packs.py").write_text("# stub")
+            archive_dir = pathlib.Path(d) / "archive"
+            archive_dir.mkdir()
+            (archive_dir / "pack.yaml").write_text(_OneSinglePackManifest.text)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                composer_calls: list[tuple] = []
+
+                def _fake_composer(project_root, *args):
+                    composer_calls.append(args)
+                    return 0
+
+                with patch.object(
+                    source_fetch, "fetch_pack",
+                    return_value=self._make_archive(archive_dir),
+                ), patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    side_effect=_fake_composer,
+                ):
+                    rc = _pack_main(user_path, [
+                        "add",
+                        "https://github.com/yzhao062/agent-pack",
+                        "--ref", "v0.1.0",
+                    ])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            user_names = {e["name"] for e in user_data["packs"]}
+            self.assertIn("solo", user_names)
+            project_yaml = project / "agent-config.yaml"
+            self.assertTrue(project_yaml.exists())
+            project_data = yaml.safe_load(project_yaml.read_text(encoding="utf-8"))
+            project_names = {e["name"] for e in (project_data.get("rule_packs") or [])}
+            self.assertIn("solo", project_names)
+            self.assertEqual(len(composer_calls), 1)
+            # Composer invoked with no extra args (compose mode), not
+            # uninstall <name>.
+            self.assertEqual(composer_calls[0], ())
+
+    def test_pack_add_outside_project_only_writes_user_config(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        from anywhere_agents.packs import source_fetch
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Intentionally NOT bootstrapped — no .agent-config/repo
+            # directory and no bootstrap scripts.
+            archive_dir = pathlib.Path(d) / "archive"
+            archive_dir.mkdir()
+            (archive_dir / "pack.yaml").write_text(_OneSinglePackManifest.text)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                composer_calls: list = []
+                with patch.object(
+                    source_fetch, "fetch_pack",
+                    return_value=self._make_archive(archive_dir),
+                ), patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ):
+                    err_buf = io.StringIO()
+                    with redirect_stderr(err_buf):
+                        rc = _pack_main(user_path, [
+                            "add",
+                            "https://github.com/yzhao062/agent-pack",
+                            "--ref", "v0.1.0",
+                        ])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            # User config written.
+            self.assertTrue(user_path.exists())
+            # Project YAML NOT created.
+            self.assertFalse((project / "agent-config.yaml").exists())
+            # Composer NOT invoked.
+            self.assertEqual(composer_calls, [])
+            # Hint message about deploying in a bootstrapped project.
+            self.assertIn("Registered globally", err_buf.getvalue())
+
+    def test_pack_add_idempotent_same_identity(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        from anywhere_agents.packs import source_fetch
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            (project / ".agent-config" / "repo" / "scripts").mkdir(parents=True)
+            (project / ".agent-config" / "repo" / "scripts" / "compose_packs.py").write_text("# stub")
+            archive_dir = pathlib.Path(d) / "archive"
+            archive_dir.mkdir()
+            (archive_dir / "pack.yaml").write_text(_OneSinglePackManifest.text)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch.object(
+                    source_fetch, "fetch_pack",
+                    return_value=self._make_archive(archive_dir),
+                ), patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    return_value=0,
+                ):
+                    rc1 = _pack_main(user_path, [
+                        "add",
+                        "https://github.com/yzhao062/agent-pack",
+                        "--ref", "v0.1.0",
+                    ])
+                    rc2 = _pack_main(user_path, [
+                        "add",
+                        "https://github.com/yzhao062/agent-pack",
+                        "--ref", "v0.1.0",
+                    ])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc1, 0)
+            self.assertEqual(rc2, 0)
+            # Same identity → no duplicate row.
+            user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            solo_count = sum(
+                1 for e in user_data.get("packs", [])
+                if isinstance(e, dict) and e.get("name") == "solo"
+            )
+            self.assertEqual(solo_count, 1, "idempotent: no duplicate row")
+
+    def test_pack_add_identity_mismatch_returns_1(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        from anywhere_agents.packs import source_fetch
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            (project / ".agent-config" / "repo" / "scripts").mkdir(parents=True)
+            (project / ".agent-config" / "repo" / "scripts" / "compose_packs.py").write_text("# stub")
+            archive_dir = pathlib.Path(d) / "archive"
+            archive_dir.mkdir()
+            (archive_dir / "pack.yaml").write_text(_OneSinglePackManifest.text)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            # Pre-existing user config: ``solo`` already pinned at main.
+            user_path.write_text(yaml.safe_dump({
+                "packs": [
+                    {
+                        "name": "solo",
+                        "source": {
+                            "url": "https://github.com/yzhao062/agent-pack",
+                            "ref": "main",
+                        },
+                    },
+                ]
+            }))
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                composer_calls: list = []
+                with patch.object(
+                    source_fetch, "fetch_pack",
+                    return_value=self._make_archive(archive_dir),
+                ), patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ):
+                    err_buf = io.StringIO()
+                    with redirect_stderr(err_buf):
+                        rc = _pack_main(user_path, [
+                            "add",
+                            "https://github.com/yzhao062/agent-pack",
+                            "--ref", "v0.1.0",
+                        ])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1)
+            # Project YAML should NOT exist (we abort before step 4b).
+            self.assertFalse((project / "agent-config.yaml").exists())
+            # Composer should NOT be invoked.
+            self.assertEqual(composer_calls, [])
+            # Existing user-config row preserved unchanged.
+            user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                user_data["packs"][0]["source"]["ref"],
+                "main",
+                "existing user-config row must not be overwritten",
+            )
+
+
+class PackVerifyFixBidirectionalTests(unittest.TestCase):
+    """v0.5.2 ``pack verify --fix`` reconciles in both directions."""
+
+    def test_user_only_writes_to_project_yaml(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            user_path.write_text(yaml.safe_dump({
+                "packs": [
+                    {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+                ]
+            }))
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     patch(
+                         "anywhere_agents.cli._invoke_composer",
+                         return_value=0,
+                     ), redirect_stdout(io.StringIO()), \
+                     redirect_stderr(io.StringIO()):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            project_data = yaml.safe_load(
+                (project / "agent-config.yaml").read_text(encoding="utf-8")
+            )
+            names = {e["name"] for e in (project_data.get("rule_packs") or [])}
+            self.assertIn("profile", names)
+
+    def test_project_only_writes_to_user_config(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            (project / "agent-config.yaml").write_text(yaml.safe_dump({
+                "rule_packs": [
+                    {"name": "myown", "source": {"url": url, "ref": "v0.1.0"}},
+                ]
+            }))
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     patch(
+                         "anywhere_agents.cli._invoke_composer",
+                         return_value=0,
+                     ), redirect_stdout(io.StringIO()), \
+                     redirect_stderr(io.StringIO()):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            self.assertTrue(user_path.exists())
+            user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            names = {e["name"] for e in user_data.get("packs", [])}
+            self.assertIn("myown", names)
 
 
 if __name__ == "__main__":

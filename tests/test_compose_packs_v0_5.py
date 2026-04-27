@@ -1685,5 +1685,362 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         self.assertNotEqual(entry["resolved_commit"], "v0.1.0")
 
 
+# ----------------------------------------------------------------------
+# v0.5.2: Transaction drift gate + run_uninstall_pack
+# ----------------------------------------------------------------------
+
+
+from packs import transaction as txn_mod  # noqa: E402
+from packs import state as state_mod  # noqa: E402
+from packs import uninstall as uninstall_mod  # noqa: E402
+
+
+class TransactionDriftGateTests(unittest.TestCase):
+    """v0.5.2 Transaction.commit drift gate.
+
+    Five categories per PLAN-aa-v0.5.2.md § "Write-path drift gate":
+    pack-output, internal-state, core-output, json-merge, unmanaged.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.staging = self.root / "staging"
+        self.lock_path = self.root / "lock.lock"
+
+    def test_managed_drift_aborts_commit(self) -> None:
+        """Tracked pack-output with hand-edited content → DriftAbort."""
+        target = self.root / "tracked.md"
+        target.write_text("hand-edited\n", encoding="utf-8")
+        recorded_sha = "ab" * 32  # arbitrary 64-char sha distinct from current
+        with self.assertRaises(txn_mod.DriftAbort) as ctx:
+            with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+                txn.stage_write(target, b"new content\n")
+                txn.set_expected_prestate({
+                    str(target): (txn_mod.PRESTATE_PACK_OUTPUT, recorded_sha),
+                })
+        # Target must NOT have been overwritten.
+        self.assertEqual(
+            target.read_text(encoding="utf-8"), "hand-edited\n",
+            "drift gate must roll back; target remains pre-commit content",
+        )
+        # The drift report names the path.
+        self.assertEqual(len(ctx.exception.drift_paths), 1)
+        path, category, _reason = ctx.exception.drift_paths[0]
+        self.assertEqual(path, str(target))
+        self.assertEqual(category, txn_mod.PRESTATE_PACK_OUTPUT)
+
+    def test_unmanaged_collision_aborts_commit(self) -> None:
+        """Unmanaged path that exists on disk → DriftAbort."""
+        target = self.root / "interloper.txt"
+        target.write_text("user wrote this\n", encoding="utf-8")
+        with self.assertRaises(txn_mod.DriftAbort) as ctx:
+            with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+                txn.stage_write(target, b"composer would write this\n")
+                txn.set_expected_prestate({
+                    str(target): (txn_mod.PRESTATE_UNMANAGED, None),
+                })
+        self.assertEqual(
+            target.read_text(encoding="utf-8"), "user wrote this\n",
+        )
+        self.assertEqual(len(ctx.exception.drift_paths), 1)
+
+    def test_core_output_optimistic_concurrency_passes_when_unchanged(self) -> None:
+        """Composer-owned core: stage-time hash equals commit-time hash."""
+        target = self.root / "AGENTS.md"
+        target.write_text("# old\n", encoding="utf-8")
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, b"# new\n")
+            txn.set_expected_prestate({
+                str(target): (txn_mod.PRESTATE_CORE_OUTPUT, None),
+            })
+        # Commit succeeded; new content is on disk.
+        self.assertEqual(target.read_text(encoding="utf-8"), "# new\n")
+
+    def test_json_merge_target_does_not_reject_existing_settings_json(self) -> None:
+        """Active-permission settings.json category: existing file is OK."""
+        settings = self.root / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"old": true}\n', encoding="utf-8")
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(settings, b'{"new": true}\n')
+            txn.set_expected_prestate({
+                str(settings): (txn_mod.PRESTATE_JSON_MERGE, None),
+            })
+        self.assertEqual(settings.read_text(encoding="utf-8"), '{"new": true}\n')
+
+    def test_unmanaged_absent_path_passes(self) -> None:
+        """Unmanaged path with no on-disk file → allow (first install)."""
+        target = self.root / "fresh.md"
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, b"hello\n")
+            txn.set_expected_prestate({
+                str(target): (txn_mod.PRESTATE_UNMANAGED, None),
+            })
+        self.assertEqual(target.read_text(encoding="utf-8"), "hello\n")
+
+    def test_pack_output_first_install_no_recorded_sha_passes(self) -> None:
+        """Pack output with recorded=None and target absent → allow."""
+        target = self.root / "tracked.md"
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, b"first install\n")
+            txn.set_expected_prestate({
+                str(target): (txn_mod.PRESTATE_PACK_OUTPUT, None),
+            })
+        self.assertEqual(target.read_text(encoding="utf-8"), "first install\n")
+
+    def test_empty_expected_prestate_skips_gate(self) -> None:
+        """v0.4.0/v0.5.0 callers (no expected_prestate) see unchanged behavior."""
+        target = self.root / "untracked.md"
+        target.write_text("existing\n", encoding="utf-8")
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, b"new\n")
+            # Intentionally do NOT call set_expected_prestate.
+        self.assertEqual(target.read_text(encoding="utf-8"), "new\n")
+
+    def test_set_expected_prestate_rejects_unknown_category(self) -> None:
+        """A typo in the composer's classification map fails fast."""
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            with self.assertRaises(txn_mod.TransactionError):
+                txn.set_expected_prestate({
+                    "/tmp/x": ("not-a-real-category", None),
+                })
+
+
+class RunUninstallPackTests(unittest.TestCase):
+    """v0.5.2 ``run_uninstall_pack(name)`` semantics."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.user_home = self.root / "home"
+        self.user_home.mkdir()
+        (self.user_home / ".claude").mkdir()
+        self.repo_id = str(self.root)
+
+    def _write_pack_lock(self, body: dict) -> Path:
+        path = self.root / ".agent-config" / "pack-lock.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "packs": body}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
+
+    def _write_project_state(self, entries: list) -> Path:
+        path = self.root / ".agent-config" / "pack-state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "entries": entries}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
+
+    def _write_user_state(self, entries: list) -> Path:
+        path = self.user_home / ".claude" / "pack-state.json"
+        payload = {"version": 1, "entries": entries}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
+
+    def _make_pack_entry(
+        self,
+        *,
+        files: list,
+        source_url: str = "https://github.com/x/y",
+    ) -> dict:
+        return {
+            "source_url": source_url,
+            "requested_ref": "main",
+            "resolved_commit": "ab" * 20,
+            "files": files,
+        }
+
+    def _passive_file(self, output_paths: list, sha: str) -> dict:
+        return {
+            "role": "passive",
+            "host": None,
+            "source_path": "docs/x.md",
+            "input_sha256": sha,
+            "output_paths": output_paths,
+            "output_scope": "project-local",
+            "effective_update_policy": "prompt",
+        }
+
+    def test_no_op_when_pack_not_in_lock(self) -> None:
+        self._write_pack_lock({})
+        outcome = uninstall_mod.run_uninstall_pack(
+            self.root, "missing", user_home=self.user_home,
+            repo_id=self.repo_id,
+        )
+        self.assertEqual(outcome.status, uninstall_mod.STATUS_NO_OP)
+
+    def test_single_pack_uninstall_removes_only_that_pack(self) -> None:
+        """Lock with two packs; remove pack A; B's lock entry intact."""
+        out_a = self.root / "a-output.md"
+        out_a.write_bytes(b"A content\n")
+        sha_a = txn_mod._sha256_bytes(b"A content\n")
+        out_b = self.root / "b-output.md"
+        out_b.write_bytes(b"B content\n")
+        sha_b = txn_mod._sha256_bytes(b"B content\n")
+        self._write_pack_lock({
+            "pack-a": self._make_pack_entry(
+                files=[self._passive_file(["a-output.md"], sha_a)],
+            ),
+            "pack-b": self._make_pack_entry(
+                files=[self._passive_file(["b-output.md"], sha_b)],
+            ),
+        })
+        self._write_project_state([
+            {"pack": "pack-a", "output_path": "a-output.md", "sha256": sha_a},
+            {"pack": "pack-b", "output_path": "b-output.md", "sha256": sha_b},
+        ])
+        outcome = uninstall_mod.run_uninstall_pack(
+            self.root, "pack-a", user_home=self.user_home,
+            repo_id=self.repo_id,
+        )
+        self.assertEqual(outcome.status, uninstall_mod.STATUS_CLEAN)
+        self.assertEqual(outcome.packs_removed, ["pack-a"])
+        # A's output deleted; B's output preserved.
+        self.assertFalse(out_a.exists())
+        self.assertTrue(out_b.exists())
+        # Lock retains pack-b only.
+        post_lock = state_mod.load_pack_lock(
+            self.root / ".agent-config" / "pack-lock.json"
+        )
+        self.assertNotIn("pack-a", post_lock["packs"])
+        self.assertIn("pack-b", post_lock["packs"])
+        # Project state retains pack-b's entry only.
+        post_state = state_mod.load_project_state(
+            self.root / ".agent-config" / "pack-state.json"
+        )
+        names = {e["pack"] for e in post_state["entries"]}
+        self.assertEqual(names, {"pack-b"})
+
+    def test_shared_output_retained_when_other_pack_claims_it(self) -> None:
+        """Two packs share output path; remove pack A; output retained."""
+        shared = self.root / "shared.md"
+        shared.write_bytes(b"shared content\n")
+        sha = txn_mod._sha256_bytes(b"shared content\n")
+        self._write_pack_lock({
+            "pack-a": self._make_pack_entry(
+                files=[self._passive_file(["shared.md"], sha)],
+            ),
+            "pack-b": self._make_pack_entry(
+                files=[self._passive_file(["shared.md"], sha)],
+            ),
+        })
+        self._write_project_state([
+            {"pack": "pack-a", "output_path": "shared.md", "sha256": sha},
+            {"pack": "pack-b", "output_path": "shared.md", "sha256": sha},
+        ])
+        outcome = uninstall_mod.run_uninstall_pack(
+            self.root, "pack-a", user_home=self.user_home,
+            repo_id=self.repo_id,
+        )
+        self.assertEqual(outcome.status, uninstall_mod.STATUS_CLEAN)
+        # Shared output retained.
+        self.assertTrue(shared.exists())
+        # Lock now contains pack-b only.
+        post_lock = state_mod.load_pack_lock(
+            self.root / ".agent-config" / "pack-lock.json"
+        )
+        self.assertEqual(set(post_lock["packs"].keys()), {"pack-b"})
+
+    def test_drift_on_owned_output_returns_drift_status(self) -> None:
+        """Pre-edit one of the pack's outputs; drift status; lock retained."""
+        output = self.root / "drifted.md"
+        original_sha = txn_mod._sha256_bytes(b"original\n")
+        output.write_bytes(b"hand-edited\n")
+        self._write_pack_lock({
+            "pack-a": self._make_pack_entry(
+                files=[self._passive_file(["drifted.md"], original_sha)],
+            ),
+        })
+        self._write_project_state([
+            {"pack": "pack-a", "output_path": "drifted.md", "sha256": original_sha},
+        ])
+        outcome = uninstall_mod.run_uninstall_pack(
+            self.root, "pack-a", user_home=self.user_home,
+            repo_id=self.repo_id,
+        )
+        self.assertEqual(outcome.status, uninstall_mod.STATUS_DRIFT)
+        # Drifted file preserved on disk.
+        self.assertTrue(output.exists())
+        self.assertEqual(output.read_text(encoding="utf-8"), "hand-edited\n")
+        # Lock entry retained for retry.
+        post_lock = state_mod.load_pack_lock(
+            self.root / ".agent-config" / "pack-lock.json"
+        )
+        self.assertIn("pack-a", post_lock["packs"])
+
+    def test_user_level_filelike_remaining_owner_keeps_file_on_disk(self) -> None:
+        """Two repos own a user-level file; remove from one; file retained."""
+        hook = self.user_home / ".claude" / "hooks" / "pack-a" / "00-x.py"
+        hook.parent.mkdir(parents=True)
+        hook.write_bytes(b"# hook content\n")
+        hook_sha = txn_mod._sha256_bytes(b"# hook content\n")
+        repo_x = "/path/to/repo_x"
+        repo_y = "/path/to/repo_y"
+        # User state: file has owners from both repos.
+        user_state_entries = [
+            {
+                "kind": "active-hook",
+                "target_path": str(hook),
+                "expected_sha256_or_json": hook_sha,
+                "owners": [
+                    {
+                        "repo_id": repo_x,
+                        "pack": "pack-a",
+                        "requested_ref": "main",
+                        "resolved_commit": "ab" * 20,
+                        "expected_sha256_or_json": hook_sha,
+                    },
+                    {
+                        "repo_id": repo_y,
+                        "pack": "pack-a",
+                        "requested_ref": "main",
+                        "resolved_commit": "ab" * 20,
+                        "expected_sha256_or_json": hook_sha,
+                    },
+                ],
+            }
+        ]
+        self._write_user_state(user_state_entries)
+        # Pack-lock for repo_x has the hook as a user-level output.
+        self._write_pack_lock({
+            "pack-a": {
+                "source_url": "https://github.com/x/y",
+                "requested_ref": "main",
+                "resolved_commit": "ab" * 20,
+                "files": [
+                    {
+                        "role": "active-hook",
+                        "host": "claude-code",
+                        "source_path": "hooks/x.py",
+                        "input_sha256": hook_sha,
+                        "output_paths": [str(hook)],
+                        "output_scope": "user-level",
+                        "effective_update_policy": "prompt",
+                    }
+                ],
+            }
+        })
+        self._write_project_state([])
+        outcome = uninstall_mod.run_uninstall_pack(
+            self.root, "pack-a", user_home=self.user_home,
+            repo_id=repo_x,
+        )
+        self.assertEqual(outcome.status, uninstall_mod.STATUS_CLEAN)
+        # File still on disk because repo_y owns it.
+        self.assertTrue(hook.exists())
+        # User state has the entry but only repo_y as owner.
+        post_user = state_mod.load_user_state(
+            self.user_home / ".claude" / "pack-state.json"
+        )
+        entries = post_user.get("entries", [])
+        self.assertEqual(len(entries), 1)
+        owners = entries[0]["owners"]
+        owner_keys = {(o["repo_id"], o["pack"]) for o in owners}
+        self.assertEqual(owner_keys, {(repo_y, "pack-a")})
+
+
 if __name__ == "__main__":
     unittest.main()
