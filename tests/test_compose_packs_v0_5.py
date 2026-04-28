@@ -934,6 +934,66 @@ class TestComposeSummary(unittest.TestCase):
         self.assertIn("ANYWHERE_AGENTS_UPDATE", out)
 
 
+class TestPrintAdoptionSummary(unittest.TestCase):
+    """v0.5.3 ``print_adoption_summary`` prints a count + indented path
+    list when the drift gate adopted on-disk content that already matched
+    what the pack would write. Empty input prints nothing so a clean
+    install stays quiet.
+    """
+
+    def test_empty_list_prints_nothing(self) -> None:
+        buf = io.StringIO()
+        compose_packs.print_adoption_summary([], stream=buf)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_single_path_prints_header_and_one_indented_line(self) -> None:
+        buf = io.StringIO()
+        compose_packs.print_adoption_summary(
+            ["/repo/.claude/skills/bibref-filler/SKILL.md"], stream=buf,
+        )
+        out = buf.getvalue()
+        # Header carries the count, the audit-trail wording, and the
+        # ``pack-lock.json`` callout (so users searching their terminal
+        # log for either token find the line).
+        self.assertIn("adopted 1 pre-existing", out)
+        self.assertIn("pack-lock.json", out)
+        self.assertIn("content matched pack output", out)
+        # Path appears with the same 2-space indent the drift error uses.
+        self.assertIn(
+            "  /repo/.claude/skills/bibref-filler/SKILL.md", out,
+        )
+        # Exactly two output lines: header + one path.
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 2)
+
+    def test_many_paths_listed_in_input_order(self) -> None:
+        paths = [
+            "/repo/.claude/skills/bibref-filler/SKILL.md",
+            "/repo/.claude/skills/dual-pass-workflow/SKILL.md",
+            "/repo/.claude/skills/figure-prompt-builder/SKILL.md",
+        ]
+        buf = io.StringIO()
+        compose_packs.print_adoption_summary(paths, stream=buf)
+        out = buf.getvalue()
+        # Count is the list length.
+        self.assertIn("adopted 3 pre-existing", out)
+        # Each path appears exactly once, indented.
+        for p in paths:
+            self.assertIn(f"  {p}\n", out)
+        # And the order on stdout matches the input order — the user
+        # sees adoptions in the same sequence the transaction emitted
+        # them so the output is reproducible across runs.
+        idx = [out.index(f"  {p}\n") for p in paths]
+        self.assertEqual(idx, sorted(idx))
+
+    def test_default_stream_is_stdout(self) -> None:
+        # When ``stream`` is omitted, output flows through sys.stdout so
+        # production callers (``_do_compose_v2``) need not wire a stream.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            compose_packs.print_adoption_summary(["/repo/file.md"])
+        self.assertIn("/repo/file.md", buf.getvalue())
+
+
 # =====================================================================
 # Phase 8 carry-forward A: validate_url_fn wiring at production path.
 # =====================================================================
@@ -1806,6 +1866,104 @@ class TransactionDriftGateTests(unittest.TestCase):
                 txn.set_expected_prestate({
                     "/tmp/x": ("not-a-real-category", None),
                 })
+
+    # ------------------------------------------------------------------
+    # v0.5.3 adopt-on-match
+    # ------------------------------------------------------------------
+
+    def test_unmanaged_collision_matching_content_adopted(self) -> None:
+        """v0.5.3: pre-existing unmanaged file whose content already
+        matches what the pack would write is adopted into the lockfile
+        instead of rejected. Closes AC->AA migration / interrupted-pack
+        / team-clone / manual-deploy gaps.
+        """
+        target = self.root / "skill-file.md"
+        content = b"identical bytes\n"
+        # Simulate the AC->AA / interrupted-add scenario: file already on
+        # disk with the exact bytes the pack would write.
+        target.write_bytes(content)
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, content)
+            txn.set_expected_prestate({
+                str(target): (txn_mod.PRESTATE_UNMANAGED, None),
+            })
+        # Commit succeeded (no DriftAbort).
+        self.assertEqual(target.read_bytes(), content)
+        # The path was recorded as adopted, not as drift.
+        self.assertEqual(txn.adopted_paths, [str(target)])
+
+    def test_unmanaged_collision_mismatched_content_rejected(self) -> None:
+        """v0.5.3 negative: when the on-disk content differs from what
+        the pack would write, the gate still rejects (preserving the
+        v0.5.2 protection against silent user-edit clobber).
+        """
+        target = self.root / "skill-file.md"
+        target.write_bytes(b"user customized this\n")
+        with self.assertRaises(txn_mod.DriftAbort) as ctx:
+            with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+                txn.stage_write(target, b"pack would write this\n")
+                txn.set_expected_prestate({
+                    str(target): (txn_mod.PRESTATE_UNMANAGED, None),
+                })
+        # User's file is preserved.
+        self.assertEqual(
+            target.read_bytes(), b"user customized this\n",
+        )
+        # Drift report names the path with the unmanaged-collision reason.
+        self.assertEqual(len(ctx.exception.drift_paths), 1)
+        path, category, _ = ctx.exception.drift_paths[0]
+        self.assertEqual(path, str(target))
+        self.assertEqual(category, txn_mod.PRESTATE_UNMANAGED)
+
+    def test_unmanaged_collision_partial_match_rejects_only_mismatch(
+        self,
+    ) -> None:
+        """v0.5.3: directory-level scenarios (e.g., skills with multiple
+        files) where some files match and some are user-customized must
+        adopt the matchers and still drift on the customized ones. The
+        commit aborts (any drift triggers DriftAbort), but adopted_paths
+        captures the matchers so the surrounding test asserts both.
+        """
+        match_path = self.root / "skill" / "ok.md"
+        diff_path = self.root / "skill" / "user-edited.md"
+        match_path.parent.mkdir()
+        match_path.write_bytes(b"shared bytes\n")
+        diff_path.write_bytes(b"user wrote this\n")
+        with self.assertRaises(txn_mod.DriftAbort) as ctx:
+            with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+                txn.stage_write(match_path, b"shared bytes\n")
+                txn.stage_write(diff_path, b"pack would write\n")
+                txn.set_expected_prestate({
+                    str(match_path): (txn_mod.PRESTATE_UNMANAGED, None),
+                    str(diff_path): (txn_mod.PRESTATE_UNMANAGED, None),
+                })
+        # Drift list contains only the mismatched file.
+        drift_paths = [p for p, _c, _r in ctx.exception.drift_paths]
+        self.assertEqual(drift_paths, [str(diff_path)])
+        # Both files left untouched on disk (DriftAbort rolled back staging).
+        self.assertEqual(match_path.read_bytes(), b"shared bytes\n")
+        self.assertEqual(diff_path.read_bytes(), b"user wrote this\n")
+
+    def test_adopted_paths_initialized_empty(self) -> None:
+        """A fresh transaction starts with no adopted paths. Tests of
+        the no-collision path should not need to set adopted_paths
+        explicitly to None.
+        """
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            self.assertEqual(txn.adopted_paths, [])
+
+    def test_unmanaged_no_collision_clean_install_no_adopt(self) -> None:
+        """v0.5.3 sanity: a clean install (target absent) is not an
+        adoption — nothing to adopt — and adopted_paths stays empty.
+        """
+        target = self.root / "fresh.md"
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            txn.stage_write(target, b"hello\n")
+            txn.set_expected_prestate({
+                str(target): (txn_mod.PRESTATE_UNMANAGED, None),
+            })
+        self.assertEqual(target.read_bytes(), b"hello\n")
+        self.assertEqual(txn.adopted_paths, [])
 
 
 class RunUninstallPackTests(unittest.TestCase):

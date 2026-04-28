@@ -11,6 +11,26 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.5.3] — 2026-04-27
+
+### Highlights
+
+- **Drift gate adopt-on-match.** v0.5.2's drift gate rejects any pre-existing unmanaged file at a target path, blocking AC→AA migrations, interrupted `pack add` resumptions, team-clone first runs (where `.claude/skills/` is committed but `.agent-config/pack-lock.json` is gitignored), and manual / sibling-tool deploys to skill paths. v0.5.3 keeps the rejection for content drift but adopts the file into `pack-lock.json` when its on-disk sha256 already matches what the pack would write. The protection against silent user-edit clobber is unchanged: hash mismatch still aborts with the same `DriftAbort` and recovery line.
+
+### Changed
+
+- **`Transaction._validate_prestate` (`scripts/packs/transaction.py`).** The `PRESTATE_UNMANAGED` branch now compares the on-disk sha256 against the staged op's `new_content_sha256`. Match → record path on the new `Transaction.adopted_paths` list and skip the drift; subsequent `_apply_op` rewrites byte-identical content, so the lockfile entry the dispatcher already recorded becomes the authoritative ownership record. Mismatch (or `new_content_sha256` missing) → keep the v0.5.2 reject behavior. `OP_DELETE` and the four non-unmanaged categories are unchanged.
+- **Composer adoption logging (`scripts/compose_packs.py`).** After commit, when `Transaction.adopted_paths` is non-empty, the composer emits one stdout line — `ℹ composer adopted N pre-existing file(s) into pack-lock.json (content matched pack output):` — followed by the absolute paths in the same 2-space-indent style as the drift error. Silent adoption is avoided so the user sees what crossed the gate.
+
+### Internals
+
+- **`Transaction.adopted_paths`.** New instance attribute, initialized empty in `__init__`. Populated by `_validate_prestate` on every gate run; the same field is used by single-file collisions and per-file directory-handler scenarios (the `kind: skill` handler stages one op per file under `.claude/skills/<name>/`, so a 19-file skill that fully matches reports 19 entries).
+- **Five new tests in `TransactionDriftGateTests`.** `test_unmanaged_collision_matching_content_adopted` asserts the new adoption path; `test_unmanaged_collision_mismatched_content_rejected` pins the negative case; `test_unmanaged_collision_partial_match_rejects_only_mismatch` covers the per-file directory scenario where some files match and some are user-edited; `test_adopted_paths_initialized_empty` and `test_unmanaged_no_collision_clean_install_no_adopt` pin the no-adopt baseline.
+
+### Migration
+
+- v0.5.2 users hitting the drift gate on AC→AA migration / interrupted `pack add` / team-clone first run / manual deploy can now upgrade to v0.5.3 and rerun the original command. No backup / move dance required when content already matches what the pack would write. If the pre-existing file's content differs (genuine user edit), the recovery path is unchanged: back up local edits, then rerun.
+
 ## [0.5.2] — 2026-04-27
 
 ### Highlights

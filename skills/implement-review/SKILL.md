@@ -164,6 +164,18 @@ Then wait for the user to relay the reviewer's feedback or confirm that the revi
 
 Then wait for the user to relay the reviewer's feedback or confirm that the reviewer has finished.
 
+### 1d. Auto-watch (terminal path only)
+
+After Phase 1c emits the prompt and records the expected reviewer set + emission time, the terminal path **automatically** launches a background watcher that detects when the reviewer writes `Review-<expected>.md` and resumes Phase 2 — eliminating the manual "done" relay. The watcher runs by default; the user does not need to confirm. To opt out, the user can say so explicitly (e.g., "stop auto-watch", "manual mode this round") and the skill terminates the background process and falls through to the wait-for-user path. Plugin paths skip this subsection entirely (IDE plugins typically have the file open and gain little from auto-watch).
+
+Launch the platform-appropriate watcher script immediately after emitting the prompt, using positional arguments `(FILE_GLOB, ROUND_NUMBER, EXPECTED_REVIEWERS)`. Look up the script in this order: `skills/implement-review/scripts/auto-watch.{sh,ps1}` (repo-local), then `.agent-config/repo/skills/implement-review/scripts/auto-watch.{sh,ps1}` (bootstrapped). Use the Bash variant on macOS / Linux and the PowerShell variant on Windows. `FILE_GLOB` is `Review-<expected>.md` for a single expected reviewer or `Review-*.md` for multiple; `EXPECTED_REVIEWERS` is the comma-separated normalized name list from Phase 1c (e.g., `Codex` or `Codex,GitHub-Copilot`). Run the watcher in the background so the skill can keep accepting user input while it polls.
+
+The watcher polls every 5 seconds. It fires when (a) the file's mtime has advanced past the snapshot taken at watcher startup, (b) the file has been quiet for 10 seconds (mtime is at least 10 seconds in the past), AND (c) its first line equals `<!-- Round N -->` after stripping trailing `\r` and whitespace. Hard timeout is 60 minutes. Stdout schema is exactly two lines: `WATCH-START round=N reviewers=<csv> timeout=3600s` followed by either `DONE <absolute-path>` (exit 0) or `TIMEOUT` (exit 2). Total output is ~50 tokens whether successful or timed out.
+
+When the watcher emits `DONE <path>`, resume Phase 2 immediately. The watcher's path output is informational; Phase 2 still re-lists `Review-*.md` itself and applies the freshness + scope partition described below. If the expected set has multiple reviewers and only one fired, Phase 2's reviewer-specific follow-up handles the rest.
+
+When the watcher emits `TIMEOUT`, print `Auto-watch timed out after 60 min; reply 'done' when the reviewer finishes.` and resume the existing wait-for-user path. On explicit opt-out, user interrupt, or watcher launch failure, also fall through to the same wait-for-user path. The fallback is the unchanged Phase 1c → Phase 2 flow, so no Phase 2 logic depends on whether auto-watch was used.
+
 ## Phase 2: Intake Feedback
 
 Reviewers are instructed to write their review to a `Review-<AgentName>.md` file in the repository root, using their own self-reported name (see Phase 1c). When the user says a reviewer is done, or when multiple reviewers have been run in parallel for the same round, list the files matching `Review-*.md` at the repo root. Apply the two-axis partition described below (freshness + scope) to decide which files to read, and report any ignored files to the user.

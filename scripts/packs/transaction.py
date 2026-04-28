@@ -219,6 +219,12 @@ class Transaction:
         # default) disables the gate so callers that don't supply it
         # see v0.4.0/v0.5.0 behavior.
         self.expected_prestate: dict[str, tuple[str, str | None]] = {}
+        # v0.5.3 adopt-on-match: target paths whose pre-existing on-disk
+        # content matched what this transaction was about to write. The
+        # drift gate adopts these instead of rejecting them; the composer
+        # caller may surface the count to the user. Populated by
+        # :meth:`_validate_prestate` and reset on every gate run.
+        self.adopted_paths: list[str] = []
 
     # ------------------------------------------------------------------
     # Context management
@@ -357,7 +363,14 @@ class Transaction:
           writer that mutated the file between stage_write and commit
           loses.
         - ``PRESTATE_UNMANAGED``: present-on-disk → unmanaged collision
-          (refuse to clobber); absent → allow.
+          UNLESS the on-disk sha256 already equals the staged
+          ``new_content_sha256`` (v0.5.3 adopt-on-match). On match, the
+          path is appended to ``self.adopted_paths`` and skipped — the
+          subsequent ``_apply_op`` rewrites byte-identical content, so
+          the file ends up owned by the lockfile entry the caller just
+          recorded. On mismatch (or ``new_content_sha256`` missing for
+          any reason), keep the v0.5.2 reject behavior. Absent target →
+          allow.
         - No classification → behave as ``PRESTATE_UNMANAGED`` (fail-safe).
 
         Delete and restamp ops are validated against ``target_path`` /
@@ -366,6 +379,7 @@ class Transaction:
         pre-state hash).
         """
         drift: list[tuple[str, str, str]] = []
+        adopted: list[str] = []
         for op in self.ops:
             kind = op["op"]
             if kind == OP_WRITE:
@@ -436,15 +450,25 @@ class Transaction:
                     )
             else:
                 # PRESTATE_UNMANAGED. If the file already exists, refuse
-                # to clobber.
+                # to clobber UNLESS its content already matches what we
+                # were about to write — v0.5.3 adopt-on-match closes the
+                # AC->AA migration gap, interrupted-pack-add resumption,
+                # team-collaboration first-clone, and manual-deploy
+                # adoption cases without weakening the gate (mismatched
+                # content still rejects, preserving user edits).
                 if current is not None:
-                    drift.append(
-                        (
-                            target_str,
-                            category,
-                            "unmanaged file already exists at target path",
+                    new_hash = op.get("new_content_sha256")
+                    if new_hash is not None and current == new_hash:
+                        adopted.append(target_str)
+                    else:
+                        drift.append(
+                            (
+                                target_str,
+                                category,
+                                "unmanaged file already exists at target path",
+                            )
                         )
-                    )
+        self.adopted_paths = adopted
         return drift
 
     def commit(self) -> None:

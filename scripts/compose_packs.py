@@ -284,6 +284,31 @@ def print_compose_summary(selections, outcomes, pending_updates, host: str) -> N
         )
 
 
+def print_adoption_summary(
+    adopted_paths: list[str], stream: Any = None
+) -> None:
+    """v0.5.3: surface drift-gate adopt-on-match results.
+
+    Empty ``adopted_paths`` is a clean install with no adoptions; emit
+    nothing so the normal-run case stays quiet. Non-empty triggers a
+    header line with the count plus one indented absolute path per
+    adoption, matching the format of the drift error path so users see
+    the symmetric audit trail.
+
+    ``stream`` defaults to ``sys.stdout``. Tests inject ``io.StringIO()``
+    to capture output without relying on ``redirect_stdout``.
+    """
+    if not adopted_paths:
+        return
+    out = stream if stream is not None else sys.stdout
+    out.write(
+        f"ℹ composer adopted {len(adopted_paths)} pre-existing "
+        f"file(s) into pack-lock.json (content matched pack output):\n"
+    )
+    for path in adopted_paths:
+        out.write(f"  {path}\n")
+
+
 def _validated_state_bytes(
     write_fn: Callable[[Path, dict[str, Any]], None], payload: dict[str, Any]
 ) -> bytes:
@@ -1070,6 +1095,13 @@ def _do_compose_v2(
     except OSError as exc:
         sys.stderr.write(f"error: composition failed: {exc}\n")
         return 1
+
+    # v0.5.3: surface adopt-on-match results so the audit trail stays
+    # visible alongside the per-pack summary. The drift gate adopts a
+    # pre-existing unmanaged file into pack-lock when its on-disk sha256
+    # matches what the pack would write (AC->AA migration, interrupted
+    # prior pack add, team-clone first run, manual deploy).
+    print_adoption_summary(txn.adopted_paths)
 
     # ----- Phase 8 post-commit: pending-updates.json invariant -----
     # Round 3 M4: clear pending-updates.json on every apply path AND on
