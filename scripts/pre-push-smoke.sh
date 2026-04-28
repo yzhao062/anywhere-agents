@@ -66,7 +66,15 @@ if [ ! -f scripts/generate_agent_configs.py ]; then
   skip "scripts/generate_agent_configs.py not found in this repo; skipping determinism check"
 else
   cp AGENTS.md "$TMPDIR/AGENTS.md"
-  _py=$(command -v python3 || command -v python || true)
+  # Prefer the shipped _python wrapper, which filters out Windows
+  # Store python.exe shims that resolve ahead of real interpreters via
+  # %LOCALAPPDATA%\Microsoft\WindowsApps\. Falls back to PATH discovery
+  # on systems where the wrapper is missing or non-executable.
+  if [ -x "scripts/_python" ]; then
+    _py="scripts/_python"
+  else
+    _py=$(command -v python3 || command -v python || true)
+  fi
   if [ -z "$_py" ]; then
     fail "python not on PATH; cannot run generator"
   fi
