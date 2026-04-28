@@ -332,6 +332,15 @@ DEFAULT_V2_SELECTIONS: list[dict[str, str]] = [
     {"name": "aa-core-skills"},
 ]
 
+# v0.5.4: name set used by ``_process_selection`` to gate the bundled
+# fallback for inline-source packs whose upstream archive lacks a usable
+# ``pack.yaml``. Keep in sync with DEFAULT_V2_SELECTIONS — a third
+# bundled pack must be added to both lists if the bundled fallback
+# should also cover it.
+DEFAULT_V2_SELECTION_NAMES: frozenset[str] = frozenset(
+    sel["name"] for sel in DEFAULT_V2_SELECTIONS
+)
+
 
 def _resolve_manifest_path(root: Path, explicit: Path | None) -> Path:
     if explicit is not None:
@@ -445,26 +454,68 @@ def _process_selection(
         # Read the third-party manifest from the fetched archive; build
         # a name → pack lookup so the consumer-supplied ``name`` resolves
         # to one of the packs declared by the upstream repo's pack.yaml.
-        remote_manifest = schema.parse_manifest(
-            archive.archive_dir / "pack.yaml"
-        )
-        packs_by_name = {p["name"]: p for p in remote_manifest.get("packs", [])}
-        pack_def = packs_by_name.get(name)
+        # v0.5.4: when upstream pack.yaml is absent OR doesn't declare
+        # the requested name, fall back to the bundled pack-def for
+        # ``DEFAULT_V2_SELECTIONS`` names (e.g., agent-style v0.3.x
+        # predates the v0.4.0 manifest format — the bundled
+        # ``bootstrap/packs.yaml`` is the source of truth for what files
+        # to copy). The fetched archive_dir still provides the byte
+        # source for passive handlers via ``ctx.pack_source_dir``.
+        manifest_path = archive.archive_dir / "pack.yaml"
+        try:
+            remote_manifest = schema.parse_manifest(manifest_path)
+        except schema.ParseError:
+            remote_manifest = None
+        pack_def = None
+        if remote_manifest is not None:
+            packs_by_name = {p["name"]: p for p in remote_manifest.get("packs", [])}
+            pack_def = packs_by_name.get(name)
+        if pack_def is None and name in DEFAULT_V2_SELECTION_NAMES:
+            # v0.5.4 fallback gated on ``DEFAULT_V2_SELECTION_NAMES`` so a
+            # future non-default bundled pack does not silently inherit
+            # this migration-only behavior (Codex Round 1 Low #1).
+            pack_def = _bundled_pack_def(bundled_manifest, name)
         if pack_def is None:
+            if remote_manifest is not None:
+                declared = sorted(
+                    p.get("name", "")
+                    for p in remote_manifest.get("packs", [])
+                )
+                raise ComposeError(
+                    f"remote pack.yaml at {source_url}@{source_ref} does not "
+                    f"declare a pack named {name!r}; declared names: "
+                    f"{declared}"
+                )
             raise ComposeError(
-                f"remote pack.yaml at {source_url}@{source_ref} does not "
-                f"declare a pack named {name!r}; declared names: "
-                f"{sorted(packs_by_name)}"
+                f"remote {source_url}@{source_ref} has no usable pack.yaml "
+                f"at the archive root and {name!r} is not a bundled-default "
+                f"pack; cannot determine pack definition"
             )
         if return_archive:
             return pack_def, archive
         return pack_def, archive.archive_dir
 
     # Bundled-manifest lookup; existing v0.4.0 path.
-    for pack in bundled_manifest.get("packs", []):
-        if pack.get("name") == name:
-            return pack, None
+    pack_def = _bundled_pack_def(bundled_manifest, name)
+    if pack_def is not None:
+        return pack_def, None
     raise ComposeError(f"unknown bundled pack: {name!r}")
+
+
+def _bundled_pack_def(
+    bundled_manifest: dict[str, Any], name: str
+) -> dict[str, Any] | None:
+    """Look up a pack by name in the bundled v2 manifest.
+
+    Returns the pack-def dict or ``None`` if not declared. Shared by the
+    bundled-lookup path and the v0.5.4 inline-source fallback (which
+    uses the bundled definition when the upstream archive has no
+    ``pack.yaml`` — e.g., agent-style v0.3.x).
+    """
+    for pack in bundled_manifest.get("packs", []):
+        if isinstance(pack, dict) and pack.get("name") == name:
+            return pack
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

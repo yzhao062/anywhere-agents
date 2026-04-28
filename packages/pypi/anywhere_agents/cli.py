@@ -145,20 +145,80 @@ def _detect_legacy_ac() -> bool:
 def _migrate_legacy_ac() -> None:
     """Cross-platform delete of legacy AC bootstrap artifacts.
 
-    Removes ``.agent-config/repo``, ``.agent-config/upstream``, and
-    both bootstrap scripts in ``.agent-config/`` so the subsequent AA
+    Removes ``.agent-config/repo``, ``.agent-config/upstream``, and both
+    bootstrap scripts in ``.agent-config/`` so the subsequent AA
     bootstrap re-clones from anywhere-agents.
+
+    v0.5.4 also moves ``.claude/commands/`` aside to a timestamped
+    backup directory. AC's bootstrap copies pointer files into
+    ``.claude/commands/`` (one per skill it ships); AA's aa-core-skills
+    pack also writes pointer files at the same paths but with bytes
+    that may differ from AC. Without the move, AA's drift gate refuses
+    to clobber the AC-leftover pointers (PRESTATE_UNMANAGED) and the
+    migration aborts. The backup directory preserves user-customized
+    files for manual merge.
     """
     import contextlib
+    import stat
+    from datetime import datetime, timezone
+
+    def _force_remove(func, path, _exc_info):
+        """``shutil.rmtree`` onerror callback for Windows-friendly cleanup.
+
+        Git sparse-clone leaves ``.git/objects/pack/*.idx`` and similar
+        files marked read-only on Windows; the default ``rmtree`` aborts
+        with ``PermissionError`` on the first such file. This handler
+        clears the read-only attribute and retries the failed operation.
+        Any second failure is swallowed so the migration continues — the
+        AA bootstrap below re-clones into the same path and overwrites
+        whatever survives. Without this, a v0.5.4 migration aborts mid-
+        delete on Windows with a half-cleaned ``.agent-config/repo/``.
+        """
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except OSError:
+            pass
+        try:
+            func(path)
+        except OSError:
+            pass
+
     cwd = Path.cwd()
     for rel in ("repo",):
         target = cwd / ".agent-config" / rel
         if target.exists():
-            shutil.rmtree(target, ignore_errors=False)
+            # ``onerror`` is the pre-3.12 spelling; ``onexc`` is the
+            # 3.12+ replacement. Use ``onerror`` for backward-compat down
+            # to Python 3.9 (the package's minimum supported version).
+            shutil.rmtree(target, onerror=_force_remove)
     for rel in ("upstream", "bootstrap.sh", "bootstrap.ps1"):
         target = cwd / ".agent-config" / rel
         with contextlib.suppress(FileNotFoundError):
-            os.remove(target)
+            try:
+                os.remove(target)
+            except PermissionError:
+                # Same Windows read-only quirk as above; clear and retry.
+                try:
+                    os.chmod(target, stat.S_IWRITE)
+                    os.remove(target)
+                except OSError:
+                    pass
+    cmds = cwd / ".claude" / "commands"
+    if cmds.exists() and cmds.is_dir() and any(cmds.iterdir()):
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%SZ")
+        backup = cwd / ".claude" / f"commands.bak-{ts}"
+        # If the backup target already exists (rare; same-second migration
+        # retry) bump with a counter so we don't clobber.
+        suffix = 0
+        final = backup
+        while final.exists():
+            suffix += 1
+            final = cwd / ".claude" / f"commands.bak-{ts}-{suffix}"
+        cmds.rename(final)
+        log(
+            f"ℹ Backed up {cmds} -> {final.name} so AA's aa-core-skills "
+            f"can lay down fresh pointer files"
+        )
 
 
 def _bootstrap_main(argv: list[str]) -> int:
@@ -229,6 +289,33 @@ def _bootstrap_main(argv: list[str]) -> int:
 
     if result.returncode != 0:
         log(f"Bootstrap exited with code {result.returncode}")
+        return result.returncode
+
+    # v0.5.4: post-bootstrap reconcile. The bootstrap script just cloned
+    # the AA source and ran the composer with project-side selections
+    # (typically just the bundled defaults on a fresh / migrated
+    # project). User-level packs registered in ``user_config_path()``
+    # have not been reconciled yet. Run ``pack verify --fix --yes`` so
+    # any user-level packs (e.g., agent-pack profile / paper-workflow /
+    # acad-skills) also land in one shot. Skipped when the user has no
+    # user-level config file at all (fast no-op for fresh installs).
+    user_config = _user_config_path()
+    if user_config is not None and user_config.exists():
+        log("Reconciling user-level packs (pack verify --fix --yes)...")
+        try:
+            fix_rc = main(["pack", "verify", "--fix", "--yes"])
+        except SystemExit as exc:
+            fix_rc = exc.code if isinstance(exc.code, int) else 1
+        except Exception as exc:  # pragma: no cover - belt and suspenders
+            log(f"warning: post-bootstrap reconcile raised: {exc}")
+            fix_rc = 1
+        if fix_rc != 0:
+            log(
+                f"warning: post-bootstrap reconcile returned rc={fix_rc}; "
+                f"run `anywhere-agents pack verify --fix` manually to "
+                f"deploy user-level packs."
+            )
+
     return result.returncode
 
 
@@ -462,11 +549,36 @@ def _pack_add(path: Path, source: str, name: str | None, ref: str | None) -> int
 # ----------------------------------------------------------------------
 
 
+def _dedup_user_packs(packs: list[Any]) -> tuple[list[Any], int]:
+    """Return ``(deduped_list, n_dropped)`` for a user-config packs list.
+
+    Keeps the first occurrence per name; later duplicates are dropped.
+    Non-dict entries and entries without ``name`` are preserved as-is.
+    Earlier ``pack add`` versions and concurrent invocations could leave
+    duplicate entries in user-level config; v0.5.4 self-heals at every
+    ``_load_or_create_user_config`` call so the next write persists the
+    deduped list.
+    """
+    seen: set[str] = set()
+    deduped: list[Any] = []
+    n_dropped = 0
+    for entry in packs:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            name = entry["name"]
+            if name in seen:
+                n_dropped += 1
+                continue
+            seen.add(name)
+        deduped.append(entry)
+    return deduped, n_dropped
+
+
 def _load_or_create_user_config(path: Path) -> dict[str, Any]:
     """Return existing user-level config or a fresh empty dict.
 
     Mirrors :func:`_load_user_config` but tolerates a missing file
-    (returns ``{}``) and migrates legacy ``rule_packs:`` to ``packs:``.
+    (returns ``{}``), migrates legacy ``rule_packs:`` to ``packs:``, and
+    silently dedups duplicate-name entries (v0.5.4).
     """
     if not path.exists():
         return {}
@@ -479,6 +591,10 @@ def _load_or_create_user_config(path: Path) -> dict[str, Any]:
             data["packs"] = []
     elif "packs" in data and "rule_packs" in data:
         data.pop("rule_packs", None)
+    packs = data.get("packs")
+    if isinstance(packs, list):
+        deduped, _ = _dedup_user_packs(packs)
+        data["packs"] = deduped
     return data
 
 
@@ -1252,6 +1368,7 @@ def _load_user_observations(user_config_path):
         raise _VerifyParseError(
             f"{user_config_path}: 'packs' must be a list"
         )
+    packs, _ = _dedup_user_packs(packs)
     out = []
     for entry in packs:
         if isinstance(entry, str):
@@ -1903,6 +2020,55 @@ def _pack_verify_fix(user_config_path, project_root, args):
             )
             return 2
 
+    # v0.5.4 self-heal: rewrite the user-config file if it has duplicate
+    # ``packs`` entries (earlier ``pack add`` versions and concurrent
+    # invocations could leave duplicates that shadow dedup checks).
+    # Independent of reconcile; runs even when there are no project-only
+    # rows. Read + dedup + write must hold the user-config lock so a
+    # concurrent ``pack add`` cannot land between the read at the top of
+    # this block and the write at the bottom (Codex Round 1 Medium).
+    # Errors are non-fatal — verify continues with the in-memory deduped
+    # view from ``_load_user_observations``.
+    if user_config_path is not None and user_config_path.exists():
+        try:
+            from anywhere_agents.packs import locks as _locks_mod  # type: ignore[import-not-found]
+        except ImportError:
+            _locks_mod = None  # type: ignore[assignment]
+        if _locks_mod is not None:
+            user_lock = _user_config_lock_path(user_config_path)
+            try:
+                with _locks_mod.acquire(user_lock, timeout=30):
+                    try:
+                        raw_user = _read_yaml_or_none(user_config_path)
+                    except _VerifyParseError:
+                        raw_user = None
+                    if isinstance(raw_user, dict):
+                        raw_packs = raw_user.get("packs")
+                        if isinstance(raw_packs, list):
+                            deduped, n_dropped = _dedup_user_packs(raw_packs)
+                            if n_dropped > 0:
+                                raw_user["packs"] = deduped
+                                try:
+                                    _write_user_config(user_config_path, raw_user)
+                                    log(
+                                        f"--fix: dropped {n_dropped} duplicate "
+                                        f"pack entry/entries from "
+                                        f"{user_config_path}"
+                                    )
+                                except OSError as exc:
+                                    log(
+                                        f"warning: dedup self-heal of "
+                                        f"{user_config_path} failed: {exc}"
+                                    )
+            except _locks_mod.LockTimeout:
+                # Another writer holds the lock; skip the durable rewrite
+                # this round. ``_load_user_observations`` still returns the
+                # deduped view in memory for the rest of --fix.
+                log(
+                    f"warning: could not acquire user-config lock for dedup "
+                    f"self-heal of {user_config_path}; skipping rewrite"
+                )
+
     try:
         rows, env_var_value = _verify_gather(user_config_path, project_root)
     except _VerifyParseError as exc:
@@ -1926,26 +2092,21 @@ def _pack_verify_fix(user_config_path, project_root, args):
 
     def _is_bundled_default_row(row: dict) -> bool:
         """Bundled-default packs (aa-core-skills, agent-style) are
-        composer-seeded; they appear in project-side observations even
-        when neither user nor project YAML names them. Reconciling
-        them across layers would create churn (write the synthetic
-        bundled identity into user-level config, then on the next run
-        write it back into the project YAML, ad infinitum). Skip
-        bundled-default rows from --fix's reconcile plan; the
-        composer always materializes them via ``DEFAULT_V2_SELECTIONS``.
+        composer-seeded via ``DEFAULT_V2_SELECTIONS`` — the composer
+        always materializes them from ``bootstrap/packs.yaml`` regardless
+        of any user/project layer entry. v0.5.4: never reconcile these
+        names across layers, regardless of URL form. Reconciling them
+        creates churn: the lock-side URL form (which the lock writer
+        emits because the bundled pack-def has an upstream source for
+        passive content) propagates into user-level config, then back
+        into project YAML, ad infinitum. To override a bundled-default
+        with a different upstream version, edit ``agent-config.yaml``
+        directly and the override is consumed at the project layer; the
+        upstream must declare a v0.4.0+ ``pack.yaml`` (or be one of the
+        DEFAULT_V2_SELECTIONS names; v0.5.4 falls back to the bundled
+        pack-def in the no-manifest case).
         """
-        if row.get("name") not in _DEFAULT_V2_SELECTIONS:
-            return False
-        for layer_key in ("u", "p", "l"):
-            ident = row.get(layer_key)
-            if ident is None:
-                continue
-            raw_url = ident[3] if len(ident) >= 4 else ""
-            if raw_url and raw_url != _BUNDLED_IDENTITY_URL:
-                # The user explicitly named a non-bundled source for
-                # one of the default-seed names — reconcile that row.
-                return False
-        return True
+        return row.get("name") in _DEFAULT_V2_SELECTIONS
 
     user_only_rows = [
         r for r in rows

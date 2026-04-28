@@ -596,6 +596,144 @@ class TestInlineSourceBranch(unittest.TestCase):
                 f"error should mention manifest/pack.yaml: {msg!r}",
             )
 
+    @patch("compose_packs.source_fetch.fetch_pack")
+    def test_inline_source_no_manifest_falls_back_to_bundled_default(self, fetch) -> None:
+        """v0.5.4 fix: when a bundled-default name (e.g., agent-style)
+        is registered with URL form pointing at an upstream that has no
+        pack.yaml, the composer falls back to the bundled pack-def
+        rather than aborting. Closes the AC->AA migration gap where
+        agent-style v0.3.x predates the v0.4.0 manifest format and the
+        user's user-level config (or pack-lock) carried the URL form."""
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = pathlib.Path(d)
+            # No pack.yaml at the archive root — agent-style v0.3.x.
+            fetch.return_value = source_fetch.PackArchive(
+                url="https://github.com/yzhao062/agent-style",
+                ref="v0.3.2",
+                resolved_commit="ab" * 20, method="ssh",
+                archive_dir=archive_dir,
+                canonical_id="yzhao062/agent-style",
+                cache_key="abcd1234/ab12",
+            )
+            bundled_def = {
+                "name": "agent-style",
+                "source": {
+                    "repo": "https://github.com/yzhao062/agent-style",
+                    "ref": "v0.3.2",
+                },
+                "passive": [{"files": [{"from": "docs/rule-pack.md", "to": "AGENTS.md"}]}],
+            }
+            selection = {
+                "name": "agent-style",
+                "source": {
+                    "url": "https://github.com/yzhao062/agent-style",
+                    "ref": "v0.3.2",
+                },
+            }
+            pack_def, archive_dir_out = compose_packs._process_selection(
+                selection,
+                bundled_manifest={"version": 2, "packs": [bundled_def]},
+                cache_root=pathlib.Path(d),
+                host="claude-code",
+            )
+        # The bundled pack-def must be returned with all its passive
+        # entries intact, and the fetched archive_dir is threaded so
+        # passive handlers read the file bytes from the local cache.
+        self.assertEqual(pack_def["name"], "agent-style")
+        self.assertEqual(pack_def.get("passive"), bundled_def["passive"])
+        self.assertEqual(archive_dir_out, archive_dir)
+
+    @patch("compose_packs.source_fetch.fetch_pack")
+    def test_inline_source_no_manifest_does_not_fall_back_for_non_default_name(self, fetch) -> None:
+        """v0.5.4 Round 1 Low #1: even when the bundled manifest happens
+        to declare a non-DEFAULT_V2_SELECTIONS name (a future-bundled
+        pack), the inline-source fallback must NOT consume it. The
+        fallback is migration-only behavior gated on
+        ``DEFAULT_V2_SELECTION_NAMES``."""
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = pathlib.Path(d)
+            fetch.return_value = source_fetch.PackArchive(
+                url="https://github.com/x/y", ref="main",
+                resolved_commit="ab" * 20, method="ssh",
+                archive_dir=archive_dir,
+                canonical_id="x/y", cache_key="abcd1234/ab12",
+            )
+            # Bundled manifest declares a name that is NOT in
+            # DEFAULT_V2_SELECTIONS; with the gate the fallback is
+            # disabled even though the bundled def is present.
+            future_bundled_def = {
+                "name": "future-bundled-pack",
+                "source": "bundled",
+                "default-ref": "bundled",
+            }
+            with self.assertRaises(compose_packs.ComposeError) as cm:
+                compose_packs._process_selection(
+                    {
+                        "name": "future-bundled-pack",
+                        "source": {
+                            "url": "https://github.com/x/y",
+                            "ref": "main",
+                        },
+                    },
+                    bundled_manifest={"version": 2, "packs": [future_bundled_def]},
+                    cache_root=pathlib.Path(d),
+                    host="claude-code",
+                )
+            msg = str(cm.exception)
+            self.assertIn("future-bundled-pack", msg)
+            self.assertIn("not a bundled-default", msg)
+
+    @patch("compose_packs.source_fetch.fetch_pack")
+    def test_inline_source_manifest_present_but_missing_name_falls_back_to_bundled(self, fetch) -> None:
+        """v0.5.4 fix: even when the upstream archive declares a
+        ``pack.yaml`` that doesn't list the requested name, fall back
+        to the bundled pack-def for ``DEFAULT_V2_SELECTIONS`` names. The
+        non-bundled case still raises the existing ComposeError."""
+        archive = MagicMock()
+        archive.archive_dir = Path("/tmp/fake-archive")
+        fetch.return_value = archive
+
+        bundled_def = {
+            "name": "aa-core-skills",
+            "source": "bundled",
+            "default-ref": "bundled",
+            "active": [{"kind": "skill", "files": []}],
+        }
+        with unittest.mock.patch(
+            "compose_packs.schema.parse_manifest",
+            return_value={
+                "version": 2,
+                "packs": [{"name": "other-pack", "source": {"repo": "x", "ref": "v1"}}],
+            },
+        ):
+            # Bundled-default name with URL form: falls back to bundled.
+            pack_def, _arch = compose_packs._process_selection(
+                {
+                    "name": "aa-core-skills",
+                    "source": {"url": "https://github.com/y/aa-core-skills", "ref": "main"},
+                },
+                bundled_manifest={"version": 2, "packs": [bundled_def]},
+                cache_root=Path("/tmp"),
+                host="claude-code",
+            )
+            self.assertEqual(pack_def["name"], "aa-core-skills")
+            self.assertEqual(pack_def.get("active"), bundled_def["active"])
+
+            # Non-bundled name still raises (unchanged behavior).
+            with self.assertRaises(compose_packs.ComposeError) as cm:
+                compose_packs._process_selection(
+                    {
+                        "name": "no-such-pack",
+                        "source": {"url": "https://github.com/y/aa-core-skills", "ref": "main"},
+                    },
+                    bundled_manifest={"version": 2, "packs": [bundled_def]},
+                    cache_root=Path("/tmp"),
+                    host="claude-code",
+                )
+            self.assertIn("no-such-pack", str(cm.exception))
+
 
 # =====================================================================
 # Phase 4: end-to-end host wiring through DispatchContext.

@@ -2114,5 +2114,295 @@ class PackVerifyFixBidirectionalTests(unittest.TestCase):
             self.assertIn("myown", names)
 
 
+class V054DedupTests(unittest.TestCase):
+    """v0.5.4 Fix #3: ``_dedup_user_packs`` and ``_load_or_create_user_config``
+    drop duplicate entries by name; ``_pack_verify_fix`` rewrites the
+    user-config file when duplicates are detected (self-heal)."""
+
+    def test_dedup_user_packs_drops_later_duplicates(self) -> None:
+        from anywhere_agents.cli import _dedup_user_packs
+        packs = [
+            {"name": "profile", "source": {"url": "x", "ref": "main"}},
+            {"name": "paper-workflow", "source": {"url": "x", "ref": "main"}},
+            {"name": "profile", "source": {"url": "x", "ref": "main"}},
+            {"name": "paper-workflow", "source": {"url": "x", "ref": "main"}},
+            {"name": "agent-style", "source": {"url": "y", "ref": "v0.3.2"}},
+        ]
+        deduped, n_dropped = _dedup_user_packs(packs)
+        self.assertEqual(n_dropped, 2)
+        self.assertEqual([e["name"] for e in deduped],
+                         ["profile", "paper-workflow", "agent-style"])
+
+    def test_dedup_user_packs_preserves_non_dict_entries(self) -> None:
+        from anywhere_agents.cli import _dedup_user_packs
+        packs = [
+            "bare-string",  # non-dict; pass-through
+            {"name": "profile", "source": "x"},
+            {"name": "profile", "source": "y"},  # dropped
+            None,  # non-dict; pass-through
+        ]
+        deduped, n_dropped = _dedup_user_packs(packs)
+        self.assertEqual(n_dropped, 1)
+        self.assertEqual(len(deduped), 3)
+        self.assertIn("bare-string", deduped)
+        self.assertIn(None, deduped)
+
+    def test_load_or_create_user_config_dedupes_silently(self) -> None:
+        from anywhere_agents.cli import _load_or_create_user_config
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "config.yaml"
+            path.write_text(
+                "packs:\n"
+                "- {name: profile, source: {url: x, ref: main}}\n"
+                "- {name: paper-workflow, source: {url: x, ref: main}}\n"
+                "- {name: profile, source: {url: x, ref: main}}\n",
+                encoding="utf-8",
+            )
+            data = _load_or_create_user_config(path)
+            self.assertEqual([e["name"] for e in data["packs"]],
+                             ["profile", "paper-workflow"])
+
+    def test_pack_verify_fix_self_heals_duplicates(self) -> None:
+        """`pack verify --fix --yes` on a corrupt user-config rewrites
+        the file with duplicates dropped, even when no reconcile is
+        otherwise needed."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path = pathlib.Path(d) / "user.yaml"
+            user_path.write_text(
+                "packs:\n"
+                "- {name: profile, source: {url: https://github.com/x/y, ref: main}}\n"
+                "- {name: profile, source: {url: https://github.com/x/y, ref: main}}\n"
+                "- {name: paper-workflow, source: {url: https://github.com/x/y, ref: main}}\n"
+                "- {name: paper-workflow, source: {url: https://github.com/x/y, ref: main}}\n",
+                encoding="utf-8",
+            )
+            project_root = pathlib.Path(d) / "project"
+            project_root.mkdir()
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs:\n"
+                "- {name: profile, source: {url: https://github.com/x/y, ref: main}}\n"
+                "- {name: paper-workflow, source: {url: https://github.com/x/y, ref: main}}\n",
+                encoding="utf-8",
+            )
+            class _Args:
+                yes = True
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    return_value=0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            names = [e["name"] for e in data["packs"]]
+            self.assertEqual(names, ["profile", "paper-workflow"])
+
+
+class V054BundledDefaultsNotReconciledTests(unittest.TestCase):
+    """v0.5.4 Fix #2: ``_is_bundled_default_row`` returns True for any
+    DEFAULT_V2_SELECTIONS name, regardless of URL form. Reconciling
+    bundled-defaults across layers (which v0.5.3 still did when the
+    user explicitly named a non-bundled URL) creates churn and triggers
+    the inline-source bug for upstream-without-pack.yaml repos."""
+
+    def test_agent_style_with_url_form_not_reconciled(self) -> None:
+        """User-level config has agent-style at URL form; --fix must
+        skip reconciling it across to the project YAML."""
+        from anywhere_agents.cli import _pack_verify_fix, _BUNDLED_IDENTITY_URL
+        with tempfile.TemporaryDirectory() as d:
+            user_path = pathlib.Path(d) / "user.yaml"
+            user_path.write_text(
+                "packs:\n"
+                "- {name: agent-style, source: {url: https://github.com/yzhao062/agent-style, ref: v0.3.2}}\n",
+                encoding="utf-8",
+            )
+            project_root = pathlib.Path(d) / "project"
+            project_root.mkdir()
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs: []\n",  # explicit opt-out for non-default packs
+                encoding="utf-8",
+            )
+            class _Args:
+                yes = True
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    return_value=0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+            # Project YAML should NOT have agent-style appended; the
+            # composer always materializes it via DEFAULT_V2_SELECTIONS.
+            yaml_data = yaml.safe_load(
+                (project_root / "agent-config.yaml").read_text(encoding="utf-8")
+            )
+            rule_packs = yaml_data.get("rule_packs") or []
+            names = [e["name"] for e in rule_packs if isinstance(e, dict)]
+            self.assertNotIn("agent-style", names)
+
+
+class V054MigrateLegacyAcTests(unittest.TestCase):
+    """v0.5.4: ``_migrate_legacy_ac`` moves ``.claude/commands/`` aside
+    so AA's aa-core-skills can lay down fresh pointer files without
+    drift-gate aborts."""
+
+    def test_migrate_backs_up_claude_commands(self) -> None:
+        from anywhere_agents.cli import _migrate_legacy_ac
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d)
+            ac = project / ".agent-config"
+            ac.mkdir(parents=True)
+            (ac / "upstream").write_text("yzhao062/agent-config\n", encoding="utf-8")
+            (ac / "bootstrap.sh").write_text("stub", encoding="utf-8")
+            (ac / "bootstrap.ps1").write_text("stub", encoding="utf-8")
+            (ac / "repo").mkdir()
+            (ac / "repo" / "junk.txt").write_text("x", encoding="utf-8")
+            cmds = project / ".claude" / "commands"
+            cmds.mkdir(parents=True)
+            (cmds / "implement-review.md").write_text("ac content", encoding="utf-8")
+            (cmds / "bibref-filler.md").write_text("ac content", encoding="utf-8")
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stderr(io.StringIO()):
+                    _migrate_legacy_ac()
+            finally:
+                os.chdir(cwd_before)
+            # AC bits removed.
+            self.assertFalse((ac / "upstream").exists())
+            self.assertFalse((ac / "repo").exists())
+            self.assertFalse((ac / "bootstrap.sh").exists())
+            self.assertFalse((ac / "bootstrap.ps1").exists())
+            # Original .claude/commands/ moved aside.
+            self.assertFalse(cmds.exists())
+            backups = sorted(
+                (project / ".claude").glob("commands.bak-*")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "implement-review.md").exists())
+            self.assertTrue((backups[0] / "bibref-filler.md").exists())
+
+    def test_migrate_skips_backup_when_commands_dir_absent(self) -> None:
+        from anywhere_agents.cli import _migrate_legacy_ac
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d)
+            ac = project / ".agent-config"
+            ac.mkdir(parents=True)
+            (ac / "upstream").write_text("yzhao062/agent-config\n", encoding="utf-8")
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stderr(io.StringIO()):
+                    _migrate_legacy_ac()  # should not raise
+            finally:
+                os.chdir(cwd_before)
+            # No backup directory created.
+            backups = list((project / ".claude").glob("commands.bak-*")) \
+                if (project / ".claude").exists() else []
+            self.assertEqual(backups, [])
+
+
+class V054BootstrapAutoReconcileTests(unittest.TestCase):
+    """v0.5.4 Fix #4: ``_bootstrap_main`` invokes ``pack verify --fix
+    --yes`` after the bootstrap script succeeds so user-level packs
+    reconcile + deploy in one shot."""
+
+    def test_bootstrap_main_invokes_pack_verify_fix(self) -> None:
+        from anywhere_agents import cli
+        with tempfile.TemporaryDirectory() as d:
+            user_dir = pathlib.Path(d) / "userdata"
+            user_dir.mkdir()
+            user_config_path = user_dir / "anywhere-agents" / "config.yaml"
+            user_config_path.parent.mkdir(parents=True)
+            # Non-empty user config so bootstrap reaches the reconcile path.
+            user_config_path.write_text("packs: []\n", encoding="utf-8")
+
+            captured: list[list[str]] = []
+
+            def fake_main(argv: list[str] | None = None) -> int:
+                captured.append(list(argv) if argv else [])
+                return 0
+
+            class FakeResult:
+                returncode = 0
+
+            with patch.object(cli, "_user_config_path", return_value=user_config_path), \
+                 patch("subprocess.run", return_value=FakeResult()), \
+                 patch("urllib.request.urlretrieve"), \
+                 patch.object(cli, "_detect_legacy_ac", return_value=False), \
+                 patch.object(cli, "main", side_effect=fake_main), \
+                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = cli._bootstrap_main([])
+
+            self.assertEqual(rc, 0)
+            # main() must have been re-entered with the reconcile argv.
+            self.assertIn(["pack", "verify", "--fix", "--yes"], captured)
+
+    def test_bootstrap_main_skips_reconcile_when_no_user_config(self) -> None:
+        from anywhere_agents import cli
+        with tempfile.TemporaryDirectory() as d:
+            # Point user_config_path at a path that doesn't exist.
+            missing = pathlib.Path(d) / "no-such-config.yaml"
+
+            captured: list[list[str]] = []
+
+            def fake_main(argv: list[str] | None = None) -> int:
+                captured.append(list(argv) if argv else [])
+                return 0
+
+            class FakeResult:
+                returncode = 0
+
+            with patch.object(cli, "_user_config_path", return_value=missing), \
+                 patch("subprocess.run", return_value=FakeResult()), \
+                 patch("urllib.request.urlretrieve"), \
+                 patch.object(cli, "_detect_legacy_ac", return_value=False), \
+                 patch.object(cli, "main", side_effect=fake_main), \
+                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = cli._bootstrap_main([])
+
+            self.assertEqual(rc, 0)
+            # main() must NOT have been called for reconcile.
+            self.assertEqual(captured, [])
+
+    def test_bootstrap_main_skips_reconcile_when_bootstrap_fails(self) -> None:
+        from anywhere_agents import cli
+        with tempfile.TemporaryDirectory() as d:
+            user_dir = pathlib.Path(d) / "userdata"
+            user_dir.mkdir()
+            user_config_path = user_dir / "anywhere-agents" / "config.yaml"
+            user_config_path.parent.mkdir(parents=True)
+            user_config_path.write_text("packs: []\n", encoding="utf-8")
+
+            captured: list[list[str]] = []
+
+            def fake_main(argv: list[str] | None = None) -> int:
+                captured.append(list(argv) if argv else [])
+                return 0
+
+            class FakeResult:
+                returncode = 1  # bootstrap script failed
+
+            with patch.object(cli, "_user_config_path", return_value=user_config_path), \
+                 patch("subprocess.run", return_value=FakeResult()), \
+                 patch("urllib.request.urlretrieve"), \
+                 patch.object(cli, "_detect_legacy_ac", return_value=False), \
+                 patch.object(cli, "main", side_effect=fake_main), \
+                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = cli._bootstrap_main([])
+
+            self.assertEqual(rc, 1)
+            # main() must NOT have been called for reconcile when bootstrap failed.
+            self.assertEqual(captured, [])
+
+
 if __name__ == "__main__":
     unittest.main()
