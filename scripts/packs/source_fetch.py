@@ -15,8 +15,10 @@ validate->resolve->compare->cache->fetch pipeline:
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -173,6 +175,123 @@ def _compute_dir_sha256(archive_dir: pathlib.Path) -> str:
     return f"dir-sha256:{h.hexdigest()}"
 
 
+def _remove_readonly(func, path, _exc_info):
+    """Retry failed tree deletion after clearing Windows read-only bits."""
+    try:
+        os.chmod(_fs_path(path), stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        result = func(_fs_path(path))
+        close = getattr(result, "close", None)
+        if close is not None:
+            close()
+    except FileNotFoundError:
+        pass
+
+
+def _rmtree_existing(path: pathlib.Path) -> None:
+    """Remove an existing tree, including read-only git pack files.
+
+    Windows can mark files under ``.git/objects/pack`` read-only. If a
+    stale cache slot is not fully removed before ``shutil.move``, Python
+    moves the freshly cloned directory inside the old slot instead of
+    replacing it, leaving ``pack.yaml`` below an ``aa-clone-*`` child.
+    """
+    if not _path_exists(path):
+        return
+    try:
+        shutil.rmtree(path, onerror=_remove_readonly)
+    except FileNotFoundError:
+        return
+    except OSError:
+        _manual_rmtree(path)
+    if _path_exists(path):
+        _manual_rmtree(path)
+    if _path_exists(path):
+        raise OSError(f"failed to remove stale cache directory: {path}")
+
+
+def _manual_rmtree(path: pathlib.Path) -> None:
+    """Last-resort recursive removal for stubborn Windows cache trees."""
+    try:
+        fs_path = _fs_path(path)
+        if os.path.islink(fs_path) or os.path.isfile(fs_path):
+            _unlink_existing(path)
+            return
+        if os.path.isdir(fs_path):
+            for child in _iter_children(path):
+                _manual_rmtree(child)
+            try:
+                os.rmdir(fs_path)
+            except PermissionError:
+                os.chmod(fs_path, stat.S_IWRITE)
+                os.rmdir(fs_path)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+
+
+def _unlink_existing(path: pathlib.Path) -> None:
+    fs_path = _fs_path(path)
+    try:
+        os.unlink(fs_path)
+    except PermissionError:
+        os.chmod(fs_path, stat.S_IWRITE)
+        os.unlink(fs_path)
+    except FileNotFoundError:
+        pass
+
+
+def _iter_children(path: pathlib.Path) -> list[pathlib.Path]:
+    with os.scandir(_fs_path(path)) as entries:
+        return [path / entry.name for entry in entries]
+
+
+def _path_exists(path: pathlib.Path) -> bool:
+    return os.path.lexists(_fs_path(path))
+
+
+def _fs_path(path) -> str:
+    """Return a filesystem path string, using Windows long-path syntax."""
+    path = pathlib.Path(path)
+    s = str(path)
+    if os.name != "nt" or s.startswith("\\\\?\\"):
+        return s
+    try:
+        s = str(path.resolve())
+    except OSError:
+        s = str(path.absolute())
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
+def _archive_root(cache_dir: pathlib.Path) -> pathlib.Path:
+    """Return the content root for a cache slot.
+
+    Older Windows runs could leave a valid-hash cache slot whose real git
+    clone is nested under an ``aa-clone-*`` child after a failed stale-slot
+    cleanup. Prefer that child when the slot root has no ``pack.yaml`` so
+    existing broken caches remain recoverable.
+    """
+    if (cache_dir / "pack.yaml").exists():
+        return cache_dir
+    candidates = sorted(
+        child
+        for child in cache_dir.iterdir()
+        if (
+            child.is_dir()
+            and child.name.startswith("aa-clone-")
+            and ((child / "pack.yaml").exists() or (child / ".git").exists())
+        )
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    return cache_dir
+
+
 def load_cached_archive(
     url: str,
     recorded_commit: str,
@@ -206,12 +325,13 @@ def load_cached_archive(
     recorded_sha = marker.read_text()
     if recorded_sha != _compute_dir_sha256(cache_dir):
         return None
+    archive_dir = _archive_root(cache_dir)
     return PackArchive(
         url=url,
         ref=recorded_commit,
         resolved_commit=recorded_commit,
         method="cached",
-        archive_dir=cache_dir,
+        archive_dir=archive_dir,
         canonical_id=auth.canonical_github_identity(url),
         cache_key=cache_key,
     )
@@ -278,17 +398,18 @@ def fetch_pack(
         recorded_sha = marker.read_text() if marker.exists() else None
         current_sha = _compute_dir_sha256(cache_dir)
         if recorded_sha == current_sha:
+            archive_dir = _archive_root(cache_dir)
             return PackArchive(
                 url=url,
                 ref=ref,
                 resolved_commit=resolved_commit,
                 method="cached",
-                archive_dir=cache_dir,
+                archive_dir=archive_dir,
                 canonical_id=auth.canonical_github_identity(url),
                 cache_key=cache_key,
             )
         # Integrity mismatch: drop the slot and fall through to refetch.
-        shutil.rmtree(cache_dir, ignore_errors=True)
+        _rmtree_existing(cache_dir)
 
     # 5. Cache miss -> fetch.
     archive = auth.fetch_with_auth_chain(
@@ -306,7 +427,7 @@ def fetch_pack(
     # (so the operator sees the new commit, not the stale pre-clone one).
     if archive.resolved_commit != resolved_commit:
         if policy == "locked" and pack_lock_recorded_commit is not None:
-            shutil.rmtree(archive.archive_dir, ignore_errors=True)
+            _rmtree_existing(archive.archive_dir)
             raise PackLockDriftError(
                 url, ref, pack_lock_recorded_commit, archive.resolved_commit,
             )
@@ -321,10 +442,8 @@ def fetch_pack(
     if cache_dir.exists():
         # Best-effort cleanup of a stale cache_dir from a crashed prior
         # run. Real concurrent-fetch protection comes from the Phase 6
-        # outer lock in compose_packs.py; without that lock, the
-        # rmtree+move sequence below is itself a TOCTOU and can fail on
-        # Windows if a third concurrent fetch repopulates cache_dir.
-        shutil.rmtree(cache_dir, ignore_errors=True)
+        # outer lock in compose_packs.py.
+        _rmtree_existing(cache_dir)
     shutil.move(str(archive.archive_dir), str(cache_dir))
     sha = _compute_dir_sha256(cache_dir)
     (cache_dir / ".dir-sha256").write_text(sha)

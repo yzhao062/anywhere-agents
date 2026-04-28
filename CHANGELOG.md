@@ -11,6 +11,30 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.5.5] — 2026-04-27
+
+### Highlights
+
+- **Idempotent multi-repo refresh.** v0.5.4 still let a broken post-migration project lose bundled-default rows on the next compose run because the composer used the old fallback resolver path. v0.5.5 switches the composer to the four-layer resolver, seeds bundled defaults on every run, and proves the refresh path against real broken project copies without hand-editing those repos.
+- **Windows cache self-heal.** Real migrations also exposed malformed cache slots on Windows: read-only git pack files and long asset paths could make stale-slot deletion fail, after which `shutil.move` nested an `aa-clone-*` directory inside the old cache slot. v0.5.5 makes stale cache removal strict and Windows-aware, and can recover a single nested clone inside an already URL-and-commit-keyed cache slot.
+
+### Changed
+
+- **Composer resolver migration** (`scripts/compose_packs.py`, `scripts/packs/config.py`). `_do_compose_v2` now reads all durable layers through `resolved_for_project(..., default_selections=DEFAULT_V2_SELECTIONS, force_defaults=True)`, so user-level packs and bundled defaults merge deterministically. Explicit empty project config still clears non-default user packs while preserving bundled defaults.
+- **Pack verify default visibility** (`packages/pypi/anywhere_agents/cli.py`). `pack verify` now displays every bundled default with deployment status from lock and disk, even when user/project config does not mention it. `pack verify --fix` no longer returns rc=0 while bundled defaults are missing or deployed-but-not-locked.
+- **Bundled-default remove warning** (`packages/pypi/anywhere_agents/cli.py`). `pack remove <name>` warns when the requested name is one of the bundled defaults because the next composer run will materialize it again unless defaults are changed at the composer level.
+- **Source-fetch cache hardening** (`scripts/packs/source_fetch.py`, `packages/pypi/anywhere_agents/packs/source_fetch.py`). Cache cleanup now retries after clearing read-only bits, uses Windows long-path forms for deep asset trees, falls back to manual recursive deletion when platform `rmtree` fails, and raises if stale-slot cleanup still leaves files behind. Cached reads recover exactly one nested `aa-clone-*` archive root with `pack.yaml` or `.git`; zero or multiple candidates keep fail-loud behavior.
+
+### Internals
+
+- **Lock metadata preservation.** `_build_ctx` preserves prior `latest_known_head` and `fetched_at` only when `(source_url, requested_ref, resolved_commit)` still matches. Invalid SHA metadata is dropped, and uppercase SHA input is canonicalized to lowercase before writing.
+- **Agent-style disk detection.** The verify classifier recognizes legacy markerless `agent-style v0.3.2` content by requiring all three upstream section signatures, with source comments documenting the coupling and revisit trigger.
+- **Tests and verification.** Added resolver, verify, cache-recovery, long-path, and metadata-canonicalization coverage. Local validation for the release candidate: focused pytest `236 passed, 4 skipped`; non-integration pytest `790 passed, 5 skipped`; temp-copy validation across three real broken projects with inherited cache and cold cache all reached a deterministic five-pack lock without modifying the original repos. `implement-review` Round 4 reported no blocking findings and recommended shipping v0.5.5.
+
+### Migration
+
+- Existing v0.5.4 users should upgrade and rerun `anywhere-agents` or `anywhere-agents pack verify --fix --yes` in each project. The command refreshes project config and pack-lock state from the current user-level config plus bundled defaults. If a Windows cache slot was malformed by an earlier run, v0.5.5 either recovers the single nested clone or deletes and refetches the stale slot; no manual cache cleanup should be required.
+
 ## [0.5.4] — 2026-04-27
 
 ### Highlights
@@ -552,7 +576,11 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.3.0...v0.4.0

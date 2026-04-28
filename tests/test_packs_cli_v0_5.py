@@ -747,6 +747,43 @@ class PackVerifyTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _write_default_manifest(project_root: pathlib.Path) -> None:
+        manifest = project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            "version: 2\n"
+            "packs:\n"
+            "  - name: agent-style\n"
+            "    source:\n"
+            "      repo: https://github.com/yzhao062/agent-style\n"
+            "      ref: v0.3.2\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: docs/rule-pack.md, to: AGENTS.md}\n"
+            "  - name: aa-core-skills\n"
+            "    active:\n"
+            "      - kind: skill\n"
+            "        files:\n"
+            "          - from: skills/implement-review/\n"
+            "            to: .claude/skills/implement-review/\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _materialize_default_outputs(project_root: pathlib.Path) -> None:
+        agents = project_root / "AGENTS.md"
+        agents.write_text(
+            "# upstream\n"
+            "<!-- rule-pack:agent-style:begin version=x sha256=y -->\n"
+            "style rules\n"
+            "<!-- rule-pack:agent-style:end -->\n",
+            encoding="utf-8",
+        )
+        skill_dir = project_root / ".claude" / "skills" / "implement-review"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("skill\n", encoding="utf-8")
+
     def _assert_pack_remove_only_in_negation(self, output: str) -> None:
         """Assert every occurrence of ``pack remove`` in ``output`` is
         preceded (within a small window) by a negation token like
@@ -891,12 +928,13 @@ class PackVerifyTests(unittest.TestCase):
                 {"name": "profile", "source": {"url": url, "ref": "main"}},
             ])
             project_idents = _load_project_observations(project)
+            profile_idents = [i for i in project_idents if i[0] == "profile"]
             self.assertEqual(
-                len(project_idents), 2,
+                len(profile_idents), 2,
                 "same-file dups must survive into the classifier; "
                 "got idents={!r}".format(project_idents),
             )
-            rows = _classify_pack_states([], project_idents, [], {})
+            rows = _classify_pack_states([], profile_idents, [], {})
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["name"], "profile")
             self.assertEqual(rows[0]["state"], _VERIFY_STATE_MISMATCH)
@@ -1005,6 +1043,169 @@ class PackVerifyTests(unittest.TestCase):
             self.assertIn("aa-core-skills", output)
             self.assertIn("declared, not bootstrapped", output)
 
+    def test_verify_keeps_defaults_when_project_yaml_has_pack(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
+            profile_ref = "ab" * 20
+            profile_url = "https://github.com/yzhao062/agent-pack"
+            self._write_project(project, [
+                {
+                    "name": "profile",
+                    "source": {"url": profile_url, "ref": profile_ref},
+                },
+            ])
+            self._create_output_files(project, [".claude/skills/profile.md"])
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        "v0.3.2",
+                        ["AGENTS.md"],
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/"],
+                    ),
+                    "profile": self._lock_entry(
+                        profile_url,
+                        profile_ref,
+                        [".claude/skills/profile.md"],
+                    ),
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 0, f"output:\n{output}")
+            self.assertIn("agent-style", output)
+            self.assertIn("aa-core-skills", output)
+            self.assertIn("profile", output)
+            self.assertIn("bundled default", output)
+
+    def test_verify_user_url_default_matches_project_seeded_default(self) -> None:
+        """A user-level URL-form default must not become user-only.
+
+        The project layer is default-seeded from bootstrap/packs.yaml,
+        so agent-style's project identity should match both the user URL
+        form and the lock entry when the project YAML is otherwise empty.
+        """
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {
+                    "name": "agent-style",
+                    "source": {
+                        "url": "https://github.com/yzhao062/agent-style",
+                        "ref": "v0.3.2",
+                    },
+                },
+            ])
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        "v0.3.2",
+                        ["AGENTS.md"],
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/"],
+                    ),
+                }
+            })
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with patch(
+                "anywhere_agents.cli._ls_remote_head", return_value=None,
+            ), redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 0, f"output:\n{output}")
+            self.assertIn("agent-style", output)
+            self.assertNotIn("user-level only", output)
+            self.assertNotIn("config mismatch", output)
+
+    def test_verify_surfaces_default_outputs_missing_from_lock(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
+            profile_ref = "ab" * 20
+            profile_url = "https://github.com/yzhao062/agent-pack"
+            self._write_project(project, [
+                {
+                    "name": "profile",
+                    "source": {"url": profile_url, "ref": profile_ref},
+                },
+            ])
+            self._create_output_files(project, [".claude/skills/profile.md"])
+            self._write_lock(project, {
+                "packs": {
+                    "profile": self._lock_entry(
+                        profile_url,
+                        profile_ref,
+                        [".claude/skills/profile.md"],
+                    ),
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 1, f"output:\n{output}")
+            self.assertIn("agent-style", output)
+            self.assertIn("aa-core-skills", output)
+            self.assertIn("deployed, not locked", output)
+
+    def test_agent_style_disk_present_rejects_near_marker(self) -> None:
+        from anywhere_agents.cli import _default_pack_disk_present
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            (project / "AGENTS.md").write_text(
+                "<!-- rule-pack:agent-style:begin-fake -->\n"
+                "not the agent-style block\n"
+                "<!-- rule-pack:agent-style:end -->\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(_default_pack_disk_present(project, "agent-style"))
+
+    def test_agent_style_disk_present_accepts_legacy_markerless_content(self) -> None:
+        from anywhere_agents.cli import _default_pack_disk_present
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            (project / "AGENTS.md").write_text(
+                "# The Elements of Agent Style\n"
+                "#### RULE-01: Do Not Assume the Reader Shares Your Tacit Knowledge\n"
+                "#### RULE-H: Support Factual Claims with Citation or Concrete Evidence\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(_default_pack_disk_present(project, "agent-style"))
+
     def test_verify_explicit_empty_rule_packs_suppresses_defaults(self) -> None:
         from anywhere_agents.cli import _pack_verify
         import argparse
@@ -1050,7 +1251,9 @@ class PackVerifyTests(unittest.TestCase):
             project = pathlib.Path(d) / "project"
             project.mkdir()
             url = "https://github.com/yzhao062/agent-pack"
-            ref = "v0.1.0"
+            ref = "ab" * 20
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
             self._write_project(project, [
                 {"name": "profile", "source": {"url": url, "ref": ref}},
             ])
@@ -1061,6 +1264,16 @@ class PackVerifyTests(unittest.TestCase):
             output_file.write_text("placeholder", encoding="utf-8")
             self._write_lock(project, {
                 "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        "v0.3.2",
+                        ["AGENTS.md"],
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/"],
+                    ),
                     "profile": {
                         "source_url": url,
                         "requested_ref": ref,
@@ -1281,6 +1494,34 @@ class PackVerifyTests(unittest.TestCase):
                 tmp.exists(),
                 f"atomic write must clean up {tmp.name}",
             )
+
+    def test_verify_fix_refreshes_default_lock_rows_without_reconcile(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            composer_calls = []
+
+            def _fake_composer(project_root, *args):
+                composer_calls.append((project_root, args))
+                return 0
+
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    side_effect=_fake_composer,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(composer_calls), 1)
+            self.assertEqual(composer_calls[0][1], ())
 
     def test_verify_fix_idempotent(self) -> None:
         from anywhere_agents.cli import _pack_main
@@ -1600,6 +1841,45 @@ class PackVerifyTests(unittest.TestCase):
             )
             self.assertIn("identity mismatch", output)
 
+    def test_verify_fix_non_deployable_no_reconcile_names_rows(self) -> None:
+        from anywhere_agents.cli import (
+            _pack_verify_fix,
+            _VERIFY_STATE_ORPHAN,
+        )
+        import argparse
+        ident = self._ident("old-pack", url="https://github.com/o/r", ref="main")
+        rows = [{
+            "name": "old-pack",
+            "state": _VERIFY_STATE_ORPHAN,
+            "u": None, "p": None, "l": ident,
+            "sole": ident, "note": None, "missing_paths": [],
+        }]
+
+        def _fake_gather(user_path, project_root):
+            return rows, None
+
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=True, yes=True)
+            out_buf = io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch(
+                    "anywhere_agents.cli._verify_gather",
+                    side_effect=_fake_gather,
+                ), redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project, args)
+            finally:
+                os.chdir(cwd_before)
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 1, f"output:\n{output}")
+            self.assertIn("no automatic repair", output)
+            self.assertIn("old-pack", output)
+            self.assertIn("orphan", output)
+
     def test_pack_remove_cascades_to_project_and_composer(self) -> None:
         """v0.5.2: pack remove is now cascade delete.
 
@@ -1670,6 +1950,57 @@ class PackVerifyTests(unittest.TestCase):
             # Composer was invoked in single-pack uninstall mode.
             self.assertEqual(len(composer_calls), 1)
             self.assertEqual(composer_calls[0], ("uninstall", "profile"))
+
+    def test_pack_remove_warns_for_bundled_default(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        "v0.3.2",
+                        ["AGENTS.md"],
+                    ),
+                }
+            })
+            cwd_before = os.getcwd()
+            err_buf = io.StringIO()
+            try:
+                os.chdir(project)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer",
+                    return_value=0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["remove", "agent-style"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0)
+            err = err_buf.getvalue()
+            self.assertIn("bundled default", err)
+            self.assertIn("packs: []", err)
+
+    def test_pack_remove_absent_bundled_default_notice_is_no_uninstall(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            cwd_before = os.getcwd()
+            err_buf = io.StringIO()
+            try:
+                os.chdir(project)
+                with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["remove", "agent-style"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1)
+            err = err_buf.getvalue()
+            self.assertIn("bundled default", err)
+            self.assertIn("packs: []", err)
+            self.assertNotIn("after uninstall", err)
 
     # ------------------------------------------------------------------
     # Group 5: Identity normalization

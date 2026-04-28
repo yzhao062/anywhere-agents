@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -1182,18 +1183,22 @@ def _pack_list_drift() -> int:
 
 # State labels — kept stable for test assertions and tooling integration.
 _VERIFY_STATE_DEPLOYED = "deployed"
+_VERIFY_STATE_DEPLOYED_NOT_LOCKED = "deployed, not locked"
 _VERIFY_STATE_USER_ONLY = "user-level only"
 _VERIFY_STATE_MISMATCH = "config mismatch"
 _VERIFY_STATE_DECLARED = "declared, not bootstrapped"
+_VERIFY_STATE_MISSING = "missing"
 _VERIFY_STATE_BROKEN = "broken state"
 _VERIFY_STATE_LOCK_STALE = "lock schema stale"
 _VERIFY_STATE_ORPHAN = "orphan"
 
 _STATE_GLYPHS = {
     _VERIFY_STATE_DEPLOYED: "✅",       # ✅
+    _VERIFY_STATE_DEPLOYED_NOT_LOCKED: "⚠",
     _VERIFY_STATE_USER_ONLY: "⚠",      # ⚠
     _VERIFY_STATE_MISMATCH: "\U0001f500",   # 🔀
     _VERIFY_STATE_DECLARED: "\U0001f6ab",   # 🚫
+    _VERIFY_STATE_MISSING: "❌",
     _VERIFY_STATE_BROKEN: "❌",         # ❌
     _VERIFY_STATE_LOCK_STALE: "\U0001f4dc", # 📜
     _VERIFY_STATE_ORPHAN: "\U0001f47b",     # 👻
@@ -1205,6 +1210,22 @@ _STATE_GLYPHS = {
 _DEFAULT_V2_SELECTIONS = ("agent-style", "aa-core-skills")
 _BUNDLED_IDENTITY_URL = "bundled:aa"
 _BUNDLED_IDENTITY_REF = "bundled"
+_AGENT_STYLE_BLOCK_RE = re.compile(
+    r"<!--\s*rule-pack:agent-style:begin(?:\s|>)[\s\S]*?"
+    r"<!--\s*rule-pack:agent-style:end\s*-->",
+    re.IGNORECASE,
+)
+# Legacy markerless signatures lifted from agent-style v0.3.2 upstream
+# (https://github.com/yzhao062/agent-style @ v0.3.2). All three
+# substrings must currently be present to count an AGENTS.md as carrying
+# the agent-style content without a composer-emitted block wrapper.
+# Revisit these signatures when agent-style bumps to a release that
+# renames any of these headers.
+_AGENT_STYLE_LEGACY_SIGNATURES = (
+    "# The Elements of Agent Style",
+    "#### RULE-01: Do Not Assume the Reader Shares Your Tacit Knowledge",
+    "#### RULE-H: Support Factual Claims with Citation or Concrete Evidence",
+)
 
 
 class _VerifyParseError(Exception):
@@ -1382,13 +1403,12 @@ def _load_user_observations(user_config_path):
 def _load_project_observations(project_root: Path):
     """Return a list of project identity tuples after default-seeding.
 
-    Mirrors :func:`compose_rule_packs.resolve_selections`'s behavior:
+    Mirrors the project half of the composer's current resolver behavior.
+    User-level rows are loaded separately by ``_load_user_observations``.
 
-    - If neither ``agent-config.yaml`` nor ``agent-config.local.yaml``
-      provides a ``rule_packs:`` signal, seed ``DEFAULT_V2_SELECTIONS``
-      as bundled identities.
-    - An explicit ``rule_packs: []`` (or null) in either file is a
-      durable opt-out; default seeding is suppressed.
+    - ``DEFAULT_V2_SELECTIONS`` seed the base project view.
+    - An explicit ``packs: []`` / ``rule_packs: []`` (or null) in either
+      file clears prior entries, including bundled defaults.
     - Otherwise, merge tracked + local with local-overrides-tracked.
 
     ``AGENT_CONFIG_PACKS`` env var is excluded; it never satisfies
@@ -1401,25 +1421,24 @@ def _load_project_observations(project_root: Path):
         data = _read_yaml_or_none(path)
         if data is None:
             return None  # file absent
-        if "rule_packs" not in data:
+        key = None
+        if "packs" in data:
+            key = "packs"
+        elif "rule_packs" in data:
+            key = "rule_packs"
+        if key is None:
             return None  # no signal
-        raw = data["rule_packs"]
+        raw = data[key]
         if raw is None:
             return []  # explicit opt-out
         if not isinstance(raw, list):
             raise _VerifyParseError(
-                f"{path}: 'rule_packs' must be a list"
+                f"{path}: '{key}' must be a list"
             )
         return raw
 
     tracked = _signal(yaml_path)
     local = _signal(local_path)
-
-    if tracked is None and local is None:
-        return [
-            _identity_for_default_selection(name, project_root)
-            for name in _DEFAULT_V2_SELECTIONS
-        ]
 
     # Group entries by name within each file so same-name duplicates in
     # one file (e.g., two ``profile`` rows in agent-config.yaml with
@@ -1436,14 +1455,17 @@ def _load_project_observations(project_root: Path):
                 grouped.setdefault(entry["name"], []).append(entry)
         return grouped
 
-    tracked_by_name = _group_by_name(tracked)
-    local_by_name = _group_by_name(local)
-
-    merged_lists: dict[str, list] = {}
-    for name, rows in tracked_by_name.items():
-        merged_lists[name] = list(rows)
-    for name, rows in local_by_name.items():
-        merged_lists[name] = list(rows)
+    merged_lists: dict[str, list] = {
+        name: [{"name": name}] for name in _DEFAULT_V2_SELECTIONS
+    }
+    for layer in (tracked, local):
+        if layer is None:
+            continue
+        if layer == []:
+            merged_lists.clear()
+            continue
+        for name, rows in _group_by_name(layer).items():
+            merged_lists[name] = list(rows)
 
     out = []
     for name in merged_lists:
@@ -1549,6 +1571,87 @@ def _load_lock_observations(project_root: Path):
         else:
             health[name] = "ok"
     return identities, health
+
+
+def _default_pack_expected_outputs(project_root: Path, name: str) -> list[str]:
+    """Return output paths declared by the bundled manifest for a default."""
+    manifest = project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
+    if not manifest.exists():
+        return []
+    data = _read_yaml_or_none(manifest) or {}
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, list):
+        return []
+    for pack in packs:
+        if not isinstance(pack, dict) or pack.get("name") != name:
+            continue
+        outputs: list[str] = []
+        for section in ("passive", "active"):
+            blocks = pack.get(section) or []
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                files = block.get("files") or []
+                if not isinstance(files, list):
+                    continue
+                for item in files:
+                    if isinstance(item, dict) and isinstance(item.get("to"), str):
+                        outputs.append(item["to"])
+        return outputs
+    return []
+
+
+def _default_pack_disk_present(project_root: Path, name: str) -> bool | None:
+    """Best-effort check for a bundled default already present on disk."""
+    outputs = _default_pack_expected_outputs(project_root, name)
+    if not outputs:
+        return None
+    present = []
+    for rel in outputs:
+        path = project_root / rel
+        if name == "agent-style" and rel == "AGENTS.md":
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                present.append(False)
+            else:
+                has_composer_block = bool(_AGENT_STYLE_BLOCK_RE.search(text))
+                has_legacy_content = all(
+                    marker in text for marker in _AGENT_STYLE_LEGACY_SIGNATURES
+                )
+                present.append(has_composer_block or has_legacy_content)
+            continue
+        present.append(path.exists())
+    return all(present)
+
+
+def _annotate_default_rows(rows, project_root: Path):
+    """Mark bundled defaults and refine no-lock states using disk content."""
+    for row in rows:
+        name = row.get("name")
+        if name not in _DEFAULT_V2_SELECTIONS:
+            continue
+        row["bundled_default"] = True
+        if row.get("state") != _VERIFY_STATE_DECLARED:
+            continue
+        disk_present = _default_pack_disk_present(project_root, name)
+        if disk_present is None:
+            continue
+        if disk_present:
+            row["state"] = _VERIFY_STATE_DEPLOYED_NOT_LOCKED
+            row["note"] = (
+                "bundled default content is present, but pack-lock is "
+                "missing this entry; run --fix to refresh the lock"
+            )
+        else:
+            row["state"] = _VERIFY_STATE_MISSING
+            row["note"] = (
+                "bundled default content is missing; run --fix to "
+                "materialize it"
+            )
+    return rows
 
 
 def _classify_pack_states(user, project, lock, lock_health):
@@ -1702,13 +1805,21 @@ def _print_verify_table(rows, env_var_value, file=None):
         return
 
     name_w = max(4, max(len(r["name"]) for r in rows))
+    def _status(row):
+        state = row["state"]
+        glyph = _STATE_GLYPHS.get(state, "[?]")
+        status = f"{glyph} {state}"
+        if row.get("bundled_default") and state == _VERIFY_STATE_DEPLOYED:
+            status += " (bundled default)"
+        return status
+
+    status_w = max(27, max(len(_status(r)) for r in rows))
     print(
-        f"{'PACK':<{name_w}}  STATUS                       SOURCE",
+        f"{'PACK':<{name_w}}  {'STATUS':<{status_w}}  SOURCE",
         file=file,
     )
     for r in rows:
         state = r["state"]
-        glyph = _STATE_GLYPHS.get(state, "[?]")
         if state == _VERIFY_STATE_MISMATCH:
             parts = []
             for layer_name, key in (("user", "u"), ("project", "p"), ("lock", "l")):
@@ -1718,8 +1829,8 @@ def _print_verify_table(rows, env_var_value, file=None):
             source = "; ".join(parts)
         else:
             source = _format_source(r.get("sole"))
-        status = f"{glyph} {state}"
-        print(f"{r['name']:<{name_w}}  {status:<27}  {source}", file=file)
+        status = _status(r)
+        print(f"{r['name']:<{name_w}}  {status:<{status_w}}  {source}", file=file)
         if r.get("missing_paths"):
             for path in r["missing_paths"][:3]:
                 print(f"{'':<{name_w}}    missing: {path}", file=file)
@@ -1770,6 +1881,7 @@ def _verify_gather(user_config_path, project_root):
     project = _load_project_observations(project_root)
     lock_idents, lock_health = _load_lock_observations(project_root)
     rows = _classify_pack_states(user, project, lock_idents, lock_health)
+    rows = _annotate_default_rows(rows, project_root)
     env_var_value = os.environ.get("AGENT_CONFIG_PACKS", "")
     return rows, env_var_value
 
@@ -2142,20 +2254,27 @@ def _pack_verify_fix(user_config_path, project_root, args):
 
     if not user_only_rows and not project_only_rows:
         bad = [r for r in rows if r["state"] != _VERIFY_STATE_DEPLOYED]
-        # No reconcile needed; if any DECLARED rows exist, run composer
-        # to materialize them.
-        declared = [
-            r for r in rows if r["state"] == _VERIFY_STATE_DECLARED
+        # No reconcile needed; if any row can be repaired by a plain
+        # composer run, invoke it. This includes bundled defaults whose
+        # files are already present but whose lock row was dropped by an
+        # older composer.
+        deployable = [
+            r for r in rows
+            if r["state"] in (
+                _VERIFY_STATE_DECLARED,
+                _VERIFY_STATE_DEPLOYED_NOT_LOCKED,
+                _VERIFY_STATE_MISSING,
+            )
         ]
         if not bad:
             print("", file=sys.stdout)
             print("--fix: nothing to repair.", file=sys.stdout)
             return 0
-        if declared:
+        if deployable:
             print("", file=sys.stdout)
             print(
-                "--fix: invoking composer to deploy declared-but-not-"
-                "bootstrapped packs...",
+                "--fix: invoking composer to deploy or refresh "
+                "pack-lock entries...",
                 file=sys.stdout,
             )
             rc = _invoke_composer(project_root)
@@ -2168,6 +2287,18 @@ def _pack_verify_fix(user_config_path, project_root, args):
                 return rc
             print("✓ Deployed.", file=sys.stdout)
             return 0
+        unresolved = ", ".join(
+            f"{r['name']} ({r['state']})" for r in sorted(
+                bad, key=lambda row: row["name"]
+            )
+        )
+        print("", file=sys.stdout)
+        print(
+            f"--fix: no automatic repair for {len(bad)} pack(s): "
+            f"{unresolved}. Resolve these rows manually, then rerun "
+            "`pack verify --fix`.",
+            file=sys.stdout,
+        )
         return 1
 
     # Confirmation prompt (shared with v0.5.1 UX).
@@ -2394,8 +2525,22 @@ def _pack_remove(path: Path, name: str) -> int:
             pass
 
     if not (found_in_user or found_in_project or found_in_lock):
+        if name in _DEFAULT_V2_SELECTIONS:
+            log(
+                f"notice: {name!r} is a bundled default. To stop bundled "
+                "deployment entirely, add `packs: []` to agent-config.yaml "
+                "and rerun `anywhere-agents pack verify --fix`."
+            )
         log(f"error: pack {name!r} not in user config, project rule_packs, or pack-lock")
         return 1
+
+    if name in _DEFAULT_V2_SELECTIONS:
+        log(
+            f"notice: {name!r} is a bundled default. Removing it only drops "
+            "current lock/config ownership; the next normal compose will "
+            "restore it unless project config explicitly clears defaults "
+            "with `packs: []`."
+        )
 
     # Step 2: lock user-level config and remove the entry.
     if found_in_user:

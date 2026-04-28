@@ -78,7 +78,8 @@ class _V2ManifestFixture(unittest.TestCase):
             "packs:\n"
             "  - name: agent-style\n"
             "    source: bundled\n"
-            "    default-ref: bundled\n",
+            "    default-ref: bundled\n"
+            "  - name: aa-core-skills\n",
         )
         # Upstream AGENTS.md so v2 composition does not error before we
         # reach the lock-wrapped body.
@@ -1160,7 +1161,8 @@ class TestCredentialURLRejectedAtProductionPath(unittest.TestCase):
             "packs:\n"
             "  - name: agent-style\n"
             "    source: bundled\n"
-            "    default-ref: bundled\n",
+            "    default-ref: bundled\n"
+            "  - name: aa-core-skills\n",
         )
         _write(self.root / ".agent-config" / "AGENTS.md", "# upstream\n")
 
@@ -1438,6 +1440,17 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.env_patch = patch.dict(
+            os.environ,
+            {
+                "APPDATA": str(self.root / "appdata"),
+                "XDG_CONFIG_HOME": str(self.root / "xdg"),
+                "AGENT_CONFIG_PACKS": "",
+                "AGENT_CONFIG_RULE_PACKS": "",
+            },
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         # v2 manifest with one inline-source pack so drift detection has
         # something to fire on.
         bootstrap_dir = self.root / ".agent-config" / "repo" / "bootstrap"
@@ -1447,7 +1460,8 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
             "packs:\n"
             "  - name: agent-style\n"
             "    source: bundled\n"
-            "    default-ref: bundled\n",
+            "    default-ref: bundled\n"
+            "  - name: aa-core-skills\n",
         )
         _write(self.root / ".agent-config" / "AGENTS.md", "# upstream\n")
         # Consumer-side selection: profile from agent-pack via inline source.
@@ -1740,6 +1754,8 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
             "source_url": "https://github.com/yzhao062/agent-pack",
             "requested_ref": "v0.1.0",
             "resolved_commit": "b" * 40,
+            "latest_known_head": "f" * 40,
+            "fetched_at": "2026-04-27T10:00:00+00:00",
             "pack_update_policy": "prompt",
             "files": [],
         }
@@ -1822,6 +1838,8 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
             "source_url": "https://github.com/yzhao062/agent-pack",
             "requested_ref": "v0.1.0",
             "resolved_commit": "b" * 40,
+            "latest_known_head": "f" * 40,
+            "fetched_at": "2026-04-27T10:00:00+00:00",
             "pack_update_policy": "prompt",
             "files": [],
         }
@@ -1877,10 +1895,179 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         entry = post_lock["packs"]["profile"]
         self.assertEqual(entry["resolved_commit"], "b" * 40)
         self.assertEqual(len(entry["resolved_commit"]), 40)
+        # Same source/ref/commit tuple should preserve optional update
+        # metadata so a second compose is byte-stable and does not erase
+        # a head previously observed by ``pack verify``.
+        self.assertEqual(entry["latest_known_head"], "f" * 40)
+        self.assertEqual(entry["fetched_at"], "2026-04-27T10:00:00+00:00")
         # Defense against the bug: the recorded value must NOT be the
         # human-readable ref string. Without the H1 fix, this assertion
         # caught the bug — the lock wrote "v0.1.0" instead of the SHA.
         self.assertNotEqual(entry["resolved_commit"], "v0.1.0")
+
+    def test_inline_source_invalid_latest_head_is_not_preserved(self) -> None:
+        """Preserve only valid latest_known_head metadata."""
+        real_archive = source_fetch.PackArchive(
+            url="https://github.com/yzhao062/agent-pack",
+            ref="v0.1.0",
+            resolved_commit="b" * 40,
+            method="ssh",
+            archive_dir=self.archive_dir,
+            canonical_id="yzhao062/agent-pack",
+            cache_key="abcd1234/" + "b" * 40,
+        )
+        ctx = compose_packs._build_ctx(
+            root=self.root,
+            pack={"name": "profile"},
+            selection={"name": "profile"},
+            txn=MagicMock(),
+            pack_lock={},
+            project_state={},
+            user_state={},
+            archive=real_archive,
+            previous_lock_entry={
+                "source_url": "https://github.com/yzhao062/agent-pack",
+                "requested_ref": "v0.1.0",
+                "resolved_commit": "b" * 40,
+                "latest_known_head": "not-a-sha",
+                "fetched_at": "2026-04-27T10:00:00+00:00",
+            },
+        )
+        self.assertEqual(ctx.pack_latest_known_head, "b" * 40)
+        self.assertNotEqual(
+            ctx.pack_fetched_at,
+            "2026-04-27T10:00:00+00:00",
+        )
+
+    def test_inline_source_uppercase_latest_head_is_canonicalized(self) -> None:
+        real_archive = source_fetch.PackArchive(
+            url="https://github.com/yzhao062/agent-pack",
+            ref="v0.1.0",
+            resolved_commit="b" * 40,
+            method="ssh",
+            archive_dir=self.archive_dir,
+            canonical_id="yzhao062/agent-pack",
+            cache_key="abcd1234/" + "b" * 40,
+        )
+        ctx = compose_packs._build_ctx(
+            root=self.root,
+            pack={"name": "profile"},
+            selection={"name": "profile"},
+            txn=MagicMock(),
+            pack_lock={},
+            project_state={},
+            user_state={},
+            archive=real_archive,
+            previous_lock_entry={
+                "source_url": "https://github.com/yzhao062/agent-pack",
+                "requested_ref": "v0.1.0",
+                "resolved_commit": "b" * 40,
+                "latest_known_head": "F" * 40,
+                "fetched_at": "2026-04-27T10:00:00+00:00",
+            },
+        )
+        self.assertEqual(ctx.pack_latest_known_head, "f" * 40)
+        self.assertEqual(ctx.pack_fetched_at, "2026-04-27T10:00:00+00:00")
+
+    def test_project_yaml_pack_does_not_drop_bundled_defaults(self) -> None:
+        """Regression: project YAML entries must not suppress defaults.
+
+        The v0.5.4 composer used the legacy fallback resolver. Once
+        ``agent-config.yaml`` contained a third-party pack, the default
+        agent-style and aa-core-skills rows disappeared from the next
+        pack-lock write. The 4-layer resolver now seeds defaults first.
+        """
+        root = self.root
+        bootstrap = root / ".agent-config" / "repo"
+        _write(
+            bootstrap / "bootstrap" / "packs.yaml",
+            "version: 2\n"
+            "packs:\n"
+            "  - name: agent-style\n"
+            "    source:\n"
+            "      repo: https://github.com/yzhao062/agent-style\n"
+            "      ref: v0.3.2\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: docs/rule-pack.md, to: AGENTS.md}\n"
+            "  - name: aa-core-skills\n"
+            "    hosts: [claude-code]\n"
+            "    active:\n"
+            "      - kind: skill\n"
+            "        files:\n"
+            "          - from: skills/implement-review/\n"
+            "            to: .claude/skills/implement-review/\n",
+        )
+        _write(root / ".agent-config" / "AGENTS.md", "# upstream\n")
+        _write(
+            bootstrap / "skills" / "implement-review" / "SKILL.md",
+            "# skill\n",
+        )
+        _write(
+            root / "agent-config.yaml",
+            "packs:\n"
+            "  - name: profile\n"
+            "    source:\n"
+            "      url: https://github.com/yzhao062/agent-pack\n"
+            "      ref: " + ("c" * 40) + "\n",
+        )
+        archive_dir = root / "profile-archive"
+        _write(
+            archive_dir / "pack.yaml",
+            "version: 2\n"
+            "packs:\n"
+            "  - name: profile\n"
+            "    source:\n"
+            "      repo: https://github.com/yzhao062/agent-pack\n"
+            "      ref: " + ("c" * 40) + "\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: docs/profile.md, to: AGENTS.md}\n",
+        )
+        _write(archive_dir / "docs" / "profile.md", "# profile\n")
+        profile_archive = source_fetch.PackArchive(
+            url="https://github.com/yzhao062/agent-pack",
+            ref="c" * 40,
+            resolved_commit="c" * 40,
+            method="ssh",
+            archive_dir=archive_dir,
+            canonical_id="yzhao062/agent-pack",
+            cache_key="profile/" + ("c" * 40),
+        )
+
+        with self._no_lock():
+            with (
+                patch.object(source_fetch, "fetch_pack", return_value=profile_archive),
+                patch.object(
+                    compose_packs.passive_mod._legacy,
+                    "fetch_rule_pack",
+                    return_value=("# agent style\n", "d" * 64),
+                ),
+            ):
+                rc, _out, err = _invoke(["--root", str(root)])
+
+        self.assertEqual(rc, 0, f"stderr:\n{err}")
+        lock_data = json.loads(
+            (root / ".agent-config" / "pack-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            set(lock_data["packs"]),
+            {"agent-style", "aa-core-skills", "profile"},
+        )
+        self.assertEqual(
+            lock_data["packs"]["agent-style"]["source_url"],
+            "https://github.com/yzhao062/agent-style",
+        )
+        self.assertEqual(
+            lock_data["packs"]["agent-style"]["requested_ref"],
+            "v0.3.2",
+        )
+        self.assertEqual(
+            lock_data["packs"]["profile"]["source_url"],
+            "https://github.com/yzhao062/agent-pack",
+        )
 
 
 # ----------------------------------------------------------------------

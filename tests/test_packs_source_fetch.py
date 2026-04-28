@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 import pathlib
 import sys
 import tempfile
@@ -315,6 +316,66 @@ class TestDirSha256Helpers(unittest.TestCase):
             self.assertTrue(sha.startswith("dir-sha256:"))
             self.assertEqual(len(sha), len("dir-sha256:") + 64)
 
+    def test_archive_root_recovers_nested_clone_cache_slot(self):
+        """Recover cache slots produced by failed Windows stale-dir cleanup."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = pathlib.Path(tmp) / "cache-slot"
+            nested = cache_dir / "aa-clone-abcd1234"
+            nested.mkdir(parents=True)
+            (nested / "pack.yaml").write_text("version: 2\npacks: []\n")
+            (cache_dir / "skills").mkdir()
+
+            self.assertEqual(source_fetch._archive_root(cache_dir), nested)
+
+    def test_rmtree_existing_fails_if_stale_slot_survives(self):
+        """A failed stale-cache cleanup must not be followed by nested move."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = pathlib.Path(tmp) / "cache-slot"
+            stale.mkdir()
+            (stale / "old.txt").write_text("old\n")
+            with (
+                patch.object(source_fetch.shutil, "rmtree", return_value=None),
+                patch.object(source_fetch, "_manual_rmtree", return_value=None),
+            ):
+                with self.assertRaises(OSError):
+                    source_fetch._rmtree_existing(stale)
+
+    def test_rmtree_existing_falls_back_to_manual_remove(self):
+        """If platform rmtree fails, remove children manually."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = pathlib.Path(tmp) / "cache-slot"
+            nested = stale / "deep"
+            nested.mkdir(parents=True)
+            (nested / "old.txt").write_text("old\n")
+            with patch.object(
+                source_fetch.shutil, "rmtree", side_effect=OSError("busy"),
+            ):
+                source_fetch._rmtree_existing(stale)
+            self.assertFalse(stale.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows long-path behavior")
+    def test_rmtree_existing_removes_long_paths_on_windows(self):
+        """Cache cleanup must handle deep pack asset paths on Windows."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = pathlib.Path(tmp) / "cache-slot"
+            long_dir = stale
+            while len(str(long_dir / "asset.png")) < 280:
+                long_dir = long_dir / "very-long-path-segment"
+            os.makedirs(source_fetch._fs_path(long_dir), exist_ok=True)
+            with open(source_fetch._fs_path(long_dir / "asset.png"), "w") as fh:
+                fh.write("asset\n")
+
+            source_fetch._rmtree_existing(stale)
+
+            self.assertFalse(source_fetch._path_exists(stale))
+
+    def test_remove_readonly_ignores_already_removed_paths(self):
+        """rmtree callbacks may race a path that disappeared mid-walk."""
+        def missing(_path):
+            raise FileNotFoundError(_path)
+
+        source_fetch._remove_readonly(missing, "already-gone", None)
+
 
 class TestLoadCachedArchive(unittest.TestCase):
     """Pure cache lookup: no network, no auth chain, no ls-remote.
@@ -391,6 +452,30 @@ class TestLoadCachedArchive(unittest.TestCase):
                 result.canonical_id,
                 source_fetch.auth.canonical_github_identity(url),
             )
+
+    def test_valid_marker_with_nested_clone_returns_nested_archive_dir(self):
+        """Existing malformed cache slots are still usable after upgrade."""
+        sha = "ab" * 20
+        url = "https://github.com/x/y"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            cache_root = tmp_path / "cache"
+            cache_key = source_fetch.compute_cache_key(url, sha)
+            cache_dir = cache_root / cache_key
+            nested = cache_dir / "aa-clone-nested"
+            nested.mkdir(parents=True)
+            (nested / "pack.yaml").write_text("version: 2\npacks: []\n")
+            (cache_dir / "skills").mkdir()
+            recorded = source_fetch._compute_dir_sha256(cache_dir)
+            (cache_dir / ".dir-sha256").write_text(recorded)
+
+            result = source_fetch.load_cached_archive(
+                url, sha, cache_root=cache_root,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.archive_dir, nested)
+            self.assertEqual(result.cache_key, cache_key)
 
     def test_returns_none_on_integrity_mismatch(self):
         """Marker present but content tampered → return None.

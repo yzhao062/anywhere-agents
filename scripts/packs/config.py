@@ -296,6 +296,7 @@ def resolve_selections(
     env_add: list[str] | None = None,
     env_subtract: list[str] | None = None,
     default_selections: list[dict[str, Any]] | None = None,
+    force_defaults: bool = False,
     validate_url_fn: Callable[..., None] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve pack selections across the four layers.
@@ -313,9 +314,12 @@ def resolve_selections(
       contributions; later layers may still add.
     - Env-var ``add`` entries append (or override by name) at the end;
       ``subtract`` entries remove matching names from the final list.
-    - ``default_selections`` apply only when no signal exists in any
-      of the four layers (no config files, no env var, and no explicit
-      empty-clear in any layer).
+    - By default, ``default_selections`` apply only when no signal
+      exists in any of the four layers (no config files, no env var,
+      and no explicit empty-clear in any layer). When
+      ``force_defaults`` is true, defaults seed the base layer before
+      user/project/env entries are merged. Explicit empty lists still
+      clear them, and env subtract entries can still remove them.
 
     When ``validate_url_fn`` is provided, every entry's source URL
     (across user-level, project-tracked, and project-local layers) is
@@ -339,6 +343,10 @@ def resolve_selections(
     # layer's entries either add-if-new or override-by-name.
     accumulated: dict[str, dict[str, Any]] = {}
     any_layer_spoke = False
+
+    if force_defaults and default_selections:
+        for entry in default_selections:
+            accumulated[entry["name"]] = dict(entry)
 
     for data, source in [
         (user_level, "user-level"),
@@ -385,7 +393,7 @@ def resolve_selections(
             accumulated.pop(name, None)
 
     # Apply defaults only when no layer spoke at all.
-    if not any_layer_spoke and default_selections:
+    if not force_defaults and not any_layer_spoke and default_selections:
         return [dict(entry) for entry in default_selections]
 
     return list(accumulated.values())
@@ -401,6 +409,7 @@ def resolved_for_project(
     *,
     environ: dict[str, str] | None = None,
     default_selections: list[dict[str, Any]] | None = None,
+    force_defaults: bool = False,
     validate_url_fn: Callable[..., None] | None = None,
 ) -> list[dict[str, Any]]:
     """Convenience: read all four layers for ``project_root`` + current
@@ -425,5 +434,6 @@ def resolved_for_project(
         env_add=env_add,
         env_subtract=env_subtract,
         default_selections=default_selections,
+        force_defaults=force_defaults,
         validate_url_fn=validate_url_fn,
     )

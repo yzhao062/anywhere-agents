@@ -118,6 +118,36 @@ class FourLayerMergeTests(unittest.TestCase):
         )
         self.assertEqual(result, [{"name": "agent-style"}])
 
+    def test_force_defaults_merge_with_user_layer(self) -> None:
+        result = config.resolve_selections(
+            user_level={"packs": [{"name": "profile"}]},
+            default_selections=[
+                {"name": "agent-style"},
+                {"name": "aa-core-skills"},
+            ],
+            force_defaults=True,
+        )
+        self.assertEqual(
+            [p["name"] for p in result],
+            ["agent-style", "aa-core-skills", "profile"],
+        )
+
+    def test_force_defaults_explicit_empty_clears_defaults(self) -> None:
+        result = config.resolve_selections(
+            project_tracked={"packs": []},
+            default_selections=[{"name": "agent-style"}],
+            force_defaults=True,
+        )
+        self.assertEqual(result, [])
+
+    def test_force_defaults_env_subtract_removes_default(self) -> None:
+        result = config.resolve_selections(
+            default_selections=[{"name": "agent-style"}],
+            force_defaults=True,
+            env_subtract=["agent-style"],
+        )
+        self.assertEqual(result, [])
+
     def test_no_signals_no_default_empty(self) -> None:
         result = config.resolve_selections()
         self.assertEqual(result, [])

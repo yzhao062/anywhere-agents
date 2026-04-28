@@ -2,4 +2,4 @@
 
 See https://github.com/yzhao062/anywhere-agents for details.
 """
-__version__ = "0.5.4"
+__version__ = "0.5.5"

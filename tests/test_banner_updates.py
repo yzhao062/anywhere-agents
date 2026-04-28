@@ -269,9 +269,87 @@ class CLIBannerVerifyTests(unittest.TestCase):
             (project / ".claude").mkdir()
             (project / ".claude" / "skills").mkdir()
             (project / ".claude" / "skills" / "profile.md").write_text("x")
+            manifest = agent_config_dir / "repo" / "bootstrap" / "packs.yaml"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(_yaml.safe_dump({
+                "version": 2,
+                "packs": [
+                    {
+                        "name": "agent-style",
+                        "source": {
+                            "repo": "https://github.com/yzhao062/agent-style",
+                            "ref": "v0.3.2",
+                        },
+                        "passive": [
+                            {
+                                "files": [
+                                    {
+                                        "from": "docs/rule-pack.md",
+                                        "to": "AGENTS.md",
+                                    }
+                                ]
+                            }
+                        ],
+                    },
+                    {
+                        "name": "aa-core-skills",
+                        "active": [
+                            {
+                                "kind": "skill",
+                                "files": [
+                                    {
+                                        "from": "skills/implement-review/",
+                                        "to": ".claude/skills/implement-review/",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }, sort_keys=False))
+            (project / "AGENTS.md").write_text(
+                "<!-- rule-pack:agent-style:begin version=x sha256=y -->\n"
+                "style\n"
+                "<!-- rule-pack:agent-style:end -->\n"
+            )
+            (project / ".claude" / "skills" / "implement-review").mkdir()
             lock = {
                 "version": 1,
                 "packs": {
+                    "agent-style": {
+                        "source_url": "https://github.com/yzhao062/agent-style",
+                        "requested_ref": "v0.3.2",
+                        "resolved_commit": "ef" * 20,
+                        "files": [
+                            {
+                                "role": "passive",
+                                "host": None,
+                                "source_path": "docs/rule-pack.md",
+                                "input_sha256": "def",
+                                "output_paths": ["AGENTS.md"],
+                                "output_scope": "project-local",
+                                "effective_update_policy": "locked",
+                            }
+                        ],
+                    },
+                    "aa-core-skills": {
+                        "source_url": "bundled:aa",
+                        "requested_ref": "bundled",
+                        "resolved_commit": "bundled",
+                        "files": [
+                            {
+                                "role": "active",
+                                "host": "claude-code",
+                                "source_path": "skills/implement-review/",
+                                "input_sha256": "ghi",
+                                "output_paths": [
+                                    ".claude/skills/implement-review/"
+                                ],
+                                "output_scope": "project-local",
+                                "effective_update_policy": "locked",
+                            }
+                        ],
+                    },
                     "profile": {
                         "source_url": "https://github.com/yzhao062/agent-pack",
                         "requested_ref": "main",

@@ -309,6 +309,15 @@ def print_adoption_summary(
         out.write(f"  {path}\n")
 
 
+def _looks_like_full_sha(value: Any) -> bool:
+    """Return True for a 40-character hexadecimal commit id."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(c in "0123456789abcdefABCDEF" for c in value)
+    )
+
+
 def _validated_state_bytes(
     write_fn: Callable[[Path, dict[str, Any]], None], payload: dict[str, Any]
 ) -> bytes:
@@ -581,13 +590,15 @@ def main(argv: list[str] | None = None) -> int:
     # project-local). Per plan + Codex R1 M8 / Deferral 3, this check
     # runs BEFORE lock acquisition so a typo or pasted-token URL fails
     # immediately without serializing on the user lock for 30 seconds.
-    # ``resolved_for_project`` reads all three YAML layers + the env var;
-    # we only care about the URL validation side effect here, not the
-    # returned selection list (the production composition still uses
-    # the legacy resolver in ``_do_compose_v2`` for selection assembly).
+    # ``resolved_for_project`` reads all config layers + the env var.
+    # This early pass validates URL fields before lock acquisition; the
+    # compose pass below resolves the same layers again under the lock.
     try:
         config_mod.resolved_for_project(
-            root, validate_url_fn=auth.reject_credential_url,
+            root,
+            default_selections=DEFAULT_V2_SELECTIONS,
+            force_defaults=True,
+            validate_url_fn=auth.reject_credential_url,
         )
     except auth.CredentialURLError as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -732,24 +743,18 @@ def _uninstall_main(argv: list[str]) -> int:
 def _do_compose_v2(
     root: Path, parsed: dict, no_cache: bool, *, host: str = "claude-code"
 ) -> int:
-    # ----- resolve selections (reuse legacy's config parsing) -----
+    # ----- resolve selections (4-layer resolver + always-on defaults) -----
     try:
-        tracked = legacy.parse_user_config(root / "agent-config.yaml")
-        local = legacy.parse_user_config(root / "agent-config.local.yaml")
-    except legacy.RulePackError as exc:
+        selections = config_mod.resolved_for_project(
+            root,
+            default_selections=DEFAULT_V2_SELECTIONS,
+            force_defaults=True,
+            validate_url_fn=auth.reject_credential_url,
+        )
+    except auth.CredentialURLError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
-
-    env_val = os.environ.get("AGENT_CONFIG_RULE_PACKS", "") or os.environ.get(
-        "AGENT_CONFIG_PACKS", ""
-    )
-    env_list = legacy.parse_env_packs(env_val) if env_val else []
-
-    try:
-        selections = legacy.resolve_selections(
-            tracked, local, env_list, default=DEFAULT_V2_SELECTIONS
-        )
-    except legacy.RulePackError as exc:
+    except config_mod.ConfigError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
@@ -982,6 +987,9 @@ def _do_compose_v2(
                     user_state=user_state,
                     host=host,
                     archive=archive,
+                    previous_lock_entry=(
+                        previous_pack_lock.get("packs", {}).get(selection["name"])
+                    ),
                 )
 
                 # Passive entries first (concatenate into AGENTS.md).
@@ -1189,6 +1197,7 @@ def _build_ctx(
     host: str = "claude-code",
     archive: Any = None,
     archive_dir: Path | None = None,
+    previous_lock_entry: dict[str, Any] | None = None,
 ) -> dispatch.DispatchContext:
     """Assemble a DispatchContext for one pack's composition.
 
@@ -1224,10 +1233,31 @@ def _build_ctx(
         pack_resolved_commit = archive.resolved_commit
         pack_source_dir = archive.archive_dir
         # v0.5.2 banner item 7: at fetch time the resolved_commit IS the
-        # current head. Record both so subsequent ``pack verify`` (network
-        # ls-remote) or banner detection knows whether upstream has moved.
-        pack_latest_known_head = archive.resolved_commit
-        pack_fetched_at = datetime.now(timezone.utc).isoformat()
+        # current head. Preserve prior metadata when the source tuple did
+        # not change so re-running compose is byte-stable and verify's
+        # previously-known upstream head is not erased.
+        same_locked_entry = (
+            isinstance(previous_lock_entry, dict)
+            and previous_lock_entry.get("source_url") == source_url
+            and previous_lock_entry.get("requested_ref") == pack_ref
+            and previous_lock_entry.get("resolved_commit") == pack_resolved_commit
+        )
+        if same_locked_entry:
+            previous_latest = previous_lock_entry.get("latest_known_head")
+            previous_fetched_at = previous_lock_entry.get("fetched_at")
+            if _looks_like_full_sha(previous_latest):
+                pack_latest_known_head = previous_latest.lower()
+                pack_fetched_at = (
+                    previous_fetched_at
+                    if isinstance(previous_fetched_at, str) and previous_fetched_at
+                    else datetime.now(timezone.utc).isoformat()
+                )
+            else:
+                pack_latest_known_head = archive.resolved_commit
+                pack_fetched_at = datetime.now(timezone.utc).isoformat()
+        else:
+            pack_latest_known_head = archive.resolved_commit
+            pack_fetched_at = datetime.now(timezone.utc).isoformat()
     else:
         source = pack.get("source")
         if isinstance(source, dict):
