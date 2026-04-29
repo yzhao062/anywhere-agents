@@ -1200,6 +1200,7 @@ def _pack_list_drift() -> int:
 # State labels — kept stable for test assertions and tooling integration.
 _VERIFY_STATE_DEPLOYED = "deployed"
 _VERIFY_STATE_DEPLOYED_NOT_LOCKED = "deployed, not locked"
+_VERIFY_STATE_BUNDLED_DRIFT = "bundled default updated"
 _VERIFY_STATE_USER_ONLY = "user-level only"
 _VERIFY_STATE_MISMATCH = "config mismatch"
 _VERIFY_STATE_DECLARED = "declared, not bootstrapped"
@@ -1211,6 +1212,7 @@ _VERIFY_STATE_ORPHAN = "orphan"
 _STATE_GLYPHS = {
     _VERIFY_STATE_DEPLOYED: "✅",       # ✅
     _VERIFY_STATE_DEPLOYED_NOT_LOCKED: "⚠",
+    _VERIFY_STATE_BUNDLED_DRIFT: "⚠",
     _VERIFY_STATE_USER_ONLY: "⚠",      # ⚠
     _VERIFY_STATE_MISMATCH: "\U0001f500",   # 🔀
     _VERIFY_STATE_DECLARED: "\U0001f6ab",   # 🚫
@@ -1256,52 +1258,55 @@ def _normalize_url(url) -> str:
     return source_fetch.normalize_pack_source_url(url)
 
 
-def _identity_for_default_selection(name, project_root=None):
-    """Resolve the upstream identity tuple for a bundled-default pack.
+def _project_clone_packs_yaml_path(project_root: Path) -> Path:
+    """Path to the project's bootstrap-clone packs.yaml (may be stale)."""
+    return project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
 
-    The composer reads ``.agent-config/repo/bootstrap/packs.yaml`` and
-    writes the resulting ``source.repo`` + ``source.ref`` into the lock.
-    Verify must mirror that lookup so a default-bootstrapped project's
-    project-side identity matches the lock-side identity (otherwise
-    ``agent-style`` etc. always show as ``config mismatch``).
 
-    When ``packs.yaml`` is unavailable (pre-bootstrap, or the verify
-    flow runs outside a bootstrapped project), fall back to the
-    synthetic ``(name, "bundled:aa", "bundled")`` identity. In that
-    case there will also be no lock, so the fallback only ever feeds
-    the "declared, not bootstrapped" path where identity equality is
-    not exercised.
+def _manifest_pack_from_path(
+    manifest: Path | None,
+    name: str,
+    *,
+    strict: bool,
+) -> dict | None:
+    """Read ``packs.yaml`` and return the entry named ``name``, or ``None``.
+
+    ``strict=True`` propagates :class:`_VerifyParseError` on malformed YAML
+    (used for the project-clone fallback so a corrupt clone surfaces a
+    real error rather than silent mis-classification). ``strict=False``
+    swallows parse errors (used for the wheel-bundled primary lookup;
+    we'd rather fall back to the project clone than crash verify on a
+    malformed wheel artifact).
     """
-    if project_root is not None:
-        manifest = project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
-        # When the manifest is absent (pre-bootstrap, or running outside
-        # a bootstrapped project) fall back to the synthetic bundled
-        # identity below. When the manifest is present but malformed,
-        # propagate the parse error so the verify CLI exits 2 instead
-        # of silently mis-classifying default-seeded packs as
-        # ``config mismatch``.
-        if manifest.exists():
-            data = _read_yaml_or_none(manifest) or {}
-        else:
-            data = {}
-        packs = data.get("packs") if isinstance(data, dict) else None
-        if isinstance(packs, list):
-            for pack in packs:
-                if not isinstance(pack, dict) or pack.get("name") != name:
-                    continue
-                source = pack.get("source")
-                if isinstance(source, dict):
-                    url = source.get("url") or source.get("repo") or ""
-                    ref = source.get("ref") or pack.get("default-ref") or ""
-                    if url:
-                        return (name, _normalize_url(url), ref, url, ref)
-                if isinstance(source, str) and source:
-                    ref = pack.get("default-ref") or ""
-                    return (name, _normalize_url(source), ref, source, ref)
-                # Pack listed in packs.yaml without a remote source ->
-                # truly bundled (e.g., aa-core-skills). The lock writer
-                # records ``source_url: "bundled:aa"`` for these.
-                break
+    if manifest is None or not manifest.exists():
+        return None
+    try:
+        data = _read_yaml_or_none(manifest) or {}
+    except _VerifyParseError:
+        if strict:
+            raise
+        return None
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, list):
+        return None
+    for pack in packs:
+        if isinstance(pack, dict) and pack.get("name") == name:
+            return pack
+    return None
+
+
+def _identity_from_manifest_pack(name: str, pack: dict | None):
+    """Build a 5-tuple identity from a packs.yaml ``packs[]`` entry."""
+    if isinstance(pack, dict):
+        source = pack.get("source")
+        if isinstance(source, dict):
+            url = source.get("url") or source.get("repo") or ""
+            ref = source.get("ref") or pack.get("default-ref") or ""
+            if url:
+                return (name, _normalize_url(url), ref, url, ref)
+        if isinstance(source, str) and source:
+            ref = pack.get("default-ref") or ""
+            return (name, _normalize_url(source), ref, source, ref)
     return (
         name,
         _BUNDLED_IDENTITY_URL,
@@ -1309,6 +1314,36 @@ def _identity_for_default_selection(name, project_root=None):
         _BUNDLED_IDENTITY_URL,
         _BUNDLED_IDENTITY_REF,
     )
+
+
+def _identity_for_default_selection(name, project_root=None):
+    """Resolve the upstream identity tuple for a bundled-default pack.
+
+    Source-of-truth precedence: prefer the wheel-bundled
+    ``composer/bootstrap/packs.yaml`` (what v0.5.6 thick-wheel composer
+    actually uses) over the project's potentially-stale bootstrap clone
+    at ``.agent-config/repo/bootstrap/packs.yaml``. After v0.5.7 ships a
+    new bundled default, an existing consumer's clone may still hold the
+    old config until the next ``anywhere-agents`` bootstrap; verify
+    must align with the lock the composer just wrote, not the stale
+    clone, or post-fix verify will report a spurious config mismatch.
+
+    Fall back to the project clone only when the wheel-bundled manifest
+    is unavailable (pre-bootstrap, or running outside a bootstrapped
+    project). Final fallback is the synthetic bundled identity.
+    """
+    pack = _manifest_pack_from_path(
+        _bundled_packs_yaml_path(),
+        name,
+        strict=False,
+    )
+    if pack is None and project_root is not None:
+        pack = _manifest_pack_from_path(
+            _project_clone_packs_yaml_path(project_root),
+            name,
+            strict=True,
+        )
+    return _identity_from_manifest_pack(name, pack)
 
 
 def _identity_for_user_entry(entry):
@@ -1590,33 +1625,43 @@ def _load_lock_observations(project_root: Path):
 
 
 def _default_pack_expected_outputs(project_root: Path, name: str) -> list[str]:
-    """Return output paths declared by the bundled manifest for a default."""
-    manifest = project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
-    if not manifest.exists():
+    """Return output paths declared by the installed bundled manifest.
+
+    Same source-of-truth precedence as :func:`_identity_for_default_selection`:
+    prefer wheel-bundled, fall back to project clone. This keeps the
+    expected-outputs view aligned with what the composer just wrote
+    (post-v0.5.7 bundled-default updates write the new ``to:`` paths
+    to the lock; verify must look up outputs from the same source so
+    disk-presence checks line up).
+    """
+    pack = _manifest_pack_from_path(
+        _bundled_packs_yaml_path(),
+        name,
+        strict=False,
+    )
+    if pack is None:
+        pack = _manifest_pack_from_path(
+            _project_clone_packs_yaml_path(project_root),
+            name,
+            strict=True,
+        )
+    if not isinstance(pack, dict):
         return []
-    data = _read_yaml_or_none(manifest) or {}
-    packs = data.get("packs") if isinstance(data, dict) else None
-    if not isinstance(packs, list):
-        return []
-    for pack in packs:
-        if not isinstance(pack, dict) or pack.get("name") != name:
+    outputs: list[str] = []
+    for section in ("passive", "active"):
+        blocks = pack.get(section) or []
+        if not isinstance(blocks, list):
             continue
-        outputs: list[str] = []
-        for section in ("passive", "active"):
-            blocks = pack.get(section) or []
-            if not isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
                 continue
-            for block in blocks:
-                if not isinstance(block, dict):
-                    continue
-                files = block.get("files") or []
-                if not isinstance(files, list):
-                    continue
-                for item in files:
-                    if isinstance(item, dict) and isinstance(item.get("to"), str):
-                        outputs.append(item["to"])
-        return outputs
-    return []
+            files = block.get("files") or []
+            if not isinstance(files, list):
+                continue
+            for item in files:
+                if isinstance(item, dict) and isinstance(item.get("to"), str):
+                    outputs.append(item["to"])
+    return outputs
 
 
 def _default_pack_disk_present(project_root: Path, name: str) -> bool | None:
@@ -1643,6 +1688,128 @@ def _default_pack_disk_present(project_root: Path, name: str) -> bool | None:
     return all(present)
 
 
+def _bundled_packs_yaml_path() -> Path | None:
+    """Return the wheel-bundled ``composer/bootstrap/packs.yaml`` if present."""
+    candidate = (
+        Path(__file__).resolve().parent
+        / "composer"
+        / "bootstrap"
+        / "packs.yaml"
+    )
+    return candidate if candidate.exists() else None
+
+
+def _detect_bundled_default_drift(project_root: Path) -> set[str]:
+    """Return the names of bundled-default packs whose pack-lock entry
+    differs from the wheel-bundled manifest's current configuration.
+
+    A maintainer-declared bundled-default change (ref bump or ``from:``
+    flip in ``bootstrap/packs.yaml``) does not trigger a re-compose
+    through the existing flow because the consumer's pack-lock still
+    reports the pack as ``deployed``. ``update_policy: locked`` gates
+    upstream HEAD drift on the same ref, NOT maintainer-declared bundled
+    config changes; locked bundled defaults still must migrate when the
+    wheel ships a new manifest. This function compares the bundled
+    manifest's ``source.ref`` and ``passive[].files[].from`` set against
+    the lock entry's ``requested_ref`` and ``files[].source_path`` set
+    and surfaces any mismatch as drift.
+
+    Returns the set of drifted pack names. Tolerates missing manifest
+    or lock; returns ``set()`` when either is unavailable or unreadable.
+    """
+    bundled_yaml = _bundled_packs_yaml_path()
+    if bundled_yaml is None:
+        return set()
+    # Gate on the project's bootstrap clone existing. Synthetic test
+    # fixtures populate a project_root + lock without a bootstrap clone;
+    # they should not trigger drift against the real wheel-bundled
+    # manifest. Real consumer projects always have the clone (created
+    # by the first ``anywhere-agents`` bootstrap), so this gate is a
+    # cheap discriminator without affecting the production semantics.
+    project_clone = (
+        project_root / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
+    )
+    if not project_clone.exists():
+        return set()
+    try:
+        data = _read_yaml_or_none(bundled_yaml) or {}
+    except _VerifyParseError:
+        return set()
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, list):
+        return set()
+
+    lock_path = project_root / ".agent-config" / "pack-lock.json"
+    if not lock_path.exists():
+        return set()
+    import json
+    try:
+        lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    lock_packs = lock_data.get("packs") if isinstance(lock_data, dict) else None
+    if not isinstance(lock_packs, dict):
+        return set()
+
+    drifted: set[str] = set()
+    for pack in packs:
+        if not isinstance(pack, dict):
+            continue
+        name = pack.get("name")
+        if name not in _DEFAULT_V2_SELECTIONS:
+            continue
+        source = pack.get("source")
+        # Truly bundled-only packs (no remote source, e.g., aa-core-skills)
+        # do not have a ref to drift against. Skip.
+        if not isinstance(source, dict):
+            continue
+        bundled_ref = source.get("ref") or ""
+        if not bundled_ref:
+            continue
+        # Collect bundled passive source paths.
+        bundled_paths: set[str] = set()
+        passive = pack.get("passive") or []
+        if isinstance(passive, list):
+            for entry in passive:
+                if not isinstance(entry, dict):
+                    continue
+                files = entry.get("files") or []
+                if not isinstance(files, list):
+                    continue
+                for f in files:
+                    if isinstance(f, dict):
+                        src = f.get("from")
+                        if isinstance(src, str) and src:
+                            bundled_paths.add(src)
+        if not bundled_paths:
+            continue
+        # Compare against lock entry.
+        lock_body = lock_packs.get(name)
+        if not isinstance(lock_body, dict):
+            continue
+        lock_ref = lock_body.get("requested_ref") or ""
+        lock_files = lock_body.get("files") or []
+        lock_paths: set[str] = set()
+        if isinstance(lock_files, list):
+            for f in lock_files:
+                if isinstance(f, dict):
+                    sp = f.get("source_path")
+                    if isinstance(sp, str) and sp:
+                        lock_paths.add(sp)
+        if lock_ref != bundled_ref:
+            drifted.add(name)
+            continue
+        # Only fire on path drift when the lock actually carries
+        # source_path entries. Older lock formats and minimal fixtures
+        # leave source_path absent; without lock evidence we cannot
+        # claim from-flip drift. Ref drift above already covers the
+        # common case (any maintainer-declared bundled-default change
+        # bumps the ref alongside any from-flip).
+        if lock_paths and not bundled_paths.issubset(lock_paths):
+            drifted.add(name)
+    return drifted
+
+
 def _annotate_default_rows(rows, project_root: Path):
     """Mark bundled defaults and refine no-lock states using disk content."""
     for row in rows:
@@ -1667,7 +1834,83 @@ def _annotate_default_rows(rows, project_root: Path):
                 "bundled default content is missing; run --fix to "
                 "materialize it"
             )
+    # Detect maintainer-declared bundled-default updates against the lock.
+    # A drifted bundled default still has its content on disk, so the
+    # earlier passes leave it as DEPLOYED; surface the drift here so
+    # ``--fix`` invokes the composer to migrate the lock + recompose.
+    drifted = _detect_bundled_default_drift(project_root)
+    for row in rows:
+        name = row.get("name")
+        if name not in drifted:
+            continue
+        # Skip drift when the consumer has an explicit override for this
+        # bundled default. Resolver does entry-level replace, so consumer
+        # entries fully override the bundled defaults — flagging drift
+        # against the bundled would migrate the user's deliberately-pinned
+        # entry against their wishes (BC violation).
+        if _has_explicit_default_override(project_root, row, name):
+            continue
+        # Override BOTH _VERIFY_STATE_DEPLOYED (lock matches old wheel)
+        # AND _VERIFY_STATE_MISMATCH. The mismatch case is the post-fix
+        # dirty state: wheel-bundled identity is now v0.3.5+compact, but
+        # the project's bootstrap clone may still hold v0.3.2 until the
+        # next bootstrap refresh. The classifier reports this as
+        # mismatch; drift detection routes it through composer instead
+        # so `pack verify --fix` migrates cleanly.
+        if row.get("state") not in (
+            _VERIFY_STATE_DEPLOYED,
+            _VERIFY_STATE_MISMATCH,
+        ):
+            continue
+        row["state"] = _VERIFY_STATE_BUNDLED_DRIFT
+        row["sole"] = row.get("l") or row.get("p")
+        row["note"] = (
+            "bundled default config (ref or source path) has changed "
+            "since the lock was written; run --fix to refresh"
+        )
     return rows
+
+
+def _has_explicit_default_override(
+    project_root: Path,
+    row: dict,
+    name: str,
+) -> bool:
+    """Return True when consumer config has an explicit override for ``name``.
+
+    An "explicit" override is a user-level or project-level pack entry
+    that names a real source / ref / passive / active / update_policy —
+    distinct from a name-only entry that just selects the bundled default.
+    Used to short-circuit bundled-default drift detection: consumer-pinned
+    packs must remain stable across maintainer-declared bundled bumps.
+    """
+    user_ident = row.get("u")
+    if user_ident is not None and len(user_ident) >= 4 and user_ident[3] != _BUNDLED_IDENTITY_URL:
+        return True
+    for path in (
+        project_root / "agent-config.yaml",
+        project_root / "agent-config.local.yaml",
+    ):
+        try:
+            data = _read_yaml_or_none(path)
+        except _VerifyParseError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        entries = data.get("packs")
+        if entries is None:
+            entries = data.get("rule_packs")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("name") != name:
+                continue
+            if any(
+                key in entry
+                for key in ("source", "ref", "passive", "active", "update_policy")
+            ):
+                return True
+    return False
 
 
 def _classify_pack_states(user, project, lock, lock_health):
@@ -2280,6 +2523,7 @@ def _pack_verify_fix(user_config_path, project_root, args):
                 _VERIFY_STATE_DECLARED,
                 _VERIFY_STATE_DEPLOYED_NOT_LOCKED,
                 _VERIFY_STATE_MISSING,
+                _VERIFY_STATE_BUNDLED_DRIFT,
             )
         ]
         if not bad:

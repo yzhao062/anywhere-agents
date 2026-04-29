@@ -11,6 +11,26 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.5.7] — 2026-04-29
+
+### Changed
+
+- **Bundled `agent-style` switched to compact + ref bumped to `v0.3.5`.** Two-axis update in `bootstrap/packs.yaml` and the v0.5.6 wheel-bundled mirror at `packages/pypi/anywhere_agents/composer/bootstrap/packs.yaml` (aa-internal STRICT): `ref: v0.3.2 → v0.3.5` and `from: docs/rule-pack.md → docs/rule-pack-compact.md`. Existing aa 0.5.6 projects upgrade with two commands — `pipx install --force anywhere-agents==0.5.7` then `anywhere-agents pack verify --fix` — and see the inlined `agent-style` body in `AGENTS.md` drop from ~89 KB (full rule-pack: 21 rules + metadata bullets + 5+ BAD/GOOD pairs + rationale) to ~21 KB (compact rule-pack: 21 rules + directive + 1 illustrative BAD/GOOD pair). Total `AGENTS.md` size drops ~50% on a maintainer-style project (5 packs, base + agent-style + agent-pack/{acad,paper,profile}). `pack-lock.json` advances `agent-style.resolved_commit == v0.3.5` and `source_path == docs/rule-pack-compact.md`.
+
+### Notes
+
+- **`update_policy: locked` unchanged.** Bundled manifest keeps `update_policy: locked`. The policy change (to `update_policy: prompt`, banner-driven update notifications) is deferred to **aa v0.6.0** because it requires the `pack verify --fix` inline-apply UX fix to make `prompt` policy ergonomic for consumers; see `agent-config/docs/pack-architecture.md` § "aa v0.6.0 — Update-UX revisit". Shipping the policy change without the UX fix would extend the existing `agent-pack` prompt-drift confusion (reproduced on `usc-slides`) to a second source.
+- **`pack verify` does not migrate old explicit pins; a full composer/bootstrap run does.** This release is asymmetric across the two repair entry points. The `pack verify --fix` path leaves an existing project alone when it already has an explicit `agent-style` override at an older ref with full-body `passive.files[].from: docs/rule-pack.md` — verify reports the pinned ref and the inlined body stays as last composed. However, a full composer / bootstrap run on aa v0.5.7 (e.g., `anywhere-agents` with no args, or any direct composer invocation) re-derives the pack definition from the bundled `bootstrap/packs.yaml` because `agent-style` ships no `pack.yaml` of its own. The bundled definition now points at `docs/rule-pack-compact.md`, so compact output is expected on a bootstrap run regardless of the consumer-side `passive` override. Net effect: a v0.5.6 consumer with an old full-body explicit pin gets compact on the next bootstrap, not on the next `pack verify --fix`. Consumer-side compact-to-full switching as a first-class supported action is deferred to aa v0.6.0 (same-ref source-path switching). Consumers who must keep the bundled full-body default should stay on aa v0.5.6 until v0.6.0.
+- **Documentation refresh.** `docs/rule-pack-composition.md` (3 illustrative example places), `compose_rule_packs.py` user-help snippet, and `bootstrap/bootstrap.{ps1,sh}` dry-helper hint all show `v0.3.5` in their examples to match the new bundled default.
+
+### Compatibility
+
+- **Existing explicit pins are only verify-stable.** `pack verify --fix` leaves a project with `name: agent-style` and an older `ref` alone when its deployed output still matches the lock. A full composer/bootstrap run on aa v0.5.7 re-derives the pack definition from the bundled manifest and can rewrite that project to compact, as noted above. Consumers that need the old full-body bundled output should stay on aa v0.5.6 until same-ref source-path switching lands in aa v0.6.0.
+- **Lock-file ref bump under `update_policy: locked` is allowed** because v0.5.7 declares a new bundled default; `locked` policy gates *upstream HEAD drift on the same ref*, not maintainer-declared bundled-default updates. The composer resolves `agent-style` from the current bundled manifest and writes the lock entry with the new ref/source_path.
+- **Content equivalence.** Compact and full both ship the same 21 rule directives and the same rule headings/order. Compact drops per-rule metadata bullets (source / agent-instruction evidence / severity / scope / enforcement), additional BAD/GOOD pairs, and the `Rationale for AI Agent` subsection. Rules apply identically at runtime.
+- **Tests pinned to v0.3.2 fixtures stay v0.3.2.** Test fixtures in `tests/test_compose_*` and `tests/test_banner_updates.py` reference `v0.3.2` as known-state input; not changed by this release.
+- **Legacy markerless content detection (`cli.py:1234`)** continues to recognize v0.3.2-era AGENTS.md content; not changed.
+
 ## [0.5.6] — 2026-04-28
 
 ### Fixed

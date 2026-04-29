@@ -57,7 +57,7 @@ Add the following to agent-config.yaml at your project root, then run bootstrap 
   rule_packs:
     - name: $RulePacks
       # Optional: pin to a specific ref (defaults to manifest's default-ref)
-      # ref: v0.3.2
+      # ref: v0.3.5
 
 After committing agent-config.yaml, run:
 

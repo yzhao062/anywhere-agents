@@ -15,14 +15,16 @@ Rule packs are the right fit when the content should apply to every interaction 
 
 ## Default behavior
 
-Every anywhere-agents bootstrap run composes `AGENTS.md` with the `agent-style` rule pack enabled by default. Composition fetches `agent-style`'s canonical `docs/rule-pack.md` from GitHub at the pinned ref, validates it against the per-agent routing-marker grammar, computes a SHA-256 content hash, caches the result, and writes the composed `AGENTS.md` atomically (temp file plus rename) before any downstream step runs.
+Every anywhere-agents bootstrap run composes `AGENTS.md` with the `agent-style` rule pack enabled by default. Since v0.5.7, the bundled default fetches the **compact** render at `agent-style`'s `docs/rule-pack-compact.md` (~21 KB, 21 rules with directive + first BAD/GOOD pair) instead of the full `docs/rule-pack.md` (~89 KB, full reference with metadata + 5+ pairs + rationale). Composition validates the fetched body against the per-agent routing-marker grammar, computes a SHA-256 content hash, caches the result, and writes the composed `AGENTS.md` atomically (temp file plus rename) before any downstream step runs.
+
+Pack authors writing new packs follow the generic convention `docs/rule-pack.md`; the compact path is `agent-style`-specific. **Consumer-side compact-to-full switching is not supported in v0.5.7**: the composer derives pack definitions from the bundled `bootstrap/packs.yaml` (since `agent-style` ships no `pack.yaml` of its own), so a consumer-supplied `passive.files[].from: docs/rule-pack.md` is silently ignored regardless of ref. Old explicit `agent-style` pins are not migrated by `pack verify --fix`, but a full composer / bootstrap run on aa v0.5.7 re-derives the pack definition from the bundled manifest and produces compact output regardless of consumer override. To keep the old full-body bundled default until consumer-side switching is supported, stay on aa v0.5.6; same-ref source-path switching is queued for aa v0.6.0.
 
 The composed block inside `AGENTS.md` looks like:
 
 ```text
 ...base anywhere-agents AGENTS.md content...
 
-<!-- rule-pack:agent-style:begin version=v0.3.2 sha256=abc123... -->
+<!-- rule-pack:agent-style:begin version=v0.3.5 sha256=abc123... -->
 ...agent-style rules body (21 rules) ...
 <!-- rule-pack:agent-style:end -->
 ```
@@ -41,7 +43,7 @@ At the consumer repo root. Committed to git. Every collaborator and every bootst
 # agent-config.yaml
 rule_packs:
   - name: agent-style
-    ref: v0.3.2       # optional override of the manifest default-ref
+    ref: v0.3.5       # optional override of the manifest default-ref
 ```
 
 ### 2. `agent-config.local.yaml` (gitignored, machine-local override)
@@ -104,7 +106,7 @@ On every anywhere-agents bootstrap with rule packs enabled, the composer:
 
 1. Reads upstream `AGENTS.md` (already fetched into `.agent-config/AGENTS.md` by the bootstrap curl step) into memory.
 2. Parses `agent-config.yaml`, `agent-config.local.yaml`, and `AGENT_CONFIG_RULE_PACKS` env var to compute effective selections.
-3. For each selected pack: resolves the manifest entry, fetches `docs/rule-pack.md` at the pinned ref via the raw GitHub URL, decodes as UTF-8, computes SHA-256, caches under `.agent-config/rule-packs/<name>-<ref>.md` plus a `.sha256` sidecar.
+3. For each selected pack: resolves the manifest entry, fetches the path declared by the entry's `passive[].files[].from` (for `agent-style` since v0.5.7 that is `docs/rule-pack-compact.md` by default; pack authors typically use `docs/rule-pack.md`) at the pinned ref via the raw GitHub URL, decodes as UTF-8, computes SHA-256, caches under `.agent-config/rule-packs/<name>-<ref>.md` plus a `.sha256` sidecar.
 4. Validates the fetched Markdown: rejects any routing-marker match with a named error listing the pack and the exact marker text.
 5. Builds the composed `AGENTS.md` in memory: base upstream content, then each pack in order, each inside its `begin`/`end` block carrying the version and SHA-256.
 6. Writes the composed content atomically: temp file in the same directory, then `os.replace` to `AGENTS.md`. Existing `AGENTS.md` is replaced only when the full composition succeeds.
@@ -121,8 +123,8 @@ packs:
     description: >
       Writing-rule pack. Banned-word list, formatting defaults,
       contraction rules, and dash usage guidance.
-    source: https://raw.githubusercontent.com/yzhao062/agent-style/{ref}/docs/rule-pack.md
-    default-ref: v0.3.2
+    source: https://raw.githubusercontent.com/yzhao062/agent-style/{ref}/docs/rule-pack-compact.md
+    default-ref: v0.3.5
     maintainer: yzhao062
 ```
 

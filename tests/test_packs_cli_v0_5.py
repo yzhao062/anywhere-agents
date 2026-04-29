@@ -861,10 +861,10 @@ class PackVerifyTests(unittest.TestCase):
             "  - name: agent-style\n"
             "    source:\n"
             "      repo: https://github.com/yzhao062/agent-style\n"
-            "      ref: v0.3.2\n"
+            "      ref: v0.3.5\n"
             "    passive:\n"
             "      - files:\n"
-            "          - {from: docs/rule-pack.md, to: AGENTS.md}\n"
+            "          - {from: docs/rule-pack-compact.md, to: AGENTS.md}\n"
             "  - name: aa-core-skills\n"
             "    active:\n"
             "      - kind: skill\n"
@@ -1072,12 +1072,15 @@ class PackVerifyTests(unittest.TestCase):
             self.assertEqual(profile_refs, ["v0.2.0"])
             self.assertEqual(other_refs, ["v0.1.0"])
 
-    def test_verify_malformed_bootstrap_packs_yaml_exits_2(self) -> None:
-        """Regression for Round 2 Codex new M: a malformed
-        ``.agent-config/repo/bootstrap/packs.yaml`` must propagate the
-        parse error so verify exits 2, not silently fall back to the
-        synthetic bundled identity (which causes false ``config
-        mismatch`` rows for default-seeded packs).
+    def test_verify_malformed_project_clone_tolerated_when_wheel_bundled_ok(self) -> None:
+        """v0.5.7 semantic shift: wheel-bundled ``composer/bootstrap/packs.yaml``
+        is the authoritative source for bundled-default identity (matches
+        what v0.5.6 thick-wheel composer actually uses to write the lock).
+        The project's ``.agent-config/repo/bootstrap/packs.yaml`` is now a
+        best-effort fallback for pre-bootstrap state. A malformed clone
+        that previously caused exit 2 is now silently tolerated when the
+        wheel ships a valid manifest. This trade-off keeps verify usable
+        even when a consumer's bootstrap clone got corrupted.
         """
         from anywhere_agents.cli import _pack_verify
         import argparse
@@ -1092,7 +1095,10 @@ class PackVerifyTests(unittest.TestCase):
             out_buf, err_buf = io.StringIO(), io.StringIO()
             with redirect_stdout(out_buf), redirect_stderr(err_buf):
                 rc = _pack_verify(user_path, project, args)
-            self.assertEqual(rc, 2, f"output:\n{out_buf.getvalue()}\n{err_buf.getvalue()}")
+            # Should NOT exit 2 (parse error). Wheel-bundled identity is
+            # used; expect 0 or 1 depending on lock/disk state. Verify
+            # also runs to completion (the table is printed).
+            self.assertNotEqual(rc, 2, f"output:\n{out_buf.getvalue()}\n{err_buf.getvalue()}")
 
     # ------------------------------------------------------------------
     # Group 2: Default-pack seeding
@@ -1104,18 +1110,20 @@ class PackVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             project = pathlib.Path(d) / "project"
             project.mkdir()
-            # Composer-shape lock entries with non-empty output_paths so
-            # _load_lock_observations classifies them as "ok" (not
-            # schema_stale), and the corresponding files exist on disk so
-            # lock-health does not flip to "broken". With P=1 (default
-            # seeded) + L=1 + ok, the classifier emits "deployed".
-            agent_style_outputs = [".agent-config/style/STYLE.md"]
+            # Lock entries shaped to match the post-v0.5.7 wheel-bundled
+            # identity (v0.3.5 + compact path) so the classifier sees a
+            # consistent (project=L=defaults) tuple and emits "deployed".
+            agent_style_outputs = ["AGENTS.md"]
             aa_core_outputs = [".claude/skills/aa-core-skills/SKILL.md"]
             self._create_output_files(project, agent_style_outputs)
             self._create_output_files(project, aa_core_outputs)
             self._write_lock(project, {
                 "packs": {
-                    "agent-style": self._lock_entry("", "", agent_style_outputs),
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        "v0.3.5",
+                        agent_style_outputs,
+                    ),
                     "aa-core-skills": self._lock_entry("", "", aa_core_outputs),
                 }
             })
@@ -1145,7 +1153,12 @@ class PackVerifyTests(unittest.TestCase):
             output = out_buf.getvalue()
             self.assertIn("agent-style", output)
             self.assertIn("aa-core-skills", output)
-            self.assertIn("declared, not bootstrapped", output)
+            # v0.5.7 semantic shift: wheel-bundled is authoritative even
+            # pre-bootstrap, so bundled defaults surface as MISSING (with
+            # actionable note) instead of DECLARED. The state name change
+            # is a more useful classification — "missing" tells the user
+            # the content needs to be materialized; "declared" was vague.
+            self.assertIn("missing", output)
 
     def test_verify_keeps_defaults_when_project_yaml_has_pack(self) -> None:
         from anywhere_agents.cli import _pack_verify
@@ -1168,7 +1181,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.2",
+                        "v0.3.5",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1215,7 +1228,7 @@ class PackVerifyTests(unittest.TestCase):
                     "name": "agent-style",
                     "source": {
                         "url": "https://github.com/yzhao062/agent-style",
-                        "ref": "v0.3.2",
+                        "ref": "v0.3.5",
                     },
                 },
             ])
@@ -1223,7 +1236,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.2",
+                        "v0.3.5",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1370,7 +1383,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.2",
+                        "v0.3.5",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -2065,7 +2078,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.2",
+                        "v0.3.5",
                         ["AGENTS.md"],
                     ),
                 }

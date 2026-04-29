@@ -278,13 +278,13 @@ class CLIBannerVerifyTests(unittest.TestCase):
                         "name": "agent-style",
                         "source": {
                             "repo": "https://github.com/yzhao062/agent-style",
-                            "ref": "v0.3.2",
+                            "ref": "v0.3.5",
                         },
                         "passive": [
                             {
                                 "files": [
                                     {
-                                        "from": "docs/rule-pack.md",
+                                        "from": "docs/rule-pack-compact.md",
                                         "to": "AGENTS.md",
                                     }
                                 ]
@@ -318,13 +318,13 @@ class CLIBannerVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": {
                         "source_url": "https://github.com/yzhao062/agent-style",
-                        "requested_ref": "v0.3.2",
+                        "requested_ref": "v0.3.5",
                         "resolved_commit": "ef" * 20,
                         "files": [
                             {
                                 "role": "passive",
                                 "host": None,
-                                "source_path": "docs/rule-pack.md",
+                                "source_path": "docs/rule-pack-compact.md",
                                 "input_sha256": "def",
                                 "output_paths": ["AGENTS.md"],
                                 "output_scope": "project-local",

@@ -171,11 +171,45 @@ On macOS / Linux, replace `Scripts/python.exe` with `bin/python` and `Scripts/an
 
 ## Commit, tag, push
 
+**MANDATORY**: do not push the tag (and therefore do not run `twine upload` or `npm publish`) until the `Validate` workflow on `main` is green for the release commit. PyPI and npm are immutable post-publish; if CI fails after upload, the only remediation is a fix-forward release. The agent-style v0.3.4 shipped a cosmetic dead-link bug because tag + publish ran before CI completed; this gate prevents the same class of failure here.
+
 ```bash
-git add packages/ CHANGELOG.md
+# Stage and review the entire release scope before committing. The
+# agent-style v0.3.5 release demonstrated that narrow `git add packages/
+# CHANGELOG.md` repeatedly under-stages — release content can span
+# bootstrap/, scripts/, docs/, .github/, agents/, and config files. Always
+# status-review before committing a release.
+git status --short
+git add -A
+git diff --cached --name-only       # eyeball: every release file present?
 git commit -m "release: vX.Y.Z — <short summary>"
-git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin main
+
+# CI-green gate: block until validate.yml passes on THIS release commit.
+# `gh run watch` accepts no branch/commit filter; the no-id form may attach to a
+# different run or prompt interactively. Resolve the run id by commit first.
+release_sha="$(git rev-parse HEAD)"
+run_id=""
+for attempt in $(seq 1 30); do
+  run_id="$(
+    gh run list \
+      --repo yzhao062/anywhere-agents \
+      --workflow validate.yml \
+      --commit "$release_sha" \
+      --limit 5 \
+      --json databaseId \
+      --jq '.[0].databaseId // empty'
+  )"
+  if [ -n "$run_id" ]; then
+    break
+  fi
+  sleep 10
+done
+[ -n "$run_id" ] || { echo "FAIL: no validate.yml run found for $release_sha" >&2; exit 1; }
+gh run watch "$run_id" --repo yzhao062/anywhere-agents --exit-status
+
+# Only after CI is green: tag and push the tag, then publish (next sections).
+git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z
 ```
 

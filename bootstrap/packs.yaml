@@ -17,11 +17,11 @@ packs:
       contraction rules, and dash usage guidance.
     source:
       repo: https://github.com/yzhao062/agent-style
-      ref: v0.3.2
+      ref: v0.3.5
     update_policy: locked
     passive:
       - files:
-          - from: docs/rule-pack.md
+          - from: docs/rule-pack-compact.md
             to: AGENTS.md
     maintainer: yzhao062
 

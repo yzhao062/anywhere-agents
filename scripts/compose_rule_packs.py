@@ -420,7 +420,7 @@ def do_print_yaml(pack_name: str) -> int:
         f"    - name: {pack_name}\n"
         "      # Optional: pin to a specific ref "
         "(defaults to manifest's default-ref)\n"
-        "      # ref: v0.3.2\n"
+        "      # ref: v0.3.5\n"
         "\n"
         "After committing agent-config.yaml, run:\n"
         "\n"
