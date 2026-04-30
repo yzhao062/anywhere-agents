@@ -195,9 +195,16 @@ if $_compose_ok; then
     _composer=.agent-config/repo/scripts/compose_rule_packs.py
   fi
   # shellcheck disable=SC2086
-  if ! "$_py" "$_composer" --root . $_NO_CACHE_FLAG; then
-    echo "error: pack composition failed; AGENTS.md not updated" >&2
-    exit 1
+  # v0.5.8: capture composer rc and always run generator so CLAUDE.md stays
+  # coherent even when composition aborts (e.g. DriftAbort, OSError).
+  "$_py" "$_composer" --root . $_NO_CACHE_FLAG
+  _composer_rc=$?
+  if [ -f .agent-config/repo/scripts/generate_agent_configs.py ]; then
+    "$_py" .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet || true
+  fi
+  if [ "$_composer_rc" -ne 0 ]; then
+    printf '%s\n' "[anywhere-agents] pack composition did not complete (rc=${_composer_rc}); generated files (CLAUDE.md, agents/codex.md) refreshed from current AGENTS.md. Re-run \`anywhere-agents\` after addressing the failure." >&2
+    exit "$_composer_rc"
   fi
 else
   cp -f .agent-config/AGENTS.md AGENTS.md
@@ -218,7 +225,10 @@ else
 fi
 # Generate per-agent config files (CLAUDE.md, agents/codex.md) from AGENTS.md.
 # Generator preserves hand-authored files (no GENERATED header) and warns loudly.
-if [ -f .agent-config/repo/scripts/generate_agent_configs.py ]; then
+# v0.5.8: in the compose-ok path the generator already ran inside the if block
+# above (always, whether composition succeeded or failed). Only run here for the
+# fallback path (Python/PyYAML unavailable) where $_compose_ok is false.
+if ! $_compose_ok && [ -f .agent-config/repo/scripts/generate_agent_configs.py ]; then
   _py=$(_find_python || true)
   if [ -n "$_py" ]; then
     "$_py" .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet || true

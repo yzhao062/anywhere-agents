@@ -353,6 +353,24 @@ def _validate_lock_file_entry(
                     "generated-command only"
                 )
 
+    # v0.5.8: optional historical sha ring — stores the last N values of
+    # input_sha256 so the drift gate can recognise files written by prior
+    # aa versions, even after an upstream pack update changes input_sha256.
+    # The field is absent on old locks (treat as empty ring); present locks
+    # must carry a list of strings.
+    if "historical_input_sha256" in entry:
+        ring = entry["historical_input_sha256"]
+        if not isinstance(ring, list):
+            raise StateError(
+                f"pack-lock {path}: packs[{pack_name!r}].files[{idx}] "
+                "'historical_input_sha256' must be a list when present"
+            )
+        if not all(isinstance(s, str) for s in ring):
+            raise StateError(
+                f"pack-lock {path}: packs[{pack_name!r}].files[{idx}] "
+                "'historical_input_sha256' must contain only strings"
+            )
+
 
 def save_pack_lock(path: Path, data: dict[str, Any]) -> None:
     """Validate + atomically write ``pack-lock.json`` to ``path``."""

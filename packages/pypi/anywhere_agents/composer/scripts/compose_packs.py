@@ -21,6 +21,7 @@ v0.5.0 phase.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -102,6 +103,213 @@ class PackLockDriftAborted(RuntimeError):
             f"{len(self.pending_updates)} pack updates pending and "
             "ANYWHERE_AGENTS_UPDATE=fail; aborting compose."
         )
+
+
+# ----------------------------------------------------------------------
+# v0.5.8: drift-gate skill-dir fix helpers.
+# ----------------------------------------------------------------------
+
+_HISTORICAL_SHA_RING_CAP = 5
+
+
+def _dir_sha256(path: Path) -> str:
+    """Return a Merkle-style sha256 over a directory's files.
+
+    Files are sorted by POSIX-relative path for determinism. Format:
+    ``dir-sha256:<hex>`` to match the per-pack-lock recording convention.
+    Raises ``OSError`` on permission errors (caller should handle).
+    """
+    hasher = hashlib.sha256()
+    entries = sorted(
+        (p for p in path.rglob("*") if p.is_file()),
+        key=lambda p: str(p.relative_to(path)).replace("\\", "/"),
+    )
+    for child in entries:
+        rel_posix = str(child.relative_to(path)).replace("\\", "/")
+        hasher.update(rel_posix.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(child.read_bytes())
+        hasher.update(b"\0")
+    return f"dir-sha256:{hasher.hexdigest()}"
+
+
+def _push_historical_sha(ring: list[str], sha: str | None) -> list[str]:
+    """Return a new list with ``sha`` appended to ``ring``, FIFO-capped at
+    ``_HISTORICAL_SHA_RING_CAP`` entries.
+
+    Empty or None ``sha`` values are silently ignored so callers can pass
+    ``entry.get("input_sha256")`` without guarding for null.
+    """
+    if not sha:
+        return list(ring)
+    new_ring = list(ring) + [sha]
+    if len(new_ring) > _HISTORICAL_SHA_RING_CAP:
+        new_ring = new_ring[len(new_ring) - _HISTORICAL_SHA_RING_CAP:]
+    return new_ring
+
+
+def _build_prior_pack_outputs(
+    *,
+    root: Path,
+    previous_pack_lock: dict[str, Any],
+) -> dict[str, str]:
+    """Build a ``{abs_path: sha256}`` map of paths previously managed by aa.
+
+    For each file-entry in ``previous_pack_lock``:
+
+    - **Directory output_paths** (path ends with ``/`` or resolves to a
+      directory on disk): walk every file currently under that directory
+      and map each file's absolute path to its on-disk sha256. All files
+      inside a recorded skill dir are treated as aa-managed outputs, even
+      if the individual file shas are not recorded separately in the lock.
+
+    - **Single-file output_paths**: include the file if it exists on disk
+      AND its current sha256 matches either the entry's ``input_sha256``
+      (current known version) or any entry in ``historical_input_sha256``
+      (prior known versions). Files whose sha matches none of these are
+      presumed user-edited and excluded (falls to PRESTATE_UNMANAGED per
+      the Round 1 decision — do not adopt unknown shas).
+
+    Seeding from the on-disk sha means ``prior_pack_outputs[p] == current
+    on-disk sha`` by construction, so ``PRESTATE_PACK_OUTPUT`` gate check
+    (``current == recorded``) always passes for unedited aa-managed files.
+
+    v0.5.8: replaces / supplements the project-state-only construction
+    that only mapped ``output_path → dir-sha256:...`` for skill dirs,
+    causing all individual files inside the dir to fall to
+    PRESTATE_UNMANAGED and trigger DriftAbort on the next compose.
+    """
+    result: dict[str, str] = {}
+    for _pack_name, pack_entry in (previous_pack_lock.get("packs") or {}).items():
+        if not isinstance(pack_entry, dict):
+            continue
+        for file_entry in pack_entry.get("files") or []:
+            if not isinstance(file_entry, dict):
+                continue
+            current_sha = file_entry.get("input_sha256")
+            ring: list[str] = file_entry.get("historical_input_sha256") or []
+            known_shas: set[str] = {s for s in ([current_sha] + list(ring)) if s}
+            for out_path in file_entry.get("output_paths") or []:
+                if not isinstance(out_path, str) or not out_path:
+                    continue
+                try:
+                    abs_path = (root / out_path).resolve()
+                except OSError:
+                    continue
+                # Detect directory: trailing slash in the path string OR the
+                # resolved path is actually a directory on disk.
+                is_dir = out_path.endswith("/") or out_path.endswith("\\")
+                if not is_dir:
+                    try:
+                        is_dir = abs_path.is_dir()
+                    except OSError:
+                        is_dir = False
+                if is_dir:
+                    # Walk files under the recorded skill/hook directory, but
+                    # only when the on-disk dir-sha matches a known aa-produced
+                    # dir-sha.  Accepting any on-disk content (the prior bug)
+                    # would let user edits inside a skill dir be adopted as
+                    # PRESTATE_PACK_OUTPUT, bypassing the drift gate silently.
+                    #
+                    # Filter known_shas to dir-sha256:... entries only — plain
+                    # file sha256 values (no prefix) are never dir-merkle hashes.
+                    dir_known: set[str] = {
+                        s for s in known_shas if s.startswith("dir-sha256:")
+                    }
+                    if dir_known:
+                        try:
+                            on_disk_dir_sha = _dir_sha256(abs_path)
+                        except OSError:
+                            continue
+                        if on_disk_dir_sha not in dir_known:
+                            # Dir has been user-modified (or was never managed
+                            # by aa at this path).  Do NOT walk — files fall to
+                            # PRESTATE_UNMANAGED and the drift gate will protect
+                            # them.
+                            continue
+                    try:
+                        for child in abs_path.rglob("*"):
+                            if not child.is_file():
+                                continue
+                            try:
+                                file_sha = hashlib.sha256(
+                                    child.read_bytes()
+                                ).hexdigest()
+                                result[str(child.resolve())] = file_sha
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
+                else:
+                    # Single-file entry: only include if current on-disk sha
+                    # matches a known aa-written value (current or ring).
+                    # Unknown sha = user edit → exclude (PRESTATE_UNMANAGED).
+                    if not abs_path.exists():
+                        continue
+                    try:
+                        on_disk_sha = hashlib.sha256(
+                            abs_path.read_bytes()
+                        ).hexdigest()
+                    except OSError:
+                        continue
+                    if on_disk_sha in known_shas:
+                        result[str(abs_path)] = on_disk_sha
+    return result
+
+
+def _update_pack_lock_historical_rings(
+    new_lock: dict[str, Any],
+    previous_lock: dict[str, Any],
+) -> None:
+    """Update ``historical_input_sha256`` rings in ``new_lock`` in-place.
+
+    For each file entry in ``new_lock``, if the corresponding previous
+    entry carried a different ``input_sha256``, push the OLD sha into the
+    ring before the new lock is saved.  This is called after the compose
+    loop has populated ``new_lock`` with the just-written shas, so every
+    successful compose run preserves the prior sha for future drift checks.
+
+    Matching on ``(pack_name, output_paths[0])`` as the stable identity
+    key — packs rarely change their output target paths across versions,
+    and using output_paths avoids depending on source_path stability.
+    """
+    prev_packs = (previous_lock.get("packs") or {})
+    for pack_name, new_pack_entry in (new_lock.get("packs") or {}).items():
+        if not isinstance(new_pack_entry, dict):
+            continue
+        prev_pack_entry = prev_packs.get(pack_name)
+        if not isinstance(prev_pack_entry, dict):
+            continue
+        # Index previous file entries by their first output_path for O(1) lookup.
+        prev_by_out: dict[str, dict] = {}
+        for prev_fe in prev_pack_entry.get("files") or []:
+            if not isinstance(prev_fe, dict):
+                continue
+            out_paths = prev_fe.get("output_paths") or []
+            if out_paths and isinstance(out_paths[0], str):
+                prev_by_out[out_paths[0]] = prev_fe
+
+        for new_fe in new_pack_entry.get("files") or []:
+            if not isinstance(new_fe, dict):
+                continue
+            out_paths = new_fe.get("output_paths") or []
+            if not out_paths or not isinstance(out_paths[0], str):
+                continue
+            prev_fe = prev_by_out.get(out_paths[0])
+            if prev_fe is None:
+                continue
+            old_sha = prev_fe.get("input_sha256")
+            new_sha = new_fe.get("input_sha256")
+            # Only push when sha actually changed; a no-op compose should
+            # not grow the ring with duplicate entries.
+            if not old_sha or old_sha == new_sha:
+                continue
+            existing_ring: list[str] = list(
+                prev_fe.get("historical_input_sha256") or []
+            )
+            updated_ring = _push_historical_sha(existing_ring, old_sha)
+            if updated_ring:
+                new_fe["historical_input_sha256"] = updated_ring
 
 
 # ----------------------------------------------------------------------
@@ -995,17 +1203,15 @@ def _do_compose_v2(
     # ``PRESTATE_PACK_OUTPUT``. The previous project-state may be empty
     # (first install) — in that case nothing tracked, and unmanaged
     # collisions still get caught.
-    prior_pack_outputs: dict[str, str] = {}
-    if project_state_path.exists():
-        try:
-            prior_project_state = state_mod.load_project_state(project_state_path)
-        except state_mod.StateError:
-            prior_project_state = state_mod.empty_project_state()
-        for entry in prior_project_state.get("entries", []) or []:
-            output_path = entry.get("output_path")
-            sha = entry.get("sha256")
-            if isinstance(output_path, str) and isinstance(sha, str):
-                prior_pack_outputs[str((root / output_path).resolve())] = sha
+    # v0.5.8: replaced single-path lookup with _build_prior_pack_outputs
+    # which walks directory output_paths at file granularity so that
+    # individual files inside a skill dir are classified correctly instead
+    # of falling to PRESTATE_UNMANAGED (reproduction: usc-admin DriftAbort
+    # when aa advanced a skill dir across commits 6d156fe → fc248ab).
+    prior_pack_outputs: dict[str, str] = _build_prior_pack_outputs(
+        root=root,
+        previous_pack_lock=previous_pack_lock,
+    )
     try:
         with txn_mod.Transaction(staging_dir, lock_path) as txn:
             for selection, pack, archive, recorded in resolved:
@@ -1053,6 +1259,11 @@ def _do_compose_v2(
                     outcomes[name] = f"updated -> {new_short}"
                 else:
                     outcomes[name] = "unchanged"
+
+            # v0.5.8: update historical sha rings before saving pack-lock so
+            # future compose runs can recognise on-disk files written by prior
+            # aa versions (FIFO cap of _HISTORICAL_SHA_RING_CAP per entry).
+            _update_pack_lock_historical_rings(pack_lock, previous_pack_lock)
 
             # Stage all writes — state files + AGENTS.md — through the
             # same transaction so a state-validation error surfaces

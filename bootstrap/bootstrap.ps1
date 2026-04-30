@@ -191,11 +191,18 @@ if ($composeOk) {
     } else {
         $composer = ".agent-config/repo/scripts/compose_rule_packs.py"
     }
+    # v0.5.8: capture composer rc and always run generator so CLAUDE.md stays
+    # coherent even when composition aborts (e.g. DriftAbort, OSError).
     $global:LASTEXITCODE = $null
     & $pyCmd.Path $composer @composeArgs
-    if (-not $? -or $LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("error: pack composition failed; AGENTS.md not updated")
-        exit 1
+    $composerRc = if ($LASTEXITCODE -ne $null) { [int]$LASTEXITCODE } elseif (-not $?) { 1 } else { 0 }
+    if (Test-Path .agent-config/repo/scripts/generate_agent_configs.py) {
+        $global:LASTEXITCODE = $null
+        & $pyCmd.Path .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet
+    }
+    if ($composerRc -ne 0) {
+        [Console]::Error.WriteLine("[anywhere-agents] pack composition did not complete (rc=$composerRc); generated files (CLAUDE.md, agents/codex.md) refreshed from current AGENTS.md. Re-run ``anywhere-agents`` after addressing the failure.")
+        exit $composerRc
     }
 } else {
     Copy-Item .agent-config/AGENTS.md AGENTS.md -Force
@@ -216,7 +223,10 @@ if ($composeOk) {
 }
 # Generate per-agent config files (CLAUDE.md, agents/codex.md) from AGENTS.md.
 # Generator preserves hand-authored files (no GENERATED header) and warns loudly.
-if (Test-Path .agent-config/repo/scripts/generate_agent_configs.py) {
+# v0.5.8: in the composeOk path the generator already ran above (always, whether
+# composition succeeded or failed). Only run here for the fallback path
+# (Python/PyYAML unavailable) where $composeOk is false.
+if (-not $composeOk -and (Test-Path .agent-config/repo/scripts/generate_agent_configs.py)) {
   $genPy = Find-RealPython
   if ($genPy) {
     & $genPy.Path .agent-config/repo/scripts/generate_agent_configs.py --root . --quiet

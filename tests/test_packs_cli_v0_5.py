@@ -1622,7 +1622,8 @@ class PackVerifyTests(unittest.TestCase):
             user_path = pathlib.Path(d) / "user-config.yaml"
             composer_calls = []
 
-            def _fake_composer(project_root, *args):
+            # v0.5.8: patch the gen-fallback wrapper (which now wraps _invoke_composer).
+            def _fake_composer(project_root, *args, **kwargs):
                 composer_calls.append((project_root, args))
                 return 0
 
@@ -1630,7 +1631,7 @@ class PackVerifyTests(unittest.TestCase):
             try:
                 os.chdir(project)
                 with patch(
-                    "anywhere_agents.cli._invoke_composer",
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
                     side_effect=_fake_composer,
                 ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
@@ -2321,7 +2322,8 @@ class PackAddOneShotV052Tests(unittest.TestCase):
                 os.chdir(project)
                 composer_calls: list[tuple] = []
 
-                def _fake_composer(project_root, *args):
+                # v0.5.8: patch the gen-fallback wrapper (which now wraps _invoke_composer).
+                def _fake_composer(project_root, *args, **kwargs):
                     composer_calls.append(args)
                     return 0
 
@@ -2329,7 +2331,7 @@ class PackAddOneShotV052Tests(unittest.TestCase):
                     source_fetch, "fetch_pack",
                     return_value=self._make_archive(archive_dir),
                 ), patch(
-                    "anywhere_agents.cli._invoke_composer",
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
                     side_effect=_fake_composer,
                 ):
                     rc = _pack_main(user_path, [
@@ -2794,7 +2796,13 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
             # main() must have been re-entered with the reconcile argv.
             self.assertIn(["pack", "verify", "--fix", "--yes"], captured)
 
-    def test_bootstrap_main_skips_reconcile_when_no_user_config(self) -> None:
+    def test_bootstrap_main_runs_reconcile_even_when_no_user_config(self) -> None:
+        """v0.5.8: Gap A — reconcile runs unconditionally; no user_config gate.
+
+        The old behavior skipped reconcile when user_config was missing.  The
+        new behavior always runs it so the wheel composer + generator heal any
+        stale generated files regardless of user-level config presence.
+        """
         from anywhere_agents import cli
         with tempfile.TemporaryDirectory() as d:
             # Point user_config_path at a path that doesn't exist.
@@ -2818,10 +2826,19 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
                 rc = cli._bootstrap_main([])
 
             self.assertEqual(rc, 0)
-            # main() must NOT have been called for reconcile.
-            self.assertEqual(captured, [])
+            # v0.5.8: Gap A — main() IS now called for reconcile even with no user config.
+            self.assertIn(["pack", "verify", "--fix", "--yes"], captured)
 
-    def test_bootstrap_main_skips_reconcile_when_bootstrap_fails(self) -> None:
+    def test_bootstrap_main_falls_through_to_reconcile_when_bootstrap_fails(self) -> None:
+        """v0.5.8: Gap A — bootstrap.sh failure triggers wheel-side reconcile.
+
+        The old behavior returned early on rc!=0, skipping the reconcile.  The
+        new behavior always runs reconcile so the wheel composer + generator can
+        heal a project that bootstrap.sh left in a broken state (e.g., v0.5.7
+        composer aborted on a drift gate that the v0.5.8 wheel fixes).
+
+        When reconcile returns 0 (recovery succeeded), _bootstrap_main returns 0.
+        """
         from anywhere_agents import cli
         with tempfile.TemporaryDirectory() as d:
             user_dir = pathlib.Path(d) / "userdata"
@@ -2834,7 +2851,7 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
 
             def fake_main(argv: list[str] | None = None) -> int:
                 captured.append(list(argv) if argv else [])
-                return 0
+                return 0  # recovery succeeds
 
             class FakeResult:
                 returncode = 1  # bootstrap script failed
@@ -2847,9 +2864,471 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
                  redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
                 rc = cli._bootstrap_main([])
 
-            self.assertEqual(rc, 1)
-            # main() must NOT have been called for reconcile when bootstrap failed.
-            self.assertEqual(captured, [])
+            # Gap A: reconcile runs, recovery succeeds → return 0.
+            self.assertEqual(rc, 0)
+            # Reconcile must have been invoked.
+            self.assertIn(["pack", "verify", "--fix", "--yes"], captured)
+
+
+class V058VerifyFixAutoDeployTests(unittest.TestCase):
+    """v0.5.8 Item 3: ``pack verify --fix`` auto-deploys after any
+    repair/reconcile write or deployable broken-state detection.
+
+    Covers:
+    - ``--fix`` with user-only rows writes yaml and triggers composer.
+    - ``--fix --no-deploy`` writes yaml but skips composer.
+    - ``--fix`` on a deployable broken-state (DECLARED) triggers composer.
+    - ``--fix --no-deploy`` on deployable broken-state skips composer.
+    - ``--fix`` on a healthy project with only prompt-policy drift does NOT
+      auto-deploy (v0.6.0 boundary; v0.5.8 does not apply update drift).
+    """
+
+    def _make_project(self, d: str) -> tuple[pathlib.Path, pathlib.Path]:
+        """Return (user_path, project_root) for a minimal test project."""
+        user_path = pathlib.Path(d) / "user.yaml"
+        project_root = pathlib.Path(d) / "project"
+        project_root.mkdir(parents=True, exist_ok=True)
+        return user_path, project_root
+
+    def test_fix_user_only_triggers_composer(self) -> None:
+        """User-only row (no project entry) → fix writes yaml AND invokes composer."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+            user_path.write_text(
+                "packs:\n"
+                "- {name: mypkg, source: {url: https://github.com/x/y, ref: main}}\n",
+                encoding="utf-8",
+            )
+            (project_root / "agent-config.yaml").write_text("rule_packs: []\n", encoding="utf-8")
+
+            class _Args:
+                yes = True
+                no_deploy = False
+
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(composer_calls), 1, "composer must be invoked once")
+
+    def test_fix_no_deploy_user_only_skips_composer(self) -> None:
+        """--no-deploy skips composer even when user-only row triggers a write."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+            user_path.write_text(
+                "packs:\n"
+                "- {name: mypkg, source: {url: https://github.com/x/y, ref: main}}\n",
+                encoding="utf-8",
+            )
+            (project_root / "agent-config.yaml").write_text("rule_packs: []\n", encoding="utf-8")
+
+            class _Args:
+                yes = True
+                no_deploy = True
+
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            # rc may be 0 (fix written) or 0 (nothing deployed); composer skipped.
+            self.assertEqual(len(composer_calls), 0, "composer must NOT be invoked with --no-deploy")
+
+    def test_fix_deployable_state_triggers_composer(self) -> None:
+        """DECLARED state (project has pack, no lock) → composer invoked."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+            # No user-level pack; project declares it but no lock entry.
+            user_path.write_text("packs: []\n", encoding="utf-8")
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs:\n"
+                "- {name: agent-style, source: {url: bundled:aa, ref: bundled}}\n",
+                encoding="utf-8",
+            )
+            # No .agent-config/pack-lock.json → DECLARED state.
+
+            class _Args:
+                yes = True
+                no_deploy = False
+
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            self.assertEqual(len(composer_calls), 1, "composer must be invoked for DECLARED state")
+
+    def test_fix_deployable_state_no_deploy_skips_composer(self) -> None:
+        """DECLARED state + --no-deploy → no composer."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+            user_path.write_text("packs: []\n", encoding="utf-8")
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs:\n"
+                "- {name: agent-style, source: {url: bundled:aa, ref: bundled}}\n",
+                encoding="utf-8",
+            )
+
+            class _Args:
+                yes = True
+                no_deploy = True
+
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            self.assertEqual(len(composer_calls), 0, "composer must NOT run with --no-deploy")
+
+    def test_fix_no_reconcile_no_deploy_nothing_to_repair(self) -> None:
+        """Empty user config + no project packs → --fix reports nothing to repair; no composer."""
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+            # No user packs, no project packs, no lock.
+            user_path.write_text("packs: []\n", encoding="utf-8")
+            (project_root / "agent-config.yaml").write_text("rule_packs: []\n", encoding="utf-8")
+
+            class _Args:
+                yes = True
+                no_deploy = False
+
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            # Nothing to repair, no composer invocation needed.
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(composer_calls), 0,
+                             "composer must not run when there is nothing to repair")
+
+    def test_fix_healthy_project_with_prompt_policy_drift_does_not_auto_deploy(self) -> None:
+        """v0.6.0 boundary: a healthy project where all packs are DEPLOYED but
+        ``latest_known_head != resolved_commit`` (an update is available upstream)
+        must NOT invoke the composer during ``pack verify --fix``.
+
+        Prompt-policy drift (update availability) is a v0.6.0 concern.
+        v0.5.8 ``--fix`` only repairs structural broken states; detecting that
+        a newer upstream commit exists does NOT constitute a repairable defect
+        in v0.5.8 terms and must not trigger auto-deploy.
+
+        This guards the Q1 v0.6.0 boundary so a future change that accidentally
+        starts deploying on update-drift fails this test explicitly.
+        """
+        from anywhere_agents.cli import _pack_verify_fix
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+
+            url = "https://github.com/example/my-pack"
+            ref = "main"
+            resolved = "a" * 40          # currently deployed commit
+            latest_head = "b" * 40       # newer upstream commit (prompt-policy drift)
+
+            # User config: pack declared at user level.
+            user_path.write_text(
+                "packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+
+            # Project config: use two-file approach to suppress bundled defaults
+            # (agent-style, aa-core-skills) while keeping only my-pack in project scope.
+            # Writing rule_packs: [] in the tracked file clears the defaults;
+            # agent-config.local.yaml then adds my-pack (local-overrides-tracked logic).
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs: []\n",
+                encoding="utf-8",
+            )
+            (project_root / "agent-config.local.yaml").write_text(
+                "rule_packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+
+            # Create the output file on disk so lock health is "ok" (not "broken").
+            output_rel = ".claude/commands/my-pack.md"
+            output_abs = project_root / output_rel
+            output_abs.parent.mkdir(parents=True, exist_ok=True)
+            output_abs.write_text("# my-pack command\n", encoding="utf-8")
+
+            # Write pack-lock.json with a healthy entry that has
+            # latest_known_head != resolved_commit (update available).
+            lock_data = {
+                "version": 2,
+                "packs": {
+                    "my-pack": {
+                        "source_url": url,
+                        "requested_ref": ref,
+                        "resolved_commit": resolved,
+                        "latest_known_head": latest_head,  # drift: newer commit exists
+                        "pack_update_policy": "locked",
+                        "files": [
+                            {"output_paths": [output_rel]},
+                        ],
+                    }
+                },
+            }
+            agent_dir = project_root / ".agent-config"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "pack-lock.json").write_text(
+                json.dumps(lock_data), encoding="utf-8"
+            )
+
+            class _Args:
+                yes = True
+                no_deploy = False
+
+            composer_calls: list = []
+            out_buf = io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            # Pack is DEPLOYED; latest_known_head drift is NOT a repairable
+            # defect in v0.5.8.  --fix must report nothing to repair and must
+            # NOT call the composer.
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                len(composer_calls), 0,
+                "v0.5.8 must NOT auto-deploy for prompt-policy (update-available) drift; "
+                f"composer was invoked {len(composer_calls)} time(s)."
+            )
+            self.assertIn(
+                "nothing to repair",
+                out_buf.getvalue(),
+                "--fix must report 'nothing to repair' when all packs are deployed "
+                "even if latest_known_head differs from resolved_commit."
+            )
+
+
+    # v0.5.8: Gap B regression tests — generator always runs after --fix,
+    # even when pack-lock + state report DEPLOYED (nothing to repair).
+
+    def test_fix_deployed_with_stale_generator_output_heals(self) -> None:
+        """Gap B: pack-lock says DEPLOYED but CLAUDE.md is stale.
+
+        ``pack verify --fix --yes`` must call the generator to heal the stale
+        CLAUDE.md / agents/codex.md even though the existing logic reports
+        "nothing to repair" (all packs are DEPLOYED at the pack-level check).
+        The composer must NOT be invoked (no structural repair needed); only
+        the generator runs.
+
+        Mock: _invoke_composer_with_gen_fallback is NOT called; _run_generator_only IS called.
+        """
+        from anywhere_agents.cli import _pack_verify_fix
+        import shutil
+
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+
+            url = "https://github.com/example/my-pack"
+            ref = "main"
+            resolved = "a" * 40
+
+            # User and project both declare my-pack (matched → DEPLOYED).
+            user_path.write_text(
+                "packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs: []\n", encoding="utf-8"
+            )
+            (project_root / "agent-config.local.yaml").write_text(
+                "rule_packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+
+            # Write an output file on disk so lock health passes.
+            output_rel = ".claude/commands/my-pack.md"
+            output_abs = project_root / output_rel
+            output_abs.parent.mkdir(parents=True, exist_ok=True)
+            output_abs.write_text("# my-pack command\n", encoding="utf-8")
+
+            lock_data = {
+                "version": 2,
+                "packs": {
+                    "my-pack": {
+                        "source_url": url,
+                        "requested_ref": ref,
+                        "resolved_commit": resolved,
+                        "latest_known_head": resolved,
+                        "pack_update_policy": "locked",
+                        "files": [{"output_paths": [output_rel]}],
+                    }
+                },
+            }
+            agent_dir = project_root / ".agent-config"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "pack-lock.json").write_text(
+                json.dumps(lock_data), encoding="utf-8"
+            )
+
+            # Stale CLAUDE.md with GENERATED FILE marker.
+            (project_root / "AGENTS.md").write_text(
+                "# AGENTS.md\nMinimal agent config.\n", encoding="utf-8"
+            )
+            (project_root / "CLAUDE.md").write_text(
+                "<!-- GENERATED FILE: do not edit by hand.\nOverride with CLAUDE.local.md. -->\n"
+                + "# Stale CLAUDE.md\n" + "# padding\n" * 50,
+                encoding="utf-8",
+            )
+
+            class _Args:
+                yes = True
+                no_deploy = False
+
+            # v0.5.8: Gap B fix — _run_generator_only must be called.
+            generator_calls: list = []
+            composer_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._invoke_composer_with_gen_fallback",
+                    side_effect=lambda *a, **kw: composer_calls.append(a) or 0,
+                ), patch(
+                    "anywhere_agents.cli._run_generator_only",
+                    side_effect=lambda *a, **kw: generator_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                len(composer_calls), 0,
+                "Composer (via gen-fallback) must NOT be called when all packs are DEPLOYED.",
+            )
+            self.assertEqual(
+                len(generator_calls), 1,
+                "Gap B: _run_generator_only must be called once even when nothing to repair.",
+            )
+
+    def test_fix_no_deploy_skips_generator_too(self) -> None:
+        """Gap B: --no-deploy must skip the generator as well.
+
+        The generator escape hatch: when --no-deploy is set, the generator step
+        is also skipped (CI / offline use where no files should be written).
+        """
+        from anywhere_agents.cli import _pack_verify_fix
+
+        with tempfile.TemporaryDirectory() as d:
+            user_path, project_root = self._make_project(d)
+
+            url = "https://github.com/example/my-pack"
+            ref = "main"
+            resolved = "a" * 40
+
+            user_path.write_text(
+                "packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+            (project_root / "agent-config.yaml").write_text(
+                "rule_packs: []\n", encoding="utf-8"
+            )
+            (project_root / "agent-config.local.yaml").write_text(
+                "rule_packs:\n"
+                f"- {{name: my-pack, source: {{url: {url}, ref: {ref}}}}}\n",
+                encoding="utf-8",
+            )
+
+            output_rel = ".claude/commands/my-pack.md"
+            output_abs = project_root / output_rel
+            output_abs.parent.mkdir(parents=True, exist_ok=True)
+            output_abs.write_text("# my-pack command\n", encoding="utf-8")
+
+            lock_data = {
+                "version": 2,
+                "packs": {
+                    "my-pack": {
+                        "source_url": url,
+                        "requested_ref": ref,
+                        "resolved_commit": resolved,
+                        "latest_known_head": resolved,
+                        "pack_update_policy": "locked",
+                        "files": [{"output_paths": [output_rel]}],
+                    }
+                },
+            }
+            agent_dir = project_root / ".agent-config"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "pack-lock.json").write_text(
+                json.dumps(lock_data), encoding="utf-8"
+            )
+
+            class _Args:
+                yes = True
+                no_deploy = True  # escape hatch
+
+            generator_calls: list = []
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project_root)
+                with patch(
+                    "anywhere_agents.cli._run_generator_only",
+                    side_effect=lambda *a, **kw: generator_calls.append(a) or 0,
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = _pack_verify_fix(user_path, project_root, _Args())
+            finally:
+                os.chdir(cwd_before)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                len(generator_calls), 0,
+                "Gap B: --no-deploy must also skip _run_generator_only.",
+            )
 
 
 if __name__ == "__main__":

@@ -75,9 +75,44 @@ def bootstrap_url(script_name: str) -> str:
     return f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/bootstrap/{script_name}"
 
 
+def _detect_windows_shell() -> str:
+    """v0.5.8: Detect whether the active shell on Windows is bash or PowerShell.
+
+    Returns ``"bash"`` when Git Bash (or another MSYS2/bash environment) is
+    the active terminal, ``"powershell"`` otherwise (the default).
+
+    Detection heuristics (applied in order):
+    1. ``BASH_VERSION`` env var non-empty → bash (set by every bash-compatible shell).
+    2. ``MSYSTEM`` env var starts with ``MINGW`` (case-insensitive) → bash
+       (Git for Windows sets MSYSTEM=MINGW64 or MINGW32 in its terminal).
+    3. Otherwise → powershell.
+
+    Only env-var checks are used; psutil is intentionally avoided to keep
+    the package dependency-free.
+    """
+    if os.environ.get("BASH_VERSION"):
+        return "bash"
+    msystem = os.environ.get("MSYSTEM", "")
+    if msystem.upper().startswith("MINGW"):
+        return "bash"
+    return "powershell"
+
+
 def choose_script() -> tuple[str, list[str]]:
-    """Return (script_name, interpreter_argv_prefix) for the current platform."""
+    """Return (script_name, interpreter_argv_prefix) for the current platform.
+
+    v0.5.8: on Windows, ``_detect_windows_shell()`` is consulted first. When
+    the active shell is Git Bash (``BASH_VERSION`` or ``MSYSTEM=MINGW*``),
+    fetch ``bootstrap.sh`` and invoke it via bash so Git Bash users can run
+    the bootstrap without switching to a PowerShell window.
+    """
     if platform.system() == "Windows":
+        # v0.5.8: Git Bash on Windows gets bootstrap.sh.
+        if _detect_windows_shell() == "bash":
+            bash = shutil.which("bash")
+            if bash is None:
+                raise RuntimeError("bash is required (detected Git Bash environment) but was not found on PATH.")
+            return "bootstrap.sh", [bash]
         interpreter = shutil.which("pwsh") or shutil.which("powershell")
         if interpreter is None:
             raise RuntimeError("PowerShell is required on Windows but was not found on PATH.")
@@ -288,36 +323,77 @@ def _bootstrap_main(argv: list[str]) -> int:
         log(f"Interpreter not found: {exc}")
         return 2
 
-    if result.returncode != 0:
-        log(f"Bootstrap exited with code {result.returncode}")
-        return result.returncode
+    bootstrap_rc = result.returncode
 
-    # v0.5.4: post-bootstrap reconcile. The bootstrap script just cloned
-    # the AA source and ran the composer with project-side selections
-    # (typically just the bundled defaults on a fresh / migrated
-    # project). User-level packs registered in ``user_config_path()``
-    # have not been reconciled yet. Run ``pack verify --fix --yes`` so
-    # any user-level packs (e.g., agent-pack profile / paper-workflow /
-    # acad-skills) also land in one shot. Skipped when the user has no
-    # user-level config file at all (fast no-op for fresh installs).
-    user_config = _user_config_path()
-    if user_config is not None and user_config.exists():
-        log("Reconciling user-level packs (pack verify --fix --yes)...")
-        try:
-            fix_rc = main(["pack", "verify", "--fix", "--yes"])
-        except SystemExit as exc:
-            fix_rc = exc.code if isinstance(exc.code, int) else 1
-        except Exception as exc:  # pragma: no cover - belt and suspenders
-            log(f"warning: post-bootstrap reconcile raised: {exc}")
-            fix_rc = 1
-        if fix_rc != 0:
+    # v0.5.8: Gap A — always continue to the wheel-side reconcile regardless
+    # of bootstrap_rc.  When bootstrap.sh exits non-zero (e.g., the cloned
+    # v0.5.7 composer aborts on a drift gate that v0.5.8 fixes), the wheel-
+    # bundled composer + generator can still heal the project.  The early-
+    # return that was here before this fix prevented recovery in that case.
+    if bootstrap_rc != 0:
+        log(
+            f"Bootstrap exited with code {bootstrap_rc}; "
+            "attempting wheel-side recovery (pack verify --fix --yes)..."
+        )
+
+    # v0.5.4 / v0.5.8: post-bootstrap reconcile.  The bootstrap script ran
+    # the composer with project-side selections.  User-level packs registered
+    # in user_config_path() have not been reconciled yet; the wheel composer
+    # also heals any generator-stale state (Gap B).  Run unconditionally so
+    # both fresh installs and upgraders with broken bootstrap.sh benefit.
+    log("Running post-bootstrap heal pass (pack verify --fix --yes)...")
+    try:
+        fix_rc = main(["pack", "verify", "--fix", "--yes"])
+    except SystemExit as exc:
+        fix_rc = exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:  # pragma: no cover - belt and suspenders
+        log(f"warning: post-bootstrap reconcile raised: {exc}")
+        fix_rc = 1
+
+    if bootstrap_rc != 0:
+        if fix_rc == 0:
+            # Evidence check: a reconcile that returned 0 from the "nothing to
+            # repair" branch with no project clone present did NOT actually
+            # deploy anything.  Require at least one of the following to exist
+            # before crediting recovery:
+            #   (a) the project-clone sentinel (.agent-config/repo/scripts/compose_packs.py)
+            #   (b) AGENTS.md in the project root (written by bootstrap or verify)
+            # If neither exists, the reconcile was a no-op on an empty project,
+            # and the original bootstrap failure should be preserved.
+            project_root = Path.cwd()
+            clone_sentinel = project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+            agents_md = project_root / "AGENTS.md"
+            if clone_sentinel.exists() or agents_md.exists():
+                log(
+                    f"Bootstrap exited with code {bootstrap_rc} but "
+                    "wheel-side recovery succeeded; project is now in a coherent state."
+                )
+                return 0
+            else:
+                log(
+                    f"Bootstrap exited rc={bootstrap_rc}. "
+                    "Reconcile returned 0 but no project clone or AGENTS.md exists; "
+                    "preserving bootstrap rc."
+                )
+                return bootstrap_rc
+        else:
             log(
-                f"warning: post-bootstrap reconcile returned rc={fix_rc}; "
-                f"run `anywhere-agents pack verify --fix` manually to "
-                f"deploy user-level packs."
+                f"warning: bootstrap failed (rc={bootstrap_rc}) and "
+                f"wheel-side recovery also failed (rc={fix_rc}); "
+                "run `anywhere-agents pack verify --fix` manually."
             )
+            return bootstrap_rc  # preserve original failure category
 
-    return result.returncode
+    # bootstrap_rc == 0 path.
+    if fix_rc != 0:
+        log(
+            f"warning: post-bootstrap reconcile returned rc={fix_rc}; "
+            "run `anywhere-agents pack verify --fix` manually to "
+            "deploy user-level packs."
+        )
+        return fix_rc
+
+    return 0
 
 
 # ======================================================================
@@ -440,6 +516,13 @@ def _pack_main(path: Path | None, argv: list[str]) -> int:
         "--yes",
         action="store_true",
         help="Skip the interactive confirmation when applying --fix.",
+    )
+    p_verify.add_argument(
+        "--no-deploy",
+        action="store_true",
+        dest="no_deploy",
+        # v0.5.8: opt-out for CI / offline / inspect-only use.
+        help="Write config rows but skip the composer deploy step (--fix only). Useful for CI or offline inspection.",
     )
 
     args = parser.parse_args(argv)
@@ -848,6 +931,76 @@ def _invoke_composer(
     return result.returncode
 
 
+def _run_generator_only(project_root: Path) -> int:
+    """v0.5.8: Gap B — run generate_agent_configs.py as a standalone step.
+
+    Discovers the generator in the same priority order as
+    _invoke_composer_with_gen_fallback: bundled wheel copy first, then
+    project-local clone.  Non-fatal: if the generator is absent or raises,
+    returns 0 (skip silently so callers can proceed).
+
+    Returns 0 on success or absence; non-zero only on subprocess failure
+    when the generator is present and runs but exits with an error.
+    """
+    # Find the generator: prefer bundled (wheel-local), then project clone.
+    bundled_composer = _bundled_composer_path()
+    generator: Path | None = None
+    if bundled_composer is not None:
+        candidate = bundled_composer.parent / "generate_agent_configs.py"
+        if candidate.exists():
+            generator = candidate
+    if generator is None:
+        candidate = (
+            project_root / ".agent-config" / "repo" / "scripts" / "generate_agent_configs.py"
+        )
+        if candidate.exists():
+            generator = candidate
+    if generator is None:
+        return 0  # absent — skip silently
+    try:
+        result = subprocess.run(
+            [sys.executable, str(generator), "--root", str(project_root), "--quiet"],
+            cwd=str(project_root),
+            check=False,
+        )
+        return result.returncode
+    except Exception:  # pragma: no cover — belt-and-suspenders
+        return 0
+
+
+def _invoke_composer_with_gen_fallback(
+    project_root: Path,
+    *args: str,
+    env_extra: dict[str, str] | None = None,
+) -> int:
+    """v0.5.8: wrap _invoke_composer with a finally-style generator step.
+
+    Regardless of whether the composer succeeds or fails, run
+    ``generate_agent_configs.py --root . --quiet`` so CLAUDE.md and
+    agents/codex.md stay consistent with whatever AGENTS.md is on disk.
+
+    - On composer rc=0: generator runs silently; returns 0.
+    - On composer rc≠0: generator still runs; prints a recovery summary
+      to stderr; returns the original composer rc.
+    - Generator failure is non-fatal: the original composer rc still wins.
+    - If generate_agent_configs.py is absent: skip silently.
+    """
+    composer_rc = _invoke_composer(project_root, *args, env_extra=env_extra)
+
+    # v0.5.8: Gap B — reuse the extracted helper so both call sites share
+    # the same generator-discovery logic.
+    _run_generator_only(project_root)
+
+    if composer_rc != 0:
+        log(
+            f"pack composition did not complete (rc={composer_rc}); "
+            "generated files (CLAUDE.md, agents/codex.md) refreshed from "
+            "current AGENTS.md. Re-run `anywhere-agents` after addressing "
+            "the failure."
+        )
+    return composer_rc
+
+
 def _pack_add_v0_5(user_config_path: Path, args) -> int:
     """``pack add <url>`` — one-shot install (v0.5.2).
 
@@ -980,7 +1133,8 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
         return rc
 
     # Step 4c: invoke the composer subprocess. Composer self-locks.
-    rc = _invoke_composer(project_root)
+    # v0.5.8: use gen-fallback wrapper so CLAUDE.md stays coherent even on abort.
+    rc = _invoke_composer_with_gen_fallback(project_root)
     if rc != 0:
         log(
             "error: pack add updated configs but composer failed "
@@ -1097,7 +1251,8 @@ def _pack_update(user_config_path: Path, args) -> int:
     _write_user_config(user_config_path, user_config)
 
     project_root = Path.cwd()
-    return _invoke_composer(
+    # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent even on composer abort.
+    return _invoke_composer_with_gen_fallback(
         project_root,
         env_extra={"ANYWHERE_AGENTS_UPDATE": "apply"},
     )
@@ -2529,15 +2684,31 @@ def _pack_verify_fix(user_config_path, project_root, args):
         if not bad:
             print("", file=sys.stdout)
             print("--fix: nothing to repair.", file=sys.stdout)
+            # v0.5.8: Gap B — even when pack-lock is fully DEPLOYED, the
+            # generator may be out of date (e.g., stale CLAUDE.md after a
+            # pipx --force upgrade).  Run it as a final coherence step.
+            # Gated by --no-deploy so CI / offline callers can opt out.
+            if not getattr(args, "no_deploy", False):
+                _run_generator_only(project_root)
             return 0
         if deployable:
+            # v0.5.8: --no-deploy opt-out skips composer (CI / offline use).
+            if getattr(args, "no_deploy", False):
+                print("", file=sys.stdout)
+                print(
+                    "--fix: deployable packs found but --no-deploy set; "
+                    "skipping composer. Run without --no-deploy to materialize.",
+                    file=sys.stdout,
+                )
+                return 0
             print("", file=sys.stdout)
             print(
                 "--fix: invoking composer to deploy or refresh "
                 "pack-lock entries...",
                 file=sys.stdout,
             )
-            rc = _invoke_composer(project_root)
+            # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent on abort.
+            rc = _invoke_composer_with_gen_fallback(project_root)
             if rc != 0:
                 log(
                     f"error: composer failed (rc={rc}). Recovery: back up "
@@ -2702,12 +2873,23 @@ def _pack_verify_fix(user_config_path, project_root, args):
             return 10
 
     # Step 5: invoke composer.
+    # v0.5.8: --no-deploy opt-out skips composer (CI / offline use).
+    if getattr(args, "no_deploy", False):
+        repaired = len(user_only_rows) + len(project_only_rows)
+        print("", file=sys.stdout)
+        print(
+            f"--fix: wrote {repaired} config change(s) but --no-deploy set; "
+            "skipping composer. Run without --no-deploy to materialize.",
+            file=sys.stdout,
+        )
+        return 0
     print("", file=sys.stdout)
     print(
         "--fix: invoking composer to deploy...",
         file=sys.stdout,
     )
-    rc = _invoke_composer(project_root)
+    # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent on abort.
+    rc = _invoke_composer_with_gen_fallback(project_root)
     if rc != 0:
         log(
             f"error: composer failed (rc={rc}). Configs are persistent; "
