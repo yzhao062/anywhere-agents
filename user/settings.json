@@ -38,6 +38,16 @@
             "statusMessage": "Checking for compound cd and destructive commands..."
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/hooks/guard.py\"",
+            "statusMessage": "Checking PowerShell auto-allow patterns..."
+          }
+        ]
       }
     ],
     "SessionStart": [

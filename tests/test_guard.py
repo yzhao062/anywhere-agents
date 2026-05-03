@@ -742,5 +742,150 @@ class BannerGateTests(unittest.TestCase):
         self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
+class AutoWatchAllowTests(unittest.TestCase):
+    """The implement-review skill's auto-watch.ps1 watcher should auto-allow
+    on the PowerShell tool. Unrelated PowerShell calls fall through to the
+    existing permission flow. Bash invocations referencing the same path tail
+    are not affected because the auto-allow is keyed on tool_name.
+    """
+
+    def test_auto_watch_allowed_with_backslash(self):
+        # Native Windows-style invocation: forward slash normalization in the
+        # check should match path tails written with backslashes.
+        cmd = (
+            "& 'C:\\Users\\me\\PycharmProjects\\proj\\skills\\implement-review"
+            "\\scripts\\auto-watch.ps1' 'Review-*.md' 1 'Codex'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_auto_watch_allowed_with_forward_slash(self):
+        cmd = (
+            "& '/home/user/proj/skills/implement-review/scripts/auto-watch.ps1' "
+            "'Review-*.md' 1 'Codex'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_unrelated_powershell_command_falls_through(self):
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "Get-Date"},
+        })
+        self.assertIsNone(resp)
+
+    def test_other_auto_watch_path_not_allowed(self):
+        # Path tail must match the implement-review skill's shipped script;
+        # an arbitrary auto-watch.ps1 elsewhere on disk is not auto-allowed.
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "& 'C:\\tmp\\auto-watch.ps1'"},
+        })
+        self.assertIsNone(resp)
+
+    def test_bash_with_matching_path_falls_through(self):
+        # Auto-allow is keyed on the PowerShell tool_name; a Bash invocation
+        # that happens to mention the same path tail does not get the bypass.
+        cmd = "bash skills/implement-review/scripts/auto-watch.ps1 args"
+        resp = run_guard_with_payload({
+            "tool_name": "Bash",
+            "tool_input": {"command": cmd},
+        })
+        # Bash side falls through to the destructive-git/gh checks; this is
+        # neither, so the response is no output (PASSED).
+        self.assertIsNone(resp)
+
+    def test_allow_works_with_gates_off(self):
+        # AGENT_CONFIG_GATES disables deny-style gates only; allow is always-on.
+        cmd = (
+            "& 'C:\\proj\\skills\\implement-review\\scripts\\auto-watch.ps1'"
+        )
+        resp = run_guard_with_payload(
+            {"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+            env={"AGENT_CONFIG_GATES": "off"},
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_auto_watch_path_as_argument_does_not_allow(self):
+        # The path tail must not auto-allow when it appears only as a string
+        # argument under a different verb. Round-1 review caught this as the
+        # security flaw of an over-broad substring match: any PowerShell
+        # command mentioning the watcher path would have been allowed.
+        cmd = (
+            "Write-Output "
+            "'C:\\proj\\skills\\implement-review\\scripts\\auto-watch.ps1'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_auto_watch_allowed_with_repo_local_relative_path(self):
+        # Realistic invocation shape from the source repo or project-local
+        # working directory: the skill's lookup order names the script with
+        # no leading prefix (`skills/implement-review/scripts/auto-watch.ps1`).
+        # The exact-tail branch in `_is_auto_watch_script_path` covers this.
+        cmd = (
+            "& 'skills\\implement-review\\scripts\\auto-watch.ps1' "
+            "'Review-*.md' 1 'Codex'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_auto_watch_allowed_with_quoted_path_containing_spaces(self):
+        # Realistic Windows path with spaces inside the quoted argument. The
+        # call-operator regex must capture the full quoted path including
+        # spaces and accept the trailing watcher args.
+        cmd = (
+            "& 'C:\\Users\\me\\Project With Spaces\\skills\\implement-review"
+            "\\scripts\\auto-watch.ps1' 'Review-*.md' 1 'Codex'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_payload_shape_is_valid(self):
+        cmd = (
+            "& 'C:\\proj\\skills\\implement-review\\scripts\\auto-watch.ps1'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        hook = resp["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "PreToolUse")
+        self.assertEqual(hook["permissionDecision"], "allow")
+        self.assertIsInstance(hook["permissionDecisionReason"], str)
+        self.assertTrue(len(hook["permissionDecisionReason"]) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

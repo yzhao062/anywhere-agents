@@ -3,6 +3,12 @@ Claude Code PreToolUse hook guard.
 
 Dispatches by tool_name. Shared checks:
 
+0. Auto-allow shipped trusted scripts — the implement-review skill's
+   auto-watch.ps1 watcher (PowerShell tool) returns permissionDecision: allow.
+   Path-tail anchored to the shipped script so unrelated auto-watch.ps1 files
+   on disk fall through to the normal permission flow. Independent of
+   AGENT_CONFIG_GATES because that escape hatch disables deny-style gates
+   only; a permission allow is always safe to honor.
 1. Writing-style gate — Write/Edit/MultiEdit on prose files (.md/.tex/.rst/.txt)
    is denied when the outgoing content contains a banned AI-tell word from
    AGENTS.md Writing Defaults. Skips code files.
@@ -39,6 +45,79 @@ def make_response(decision, reason):
             "permissionDecisionReason": reason,
         }
     })
+
+
+# --- Check 0: auto-allow shipped trusted scripts -------------------------
+#
+# Background: Claude Code's PowerShell(...) permission rule patterns do not
+# match `& '<path>\auto-watch.ps1' <args>` invocations as documented, leaving
+# an extra approval prompt every time the implement-review skill fires its
+# Phase 1c terminal-path watcher. This check closes the gap by returning
+# permissionDecision: allow only when the PowerShell command is a
+# call-operator invocation (`& '<path>' [args]`) of the shipped script. The
+# script path must end with the canonical tail
+# `skills/implement-review/scripts/auto-watch.ps1` (case-insensitive,
+# slash-normalized) so source / bootstrap / wheel-bundled layouts all match,
+# while a non-invocation PowerShell command that merely contains the path
+# tail as a string argument falls through to the normal permission flow.
+AUTO_WATCH_PATH_TAIL = "skills/implement-review/scripts/auto-watch.ps1"
+
+# Call-operator invocation pattern: `& '<quoted path>' [args]` or
+# `& <bare path> [args]`. Anchored at start-of-command so a path tail that
+# appears inside an argument string or after a different verb (e.g.
+# `Write-Output '...auto-watch.ps1'`) does not qualify for auto-allow.
+_AUTO_WATCH_CALL_RE = re.compile(
+    r"""(?x)
+    ^\s*&\s*
+    (?:
+        (?P<quote>['"])(?P<quoted_path>[^'"]+)(?P=quote)
+        |
+        (?P<bare_path>\S+)
+    )
+    (?=$|\s)
+    """
+)
+
+
+def _is_auto_watch_script_path(path):
+    """Return True if `path` is the shipped script tail or ends with it
+    after a slash separator. Slash- and case-normalized so Windows
+    backslash + mixed-case path components match the lowercase POSIX-shaped
+    AUTO_WATCH_PATH_TAIL constant. Accepts both the exact canonical tail
+    (repo-local relative invocation: `& 'skills\\implement-review\\scripts\\
+    auto-watch.ps1' ...`) and the tail under any prefix (absolute path,
+    bootstrap clone, wheel-bundled layout); both are realistic invocation
+    shapes the implement-review skill emits.
+    """
+    path_norm = path.replace("\\", "/").lower()
+    return (
+        path_norm == AUTO_WATCH_PATH_TAIL
+        or path_norm.endswith("/" + AUTO_WATCH_PATH_TAIL)
+    )
+
+
+def check_auto_watch_allow(tool_name, tool_input):
+    """Return an allow message only when a PowerShell command invokes the
+    shipped implement-review auto-watch.ps1 watcher as the call-operator
+    target; return None otherwise.
+
+    Independent of AGENT_CONFIG_GATES because the escape hatch disables
+    deny-style gates only; failing to honor an allow just falls back to the
+    user seeing the existing approval prompt, so this check is always-on.
+    """
+    if tool_name != "PowerShell":
+        return None
+    cmd = tool_input.get("command", "") or ""
+    match = _AUTO_WATCH_CALL_RE.match(cmd)
+    if not match:
+        return None
+    script_path = match.group("quoted_path") or match.group("bare_path") or ""
+    if _is_auto_watch_script_path(script_path):
+        return (
+            "Auto-allow: implement-review skill auto-watch.ps1 watcher. "
+            "Path-tail anchored to the shipped script."
+        )
+    return None
 
 
 # Banned AI-tell words (mirrors AGENTS.md Writing Defaults). Matched with
@@ -456,6 +535,16 @@ def main():
 
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+
+    # Check 0: auto-allow shipped trusted scripts. Runs before any deny-style
+    # gate because allow decisions are unrelated to the AGENT_CONFIG_GATES
+    # escape hatch and should fire for the shipped watcher regardless of
+    # banner / writing-style state.
+    if tool_name:
+        allow_reason = check_auto_watch_allow(tool_name, tool_input)
+        if allow_reason:
+            print(make_response("allow", allow_reason))
+            return
 
     # New gates (writing-style + banner) require an explicit tool_name. If the
     # hook input omits it (older payload format used by some tests), skip the

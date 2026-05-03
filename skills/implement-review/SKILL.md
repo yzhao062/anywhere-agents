@@ -139,12 +139,14 @@ Prepare a review request with:
 4. **Additional focus** -- specific concerns beyond the generic lens. This is often the highest-value part of the prompt because it catches real bugs that generic criteria miss. **Always ask the user explicitly rather than guessing.** Recurring project concerns belong here: phased-development coupling, anonymization checks, page-limit compliance, budget-to-narrative consistency, terminology drift, benchmark-claim calibration, overclaim flagging. If there are no project-specific concerns this round, write "none" rather than padding the line. Examples: "check that all appendix URLs are anonymized", "verify Year 3 budget matches the narrative", "flag any overclaim in intro / conclusion", "watch for Phase 1 / Phase 2 coupling issues".
 5. **Round number** -- which iteration this is (starting at 1).
 6. **Variant targets (multi-target reviews)** -- if the staged files cover two or more variant targets that should be reviewed separately (long + short paper version, narrative + appendix tracker, internal + external report, primary + supplement), list each target by directory or file pattern. Tell the reviewer to review each target in its own top-level section and then add a cross-variant drift check at the end (tables that should match, claims that should be consistent, terminology that should align).
-7. **Round history** (rounds 2+ only) -- a one-line-per-finding summary of what prior rounds raised and how each was resolved. Tag each finding as `Resolved`, `Still open`, or `Deferred`. This prevents the reviewer from re-litigating closed decisions and lets them verify that fixes landed instead of re-reviewing from scratch. Example:
+7. **Round history** (rounds 2+ only) -- a one-line-per-finding summary of what prior rounds raised and how each was resolved. Tag each finding as `Resolved`, `Still open`, `Deferred`, `Refuted`, or `Inconclusive`. The last two come from the Phase 2.5 verification step (see below); they let the reviewer see when a prior factual claim did not hold up under verification, with a pointer to the evidence so the reviewer can either retract or sharpen the claim. This prevents the reviewer from re-litigating closed decisions and lets them verify that fixes landed instead of re-reviewing from scratch. Example:
    ```
    Prior findings:
    - DMP listed wrong project name (Resolved — fixed in round 1)
    - Budget table exceeds page width (Still open)
    - Consider reordering Section 3 (Deferred — user decision)
+   - Citation [Smith2023] does not exist (Refuted in round 2 — arxiv.org/abs/2023.XXXXX confirms paper)
+   - Compile error in section 4 (Inconclusive in round 2 — could not run latexmk in this env)
    ```
 
 ### 1c. Send to reviewer
@@ -179,7 +181,7 @@ Variant targets:
 (Review each target in its own top-level section and add a Cross-variant drift check at the end.)
 <For rounds 2+:>
 Prior findings:
-- <finding> (Resolved | Still open | Deferred)
+- <finding> (Resolved | Still open | Deferred | Refuted | Inconclusive)
 ````
 
 Then wait for the user to relay the reviewer's feedback or confirm that the reviewer has finished (see Phase 2 for how Claude Code picks up the review).
@@ -240,8 +242,62 @@ If only one current-round source remains after retry and direct-paste handling w
   - **Still open** -- the fix did not land or was incomplete. Treat as "will fix" unless the user overrides.
   - **Reopened** -- the reviewer re-raises a point that was marked Resolved. Flag to the user: this needs a decision, not silent re-litigation.
   - **Deferred** -- the user chose not to address this. The reviewer acknowledges it as unchanged. No action unless the user reconsiders.
-- Present the categorized list and confirm with the user before making changes.
+- **Verify factual claims (Phase 2.5)** for High-priority findings that make checkable factual assertions (citation existence, code behavior, link reachability, count or size, compile error). Verification outcomes (`Verified` / `Refuted` / `Inconclusive`) override or augment the categorization above: a Refuted finding is not applied, regardless of its original `Will fix` / `Needs discussion` category.
+- Present the categorized list (including verification outcomes from Phase 2.5) and confirm with the user before making changes.
 - For follow-up questions within the same review round, prepare a short prompt the user can paste into the reviewer.
+
+## Phase 2.5: Verify Factual Claims (when triggered)
+
+After Phase 2 categorization but before the user is presented with the categorized list, verify any High-priority finding that makes a checkable factual claim. Reviewer assertions are not always correct; verifying first prevents revising in a wrong direction and produces an evidence trail when the claim is refuted. This phase is the inverse failure mode of "blindly accept reviewer feedback": a confidently-worded but wrong finding can otherwise propagate into the next round and waste both sides' time.
+
+### Trigger
+
+Verification fires for a finding when **all** of the following hold:
+
+1. The finding is tagged High priority (or the user explicitly requests verification on a Medium / Low finding).
+2. The finding makes an objectively checkable factual claim — citation existence, code behavior, link reachability, page-limit or word-count assertion, compile or type error, anonymization leak, etc.
+3. The reviewer's "Verification notes" section did not already cover this specific claim with a method that resolves it. If the reviewer ran a check that covers the claim, trust it unless contradicting evidence appears during fix application.
+4. The cost of verification is reasonable relative to the cost of applying the fix blindly. Skip verification when the proposed fix is trivially correct (a one-line typo) or when the cheapest verification path takes longer than the user can wait on a single finding.
+
+Skip entirely for stylistic, opinion-based, or structural findings (term choice, paragraph order, tone, organization). Those have no factual ground truth to verify against.
+
+### Methods
+
+Pick the cheapest applicable method per claim type:
+
+| Claim type | Verification method |
+|---|---|
+| Citation / paper / author existence | `WebSearch` for title and author; `WebFetch` arXiv / DOI URL; cross-check against the project's `.bib` file |
+| Code behavior assertion | Run the targeted test (`pytest path::test_name`); read the source to trace; eval a small repro snippet |
+| Link reachability | `WebFetch` of the URL; HEAD request via curl |
+| Page limit / word count / file size | `wc -w`, `wc -l`, `ls -la`; compile and read the LaTeX log |
+| Compile-time / type error | Run the compiler (`latexmk`, `tsc`, etc.) or type checker (`mypy`, `pyright`) on the affected file |
+| Anonymization or leak claim | `Grep` for the alleged term; cross-check against the project's de-anonymization checklist |
+
+If no listed method applies, ask the user before either accepting the claim or pushing back.
+
+### Outcome
+
+Record one of three outcomes for each verified claim:
+
+- **Verified** — the reviewer's claim is correct. Proceed with the fix as a normal `Will fix` item.
+- **Refuted** — the reviewer's claim is wrong, or the issue does not reproduce. **Do not apply the fix.** Push back via a follow-up reviewer prompt that cites the verification evidence (command run, output, URL fetched, file path inspected). The user may override this by asking to apply anyway, but the default is to push back.
+- **Inconclusive** — verification could not run (no internet, no test runner, claim under-specified) or returned ambiguous results. Surface the ambiguity to the user and let them decide.
+
+### Round history integration
+
+Findings flagged Refuted or Inconclusive enter the next round's `Prior findings` block (see Phase 1b item 7) so the reviewer sees the evidence and can either retract the claim or sharpen it. Refuted findings appear as `(Refuted in round N — <one-line evidence>)`. Inconclusive findings appear as `(Inconclusive in round N — <reason>)`, prompting the reviewer to supply a more specific or pre-verified check.
+
+### Example
+
+Round 2 of a paper review. Reviewer flags High: "Citation [Smith2023] does not exist; could not find this paper on arXiv or Google Scholar."
+
+1. Trigger fires (High priority + checkable factual claim).
+2. Verification path: `WebSearch "Smith 2023 <topic keywords>"`, then `WebFetch arxiv.org/abs/<id>` if a candidate surfaces.
+3. Outcome:
+   - If a real paper is found → **Refuted**. Reply to the reviewer with the URL and arXiv ID, ask them to confirm before re-flagging. Do not edit the citation.
+   - If no paper is found after a reasonable search → **Verified**. Remove the citation or replace it with a real one.
+4. Record in round history: `[Smith2023] reference (Verified in round 2 — not present on arXiv or Google Scholar)` or `[Smith2023] reference (Refuted in round 2 — arxiv.org/abs/2023.XXXXX confirms paper)`.
 
 ## Root Review Sink (per reviewer)
 
