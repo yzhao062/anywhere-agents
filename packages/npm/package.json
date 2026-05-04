@@ -1,6 +1,6 @@
 {
   "name": "anywhere-agents",
-  "version": "0.5.8",
+  "version": "0.6.0",
   "description": "Install the anywhere-agents AI agent config (AGENTS.md, skills, guard hook, settings) into any project.",
   "homepage": "https://github.com/yzhao062/anywhere-agents",
   "repository": {

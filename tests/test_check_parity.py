@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -181,6 +183,113 @@ class BannerBulletMirrorTests(unittest.TestCase):
                 "rerun `python scripts/generate_agent_configs.py` in "
                 "the affected repo and `bash scripts/check-parity.sh`.",
             )
+
+
+class AaInternalStrictBlockTests(unittest.TestCase):
+    """Phase 6 of v0.6.0: ``scripts/check-parity.sh`` carries an aa-internal
+    STRICT block that compares aa source files against their wheel-bundled
+    mirror at ``packages/pypi/anywhere_agents/composer/``. Drift in any
+    mirrored file must cause the script to exit nonzero and print the
+    offending source-side path.
+
+    The script is bash-only (the cross-repo logic predates Python tooling)
+    and is exercised here via subprocess. Skips when ``bash`` is not on
+    PATH (rare on Windows-without-Git-for-Windows or stripped-down CI).
+    """
+
+    SCRIPT = REPO_ROOT / "scripts" / "check-parity.sh"
+    MIRROR_FILE = (
+        REPO_ROOT
+        / "packages"
+        / "pypi"
+        / "anywhere_agents"
+        / "composer"
+        / "bootstrap"
+        / "packs.yaml"
+    )
+
+    @staticmethod
+    def _resolve_bash() -> str | None:
+        """Find a bash that can actually execute scripts.
+
+        On Windows, ``shutil.which("bash")`` may return a WSL launcher
+        (``C:\\Windows\\System32\\bash.exe``) or a Microsoft Store stub
+        before it returns Git for Windows' real bash. The WSL launcher
+        cannot execute a Windows-path script and crashes with
+        ``execvpe(/bin/bash) failed`` even before reading argv. Prefer
+        a known Git-for-Windows install path; fall back to PATH lookup
+        only when no Git Bash is installed (POSIX hosts, where the PATH
+        result is correct).
+        """
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
+        for c in candidates:
+            if Path(c).is_file():
+                return c
+        return shutil.which("bash")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.bash = cls._resolve_bash()
+        if cls.bash is None:
+            raise unittest.SkipTest("bash not on PATH; cannot exercise check-parity.sh")
+        if not cls.SCRIPT.is_file():
+            raise unittest.SkipTest(f"check-parity.sh not found at {cls.SCRIPT}")
+        if not cls.MIRROR_FILE.is_file():
+            raise unittest.SkipTest(
+                f"wheel-bundled mirror not found at {cls.MIRROR_FILE}; "
+                "expected after v0.5.6 mirror layout"
+            )
+
+    def _run_script(self) -> subprocess.CompletedProcess:
+        # Pass the aa root explicitly so the cross-repo block has a target;
+        # the aa-internal block uses AA_ROOT (which is also REPO_ROOT here)
+        # plus the wheel-mirror subpath.
+        return subprocess.run(
+            [self.bash, str(self.SCRIPT), str(REPO_ROOT)],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+
+    def test_aa_internal_strict_detects_drift(self) -> None:
+        """Synthesize a one-byte drift in the wheel-bundled mirror copy of
+        ``bootstrap/packs.yaml`` and assert ``check-parity.sh`` exits
+        nonzero with the source-side path printed.
+
+        Uses save/restore so the test cleans up after itself even if the
+        assertion fails (try/finally).
+        """
+        original = self.MIRROR_FILE.read_bytes()
+        try:
+            # Append a single byte. Plain whitespace keeps the YAML
+            # syntactically valid (so other tests / tools that read the
+            # mirror copy during the test window do not crash) while still
+            # producing real byte-level drift that diff -q catches.
+            self.MIRROR_FILE.write_bytes(original + b" ")
+
+            result = self._run_script()
+
+            self.assertNotEqual(
+                result.returncode,
+                0,
+                "check-parity.sh should exit nonzero when the wheel mirror "
+                "drifts from the aa source; got exit 0.\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            combined = result.stdout + result.stderr
+            self.assertIn(
+                "bootstrap/packs.yaml",
+                combined,
+                "expected source-side path 'bootstrap/packs.yaml' in "
+                "check-parity.sh output when the mirror drifts.\n"
+                f"output:\n{combined}",
+            )
+        finally:
+            self.MIRROR_FILE.write_bytes(original)
 
 
 if __name__ == "__main__":

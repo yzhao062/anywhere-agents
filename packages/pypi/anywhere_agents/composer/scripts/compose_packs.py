@@ -349,20 +349,22 @@ def _current_commit(selection: dict) -> str:
 def prompt_user_for_updates(pending_updates):
     """Resolve the apply / skip / fail decision for ``pending_updates``.
 
-    Decision tree (Phase 8 Task 8.1, Round 1 + Round 3):
+    v0.6.0 behavior (locked design at pack-architecture.md:657, :921;
+    PLAN lines 84-88): default is **apply**, regardless of TTY. The
+    canonical bare-command path applies prompt-policy drift inline by
+    default and prints a stderr summary line. Per-run skip remains
+    available through ``ANYWHERE_AGENTS_UPDATE=skip``; ``--no-apply-drift``
+    is the CLI-flag equivalent (handled at a higher layer with flag
+    precedence over the env var). Interactivity is not reintroduced; the
+    pre-v0.6.0 TTY-Y/N prompt has been retired.
 
-    - Both stdin and stdout are TTYs → interactive prompt (Y default).
-    - Otherwise consult ``ANYWHERE_AGENTS_UPDATE`` env var:
-
-      - ``apply`` → ``"apply"``.
-      - ``skip`` (default when unset) → ``"skip"``.
-      - ``fail`` → raises :class:`PackLockDriftAborted` so a non-TTY CI
-        path can fail closed when drift is unacceptable.
-      - any other value → :class:`ValueError` (fail-loud on typos).
+    - ``apply`` (default when env unset) → ``"apply"``.
+    - ``skip`` → ``"skip"``.
+    - ``fail`` → raises :class:`PackLockDriftAborted` so CI paths can
+      fail closed when drift is unacceptable.
+    - any other value → :class:`ValueError` (fail-loud on typos).
     """
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return _interactive_prompt(pending_updates)
-    mode = os.environ.get("ANYWHERE_AGENTS_UPDATE", "skip")
+    mode = os.environ.get("ANYWHERE_AGENTS_UPDATE", "apply")
     if mode == "apply":
         return "apply"
     if mode == "skip":
@@ -388,7 +390,15 @@ def _interactive_prompt(pending_updates):
     so the prompt line ends cleanly when run inside a TTY.
     """
     print(f"\n{len(pending_updates)} packs have upstream updates:\n")
-    for selection, archive, pack_def in pending_updates:
+    for entry in pending_updates:
+        # v0.6.0 Phase 4: pending_updates entries grew from 3-tuple to
+        # 4-tuple to carry drift_kind. Accept both shapes so a caller
+        # holding an older list shape (defensive — internal callers all
+        # use the new shape) does not break.
+        if len(entry) >= 4:
+            selection, archive, pack_def, _drift_kind = entry[0], entry[1], entry[2], entry[3]
+        else:
+            selection, archive, pack_def = entry[0], entry[1], entry[2]
         name = selection["name"]
         kind = "active" if pack_def.get("active") else "passive"
         commit_short = (archive.resolved_commit or "")[:7]
@@ -408,6 +418,76 @@ def _interactive_prompt(pending_updates):
 
 def _pending_updates_path(project_root: Path) -> Path:
     return project_root / ".agent-config" / "pending-updates.json"
+
+
+def _applied_updates_path(project_root: Path) -> Path:
+    """Path of the apply-summary file consumed by the CLI's stderr summary.
+
+    v0.6.0 Phase 4 introduces this file to bridge the composer subprocess
+    and the CLI parent process: the composer records every drift it
+    actually applied during a compose run; the CLI reads it back, emits
+    one stderr summary line per pack, then unlinks the file. The shape:
+
+    ::
+
+        {
+          "ts":   "<ISO-8601 UTC>",
+          "host": "<claude-code|codex>",
+          "applied": [
+            {"name": "<pack>", "ref": "<ref>",
+             "drift_kind": "commit"|"path",
+             "old_short": "<7-char SHA>"|null,
+             "new_short": "<7-char SHA>"|null,
+             "old_paths": ["<source_path>", ...]|null,
+             "new_paths": ["<source_path>", ...]|null}
+          ]
+        }
+
+    The file is written only when ``decision == "apply"`` and at least
+    one pending update was applied; the run's "no drift to apply" case
+    leaves the file absent so the CLI emits nothing.
+    """
+    return project_root / ".agent-config" / "applied-updates.json"
+
+
+def write_applied_updates_json(
+    project_root: Path,
+    host: str,
+    applied_records: list[dict[str, Any]],
+) -> None:
+    """Write ``applied-updates.json`` summarising every applied drift entry.
+
+    Atomic via temp + ``Path.replace``. ``applied_records`` is the list
+    built by the compose loop (one record per applied drift). Empty list
+    means no apply happened: caller should clear the file instead of
+    writing an empty list (so the CLI's no-output behavior on a
+    no-drift run stays clean).
+    """
+    path = _applied_updates_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "host": host,
+        "applied": applied_records,
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def clear_applied_updates_json(project_root: Path) -> None:
+    """Remove ``applied-updates.json`` if it exists. Idempotent.
+
+    Called on every compose-completion path so a stale file from an
+    earlier run cannot mislead the next CLI invocation. The CLI clears
+    the file after consuming it; this is a defense-in-depth clear from
+    the composer side that fires regardless of whether the CLI ran.
+    """
+    path = _applied_updates_path(project_root)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def write_pending_updates_json(project_root: Path, host: str, pending_updates) -> None:
@@ -431,6 +511,12 @@ def write_pending_updates_json(project_root: Path, host: str, pending_updates) -
     """
     path = _pending_updates_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _unpack(entry):
+        # v0.6.0 Phase 4: support both legacy 3-tuple and new 4-tuple
+        # entries (selection, archive, pack_def[, drift_kind]).
+        return entry[0], entry[1], entry[2]
+
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "host": host,
@@ -441,7 +527,9 @@ def write_pending_updates_json(project_root: Path, host: str, pending_updates) -
                 "available": archive.resolved_commit,
                 "kind": "active" if pack_def.get("active") else "passive",
             }
-            for selection, archive, pack_def in pending_updates
+            for selection, archive, pack_def in (
+                _unpack(entry) for entry in pending_updates
+            )
         ],
     }
     tmp = path.with_suffix(".json.tmp")
@@ -474,6 +562,13 @@ def print_compose_summary(selections, outcomes, pending_updates, host: str) -> N
     to :func:`write_pending_updates_json`; non-empty triggers the
     apply-instructions hint.
     """
+    # TODO(v0.6.0 Phase 4): emit stderr summary line on update_policy:auto
+    # silent refresh (passive pack's resolved commit changed and was applied
+    # without a prompt). Phase 4 owns the stderr-summary plumbing here:
+    # `applied 1 update for <pack> @ <ref>: <old_short> -> <new_short>`.
+    # Phase 2 only sets the manifest defaults (auto for first-party passive,
+    # prompt for first-party active). See PLAN-aa-v0.6.0 § "Phase 4 — Inline
+    # prompt-policy drift apply (Q1) with skip overrides".
     print("\nv0.5.0 compose summary:")
     for selection in selections:
         name = selection["name"]
@@ -557,6 +652,142 @@ DEFAULT_V2_SELECTIONS: list[dict[str, str]] = [
 DEFAULT_V2_SELECTION_NAMES: frozenset[str] = frozenset(
     sel["name"] for sel in DEFAULT_V2_SELECTIONS
 )
+
+# v0.6.0 post-review: bundled defaults that declare ``hosts: [claude-code]``
+# in their pack.yaml manifests. Under ``AGENT_CONFIG_HOST=codex`` (or
+# any non-claude host) these are filtered out of the auto-seed so bare
+# ``anywhere-agents`` does not hit a host-mismatch error on first run.
+# The full ``DEFAULT_V2_SELECTIONS`` list stays canonical for
+# ``DEFAULT_V2_SELECTION_NAMES``-gated bundled-fallback lookups; only
+# the seeding pass filters.
+#
+# Keep in sync with ``hosts:`` declarations in bootstrap/packs.yaml. A
+# bundled default that gates on host needs an entry here.
+_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset({"aa-core-skills"})
+
+
+def _default_v2_selections_for_host(host: str) -> list[dict[str, str]]:
+    """Return ``DEFAULT_V2_SELECTIONS`` filtered for the given host.
+
+    Under ``claude-code`` returns the full list; under any other host
+    drops claude-only entries so the resolver never tries to seed a
+    pack the active host cannot deploy.
+    """
+    if host == "claude-code":
+        return DEFAULT_V2_SELECTIONS
+    return [
+        sel for sel in DEFAULT_V2_SELECTIONS
+        if sel["name"] not in _CLAUDE_ONLY_DEFAULTS
+    ]
+
+
+def _pack_def_passive_from_paths(pack_def: dict[str, Any]) -> set[str]:
+    """Return the set of ``passive[].files[].from`` source paths declared
+    by a pack definition (may be the bundled-fallback substitute).
+
+    Used by the v0.6.0 same-ref source-path drift detector — when the
+    bundled-default ``from:`` migrates to a new file path within the
+    same upstream version (e.g., ``docs/rule-pack.md`` →
+    ``docs/rule-pack-compact.md``), the composer compares this set
+    against the lock-recorded ``source_path`` set and routes the
+    selection through the drift-and-migrate flow.
+    """
+    paths: set[str] = set()
+    passive_list = pack_def.get("passive") if isinstance(pack_def, dict) else None
+    if not isinstance(passive_list, list):
+        return paths
+    for entry in passive_list:
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files")
+        if not isinstance(files, list):
+            continue
+        for mapping in files:
+            if not isinstance(mapping, dict):
+                continue
+            src = mapping.get("from")
+            if isinstance(src, str) and src:
+                paths.add(src)
+    return paths
+
+
+def _rewrite_pack_def_passive_from(
+    pack_def: dict[str, Any], old_paths: set[str]
+) -> dict[str, Any]:
+    """Return a deep-copied pack-def whose passive ``from:`` paths are
+    rewritten to the lock-recorded ``old_paths`` set.
+
+    v0.6.0 Phase 4 same-ref source-path drift skip: when the consumer
+    declines the bundled-default migration (``ANYWHERE_AGENTS_UPDATE=skip``
+    or ``--no-apply-drift``), we keep the lock's recorded source-path so
+    the passive handler reads from the OLD path within the cached archive
+    at the recorded commit. Without this rewrite, the passive handler
+    would read the bundled-default's NEW ``from:`` path (which the
+    cached archive at the recorded commit does not contain), leading
+    to a 404 raw-fetch fallback and a broken consumer state.
+
+    The rewrite is a best-effort 1:1 substitution: when ``old_paths``
+    has exactly one path, every passive mapping's ``from:`` is
+    redirected to that single path. With more than one ``old_path``,
+    the function preserves the bundled-default mapping unchanged for
+    the entries already pointing at one of the old paths and rewrites
+    only those entries that differ. The skip path is not the rare path
+    where multi-path same-ref drift matters; one-path packs (the
+    typical case for ``agent-style``) round-trip cleanly.
+    """
+    import copy
+    new_pack = copy.deepcopy(pack_def) if isinstance(pack_def, dict) else {}
+    if not old_paths:
+        return new_pack
+    passive_list = new_pack.get("passive")
+    if not isinstance(passive_list, list):
+        return new_pack
+    sole_old = next(iter(old_paths)) if len(old_paths) == 1 else None
+    for entry in passive_list:
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files")
+        if not isinstance(files, list):
+            continue
+        for mapping in files:
+            if not isinstance(mapping, dict):
+                continue
+            current_from = mapping.get("from")
+            if isinstance(current_from, str) and current_from in old_paths:
+                continue
+            if sole_old is not None:
+                mapping["from"] = sole_old
+    return new_pack
+
+
+def _lock_passive_source_paths(
+    previous_pack_lock: dict[str, Any], name: str
+) -> set[str]:
+    """Return the set of passive ``source_path`` values recorded in the
+    previous pack-lock for ``name`` (empty if absent).
+
+    Helper to :func:`_do_compose_v2`'s same-ref source-path drift check.
+    Filters to ``role == "passive"`` so active source paths (which use a
+    different lifecycle) do not contaminate the comparison.
+    """
+    paths: set[str] = set()
+    pack_entry = (
+        previous_pack_lock.get("packs", {}).get(name, {})
+        if isinstance(previous_pack_lock, dict)
+        else {}
+    )
+    files = pack_entry.get("files") if isinstance(pack_entry, dict) else None
+    if not isinstance(files, list):
+        return paths
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        if f.get("role") != "passive":
+            continue
+        sp = f.get("source_path")
+        if isinstance(sp, str) and sp:
+            paths.add(sp)
+    return paths
 
 
 def _composer_source_root() -> Path:
@@ -794,6 +1025,32 @@ def main(argv: list[str] | None = None) -> int:
             "entries skip cleanly on the wrong host."
         ),
     )
+    # v0.6.0 Phase 4: per-run skip override for inline drift apply.
+    # Equivalent to ``ANYWHERE_AGENTS_UPDATE=skip`` but expressed as a
+    # CLI flag so the bare ``anywhere-agents`` command can plumb it
+    # through without mutating the env. CLI flag wins over env var.
+    parser.add_argument(
+        "--no-apply-drift",
+        action="store_true",
+        dest="no_apply_drift",
+        help=(
+            "Report prompt-policy drift but do not apply it. Same effect "
+            "as ANYWHERE_AGENTS_UPDATE=skip; the CLI flag wins when both "
+            "are set. update_policy: locked drift continues to fail closed."
+        ),
+    )
+    # v0.6.0 Phase 5: selective apply path. Used by ``pack update <name>``
+    # to apply drift only for the named pack while leaving every other
+    # drifted pack as if --no-apply-drift were set for it.
+    parser.add_argument(
+        "--apply-name",
+        default=None,
+        help=(
+            "Apply prompt-policy drift only for the named pack; treat "
+            "every other drifted pack as skipped (lock unchanged). Used "
+            "by 'anywhere-agents pack update <name>'."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.print_yaml:
@@ -836,7 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_mod.resolved_for_project(
             root,
-            default_selections=DEFAULT_V2_SELECTIONS,
+            default_selections=_default_v2_selections_for_host(host),
             force_defaults=True,
             validate_url_fn=auth.reject_credential_url,
         )
@@ -907,7 +1164,14 @@ def main(argv: list[str] | None = None) -> int:
                     f"rerunning compose: {paths}\n"
                 )
                 return 1
-            return _do_compose_v2(root, parsed, args.no_cache, host=host)
+            return _do_compose_v2(
+                root,
+                parsed,
+                args.no_cache,
+                host=host,
+                no_apply_drift=getattr(args, "no_apply_drift", False),
+                apply_only_name=getattr(args, "apply_name", None),
+            )
     except locks.LockTimeout as exc:
         sys.stderr.write(f"compose aborted: {exc}\n")
         return 10
@@ -981,13 +1245,24 @@ def _uninstall_main(argv: list[str]) -> int:
 
 
 def _do_compose_v2(
-    root: Path, parsed: dict, no_cache: bool, *, host: str = "claude-code"
+    root: Path,
+    parsed: dict,
+    no_cache: bool,
+    *,
+    host: str = "claude-code",
+    no_apply_drift: bool = False,
+    apply_only_name: str | None = None,
 ) -> int:
+    # v0.6.0 Phase 4 / 5: ``no_apply_drift`` is the per-run skip
+    # override (CLI flag wins over ANYWHERE_AGENTS_UPDATE env var).
+    # ``apply_only_name`` is the selective single-pack apply path used
+    # by ``anywhere-agents pack update <name>`` — when set, drift on
+    # any other pack is treated as if --no-apply-drift were active.
     # ----- resolve selections (4-layer resolver + always-on defaults) -----
     try:
         selections = config_mod.resolved_for_project(
             root,
-            default_selections=DEFAULT_V2_SELECTIONS,
+            default_selections=_default_v2_selections_for_host(host),
             force_defaults=True,
             validate_url_fn=auth.reject_credential_url,
         )
@@ -1074,7 +1349,19 @@ def _do_compose_v2(
     # ``(pack_def, archive_or_none, recorded_commit_or_none)`` triple
     # used by both drift detection and the main loop below.
     resolved: list[tuple[dict, dict, Any, str | None]] = []
-    pending_updates: list[tuple[dict, Any, dict]] = []
+    # v0.6.0 Phase 4: ``pending_updates`` items carry a ``drift_kind``
+    # tag so the apply-summary can distinguish commit-drift (resolved
+    # SHA changed) from same-ref source-path drift (commit unchanged,
+    # bundled ``from:`` path changed). Tag values are ``"commit"`` and
+    # ``"path"``. The legacy 3-tuple shape would conflate both.
+    pending_updates: list[tuple[dict, Any, dict, str]] = []
+    # v0.6.0 Phase 4: capture the lock's recorded passive source-path
+    # set per pack so the skip path on same-ref source-path drift can
+    # rewrite the substituted ``pack_def`` back to the OLD ``from:``
+    # paths. Without this, skip would re-run the passive handler
+    # against the new bundled ``from:`` (which the cached archive at
+    # the unchanged commit may not have) and fall to a 404 raw-fetch.
+    pending_old_paths: dict[str, set[str]] = {}
     try:
         for selection in selections:
             pack, archive = _process_selection(
@@ -1093,12 +1380,48 @@ def _do_compose_v2(
             resolved.append((selection, pack, archive, recorded))
             # Drift gate: only inline-source entries (archive is a
             # PackArchive) can drift. Bundled lookups have archive=None.
-            if (
+            commit_drift = (
                 archive is not None
                 and recorded is not None
                 and archive.resolved_commit != recorded
+            )
+            # v0.6.0 (PLAN-aa-v0.6.0 § Phase 3): same-ref source-path
+            # drift. When the bundled pack-def declares a ``from:``
+            # path set that differs from the lock-recorded passive
+            # ``source_path`` set for the same ``requested_ref``, route
+            # through the same drift-and-migrate flow rather than
+            # failing closed (raw-fetch fallback in passive.py would
+            # 404 on the new path) or staying on stale full-body
+            # content (legacy raw-URL fetch from the old path). This
+            # honors v0.5.7's compatibility promise to consumers
+            # carrying old-full-body content under the bundled default.
+            #
+            # Only inline-source entries (archive is a PackArchive)
+            # carry a comparable lock; bundled lookups (archive=None)
+            # do not surface ``source_path`` drift through this gate.
+            # The check is gated on a non-empty intersection of
+            # ``recorded != None`` (a previous lock exists) and a
+            # non-empty bundled passive set so a pack with no passive
+            # entries cannot trigger a false positive.
+            same_ref_path_drift = False
+            lock_paths_for_pack: set[str] = set()
+            if (
+                not commit_drift
+                and archive is not None
+                and recorded is not None
             ):
-                pending_updates.append((selection, archive, pack))
+                bundled_paths = _pack_def_passive_from_paths(pack)
+                if bundled_paths:
+                    lock_paths_for_pack = _lock_passive_source_paths(
+                        previous_pack_lock, selection["name"]
+                    )
+                    if lock_paths_for_pack and lock_paths_for_pack != bundled_paths:
+                        same_ref_path_drift = True
+            if commit_drift:
+                pending_updates.append((selection, archive, pack, "commit"))
+            elif same_ref_path_drift:
+                pending_updates.append((selection, archive, pack, "path"))
+                pending_old_paths[selection["name"]] = set(lock_paths_for_pack)
     except ComposeError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
@@ -1122,22 +1445,47 @@ def _do_compose_v2(
     # next session-start banner surfaces the deferred updates.
     # PATH 4: pending empty → unconditional clear so a stale file from a
     # previous skip cannot mislead the next session-start banner.
+    #
+    # v0.6.0 Phase 4 / 5: ``no_apply_drift`` short-circuits to skip;
+    # ``apply_only_name`` partitions pending_updates into "apply for
+    # this name only, skip everything else". When both are set,
+    # ``no_apply_drift`` wins (skip everything).
     decision = "apply"
+    # Per-pack decision overlay for selective apply (--apply-name).
+    # Names mapped to "skip" override the global ``decision`` for those
+    # entries; the unmapped entries follow ``decision``.
+    per_pack_decision: dict[str, str] = {}
     if pending_updates:
-        try:
-            decision = prompt_user_for_updates(pending_updates)
-        except PackLockDriftAborted:
-            # ANYWHERE_AGENTS_UPDATE=fail in non-TTY context. Persist the
-            # pending list so the next session-start banner can surface
-            # the still-deferred work, then re-raise so ``main`` exits 11.
+        if no_apply_drift:
+            # CLI flag wins over env var. Bypass prompt entirely; treat
+            # as a global skip. The prompt UI is not invoked at all.
+            decision = "skip"
+        elif apply_only_name is not None:
+            # Selective apply: route only the named pack through the
+            # apply path; treat all others as skipped. The decision
+            # variable becomes "apply" globally so the apply-side code
+            # paths run, but ``per_pack_decision`` overrides
+            # non-matching names to "skip" (lock untouched, no migrate).
+            decision = "apply"
+            for entry in pending_updates:
+                sel = entry[0]
+                if sel["name"] != apply_only_name:
+                    per_pack_decision[sel["name"]] = "skip"
+        else:
             try:
-                write_pending_updates_json(root, host, pending_updates)
-            except OSError as exc:
-                sys.stderr.write(
-                    f"warning: failed to write pending-updates.json: {exc}\n"
-                )
-            raise
-        if decision == "skip":
+                decision = prompt_user_for_updates(pending_updates)
+            except PackLockDriftAborted:
+                # ANYWHERE_AGENTS_UPDATE=fail in non-TTY context. Persist the
+                # pending list so the next session-start banner can surface
+                # the still-deferred work, then re-raise so ``main`` exits 11.
+                try:
+                    write_pending_updates_json(root, host, pending_updates)
+                except OSError as exc:
+                    sys.stderr.write(
+                        f"warning: failed to write pending-updates.json: {exc}\n"
+                    )
+                raise
+        if decision == "skip" or per_pack_decision:
             # Revert each drifted archive to its locked-version commit by
             # loading from the local archive cache. We CANNOT re-call
             # source_fetch.fetch_pack with the recorded SHA as ref:
@@ -1146,8 +1494,39 @@ def _do_compose_v2(
             # returns empty and the auth chain raises
             # AuthChainExhaustedError. load_cached_archive is a pure
             # cache lookup that sidesteps the network entirely.
+            #
+            # v0.6.0 Phase 4: skip path for ``drift_kind == "path"``
+            # (same-ref source-path drift; commit unchanged) handles a
+            # different failure mode than commit-drift skip. The archive
+            # at the recorded commit is the current archive (commit did
+            # not change). The cached archive is FINE; what we must
+            # revert is the substituted bundled ``pack_def`` whose
+            # ``passive[].files[].from`` now points at the new path. If
+            # we leave that as-is, the passive handler reads the new
+            # path (which the locked-archive snapshot may not contain)
+            # and the consumer ends up in a worse state than before
+            # v0.6.0 (a 404 raw-fetch fallback). Revert ``pack_def``'s
+            # passive ``from:`` paths back to the lock-recorded
+            # ``source_path`` set so the locked content remains in
+            # place and the consumer is NOT pushed into a broken state.
             reverted: dict[str, Any] = {}
-            for selection, archive, pack_def in pending_updates:
+            reverted_pack_defs: dict[str, dict] = {}
+            for entry in pending_updates:
+                if len(entry) >= 4:
+                    selection, archive, pack_def, drift_kind = entry[0], entry[1], entry[2], entry[3]
+                else:
+                    # Defensive: legacy 3-tuple shape; treat as commit
+                    # drift since same-ref path drift was added together
+                    # with the 4-tuple.
+                    selection, archive, pack_def = entry[0], entry[1], entry[2]
+                    drift_kind = "commit"
+                # v0.6.0 Phase 5 selective apply: when ``decision`` is
+                # globally "apply" but a per-pack overlay marks this
+                # entry as skip, revert it; the apply-side branch will
+                # only see the named pack as a true apply.
+                effective = per_pack_decision.get(selection["name"], decision)
+                if effective != "skip":
+                    continue
                 source = selection.get("source") or {}
                 if not isinstance(source, dict):
                     source = {}
@@ -1158,6 +1537,21 @@ def _do_compose_v2(
                     .get(selection["name"], {})
                     .get("resolved_commit")
                 )
+                if drift_kind == "path":
+                    # Same-ref source-path drift: rewrite the substituted
+                    # pack-def back to the lock-recorded passive
+                    # ``from:`` paths. The archive at the recorded
+                    # commit is identical to the fetched archive (same
+                    # SHA), so no archive reload is needed. Lock state
+                    # is preserved verbatim — no broken-state side
+                    # effects (PLAN-aa-v0.6.0 § Phase 4 concern (a)).
+                    old_paths = pending_old_paths.get(selection["name"]) or set()
+                    if old_paths:
+                        reverted_pack_defs[selection["name"]] = (
+                            _rewrite_pack_def_passive_from(pack_def, old_paths)
+                        )
+                    continue
+                # Commit drift: reload locked archive from cache.
                 # Drift detection guarantees ``recorded`` is a 40-char
                 # SHA: an entry only joins ``pending_updates`` when
                 # ``recorded is not None`` and differs from the new
@@ -1182,22 +1576,51 @@ def _do_compose_v2(
                     )
                     continue
                 reverted[selection["name"]] = locked_archive
-            # Splice the locked archives back into ``resolved`` so the
-            # main compose loop below sees the locked content.
+            # Splice the locked archives + reverted pack-defs back into
+            # ``resolved`` so the main compose loop below sees the
+            # locked content with the locked source-path mappings.
             resolved = [
-                (sel, pack, reverted.get(sel["name"], arc), rec)
+                (
+                    sel,
+                    reverted_pack_defs.get(sel["name"], pack),
+                    reverted.get(sel["name"], arc),
+                    rec,
+                )
                 for (sel, pack, arc, rec) in resolved
             ]
-            try:
-                write_pending_updates_json(root, host, pending_updates)
-            except OSError as exc:
-                sys.stderr.write(
-                    f"warning: failed to write pending-updates.json: {exc}\n"
-                )
+            # v0.6.0 Phase 5: selective apply only writes the SKIPPED
+            # subset to pending-updates.json so the next session-start
+            # banner surfaces only the still-deferred packs. Global
+            # skip writes the whole list (legacy v0.5.x behavior).
+            if per_pack_decision and decision == "apply":
+                skipped_subset = [
+                    e for e in pending_updates
+                    if per_pack_decision.get(e[0]["name"]) == "skip"
+                ]
+                pending_to_persist = skipped_subset
+            else:
+                pending_to_persist = pending_updates
+            if pending_to_persist:
+                try:
+                    write_pending_updates_json(root, host, pending_to_persist)
+                except OSError as exc:
+                    sys.stderr.write(
+                        f"warning: failed to write pending-updates.json: {exc}\n"
+                    )
 
     # ----- Phase 8 main compose loop (uses resolved + maybe-reverted archives) -----
     outcomes: dict[str, str] = {}
-    pending_names = {sel["name"] for (sel, _arc, _pack) in pending_updates}
+    # v0.6.0 Phase 4: build a {name -> drift_kind} map so the outcome
+    # label can distinguish commit-drift from same-ref source-path
+    # drift. Same-ref path drift labels as ``migrated 1 path`` rather
+    # than ``updated -> <new_short>`` (which would be misleading since
+    # new_short == old_short for same-commit drift).
+    pending_names: set[str] = set()
+    pending_drift_kind: dict[str, str] = {}
+    for entry in pending_updates:
+        sel = entry[0]
+        pending_names.add(sel["name"])
+        pending_drift_kind[sel["name"]] = entry[3] if len(entry) >= 4 else "commit"
     # v0.5.2: pre-compute the set of paths previously recorded in
     # ``pack-state.json`` so the drift gate can mark them as
     # ``PRESTATE_PACK_OUTPUT``. The previous project-state may be empty
@@ -1249,14 +1672,25 @@ def _do_compose_v2(
 
                 # Build a per-selection outcome label for the summary.
                 name = selection["name"]
+                # v0.6.0 Phase 5: selective apply uses per_pack_decision
+                # to mark non-named packs as effectively skipped even
+                # when the global decision is "apply".
+                effective_decision = per_pack_decision.get(name, decision)
                 if archive is None:
                     outcomes[name] = "bundled"
-                elif name in pending_names and decision == "skip":
+                elif name in pending_names and effective_decision == "skip":
                     locked_short = (recorded or "")[:7] or "locked"
                     outcomes[name] = f"locked at {locked_short}"
-                elif name in pending_names and decision == "apply":
-                    new_short = (archive.resolved_commit or "")[:7]
-                    outcomes[name] = f"updated -> {new_short}"
+                elif name in pending_names and effective_decision == "apply":
+                    # v0.6.0 Phase 4: same-ref source-path drift labels
+                    # as ``migrated 1 path`` since the commit didn't
+                    # change. Commit-drift retains the v0.5.x label
+                    # ``updated -> <new_short>``.
+                    if pending_drift_kind.get(name) == "path":
+                        outcomes[name] = "migrated 1 path"
+                    else:
+                        new_short = (archive.resolved_commit or "")[:7]
+                        outcomes[name] = f"updated -> {new_short}"
                 else:
                     outcomes[name] = "unchanged"
 
@@ -1417,11 +1851,81 @@ def _do_compose_v2(
                 f"warning: failed to clear pending-updates.json: {exc}\n"
             )
 
+    # ----- v0.6.0 Phase 4 post-commit: applied-updates.json bridge -----
+    # On apply, write a per-pack record so the CLI parent process can
+    # emit the v0.6.0 stderr summary line. The CLI consumes the file and
+    # unlinks it; we also unconditionally clear here so a no-apply run
+    # does not surface a stale file from an earlier session.
+    try:
+        clear_applied_updates_json(root)
+    except OSError as exc:
+        sys.stderr.write(
+            f"warning: failed to clear applied-updates.json: {exc}\n"
+        )
+    if decision == "apply" and pending_updates:
+        applied_records: list[dict[str, Any]] = []
+        for entry in pending_updates:
+            if len(entry) >= 4:
+                sel, archive, pack_def, drift_kind = entry[0], entry[1], entry[2], entry[3]
+            else:
+                sel, archive, pack_def = entry[0], entry[1], entry[2]
+                drift_kind = "commit"
+            name = sel["name"]
+            # v0.6.0 Phase 5 selective apply: only emit records for
+            # packs whose effective decision was actually "apply" (the
+            # named pack under --apply-name); selectively skipped packs
+            # do not show up in applied-updates.json.
+            if per_pack_decision.get(name) == "skip":
+                continue
+            ref_str = _selection_ref(sel)
+            recorded = (
+                previous_pack_lock.get("packs", {})
+                .get(name, {})
+                .get("resolved_commit")
+                or ""
+            )
+            new_commit = ""
+            if archive is not None and getattr(archive, "resolved_commit", None):
+                new_commit = archive.resolved_commit
+            record: dict[str, Any] = {
+                "name": name,
+                "ref": ref_str,
+                "drift_kind": drift_kind,
+                "old_short": (recorded or "")[:7] or None,
+                "new_short": (new_commit or "")[:7] or None,
+            }
+            if drift_kind == "path":
+                record["old_paths"] = sorted(
+                    pending_old_paths.get(name) or set()
+                )
+                record["new_paths"] = sorted(
+                    _pack_def_passive_from_paths(pack_def)
+                )
+            applied_records.append(record)
+        if applied_records:
+            try:
+                write_applied_updates_json(root, host, applied_records)
+            except OSError as exc:
+                sys.stderr.write(
+                    f"warning: failed to write applied-updates.json: {exc}\n"
+                )
+
     # Concise per-pack summary (host + pending hint when drift deferred).
+    # v0.6.0 Phase 5: with --apply-name, the selectively-skipped packs
+    # also count as deferred so the banner-side hint surfaces them.
+    if decision == "skip":
+        deferred_for_summary = pending_updates
+    elif per_pack_decision:
+        deferred_for_summary = [
+            e for e in pending_updates
+            if per_pack_decision.get(e[0]["name"]) == "skip"
+        ]
+    else:
+        deferred_for_summary = []
     print_compose_summary(
         selections,
         outcomes,
-        pending_updates if decision == "skip" else [],
+        deferred_for_summary,
         host=host,
     )
 

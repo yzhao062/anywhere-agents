@@ -19,17 +19,17 @@ Four problems this fixes:
 - **You want a review loop before you push.** `/implement-review` hands your staged diff to a second reviewer, converges on feedback, and revises. Present the first time you `bootstrap`.
 - **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one.
 
-Private-source packs are the v0.5.0 milestone: your own skills or team conventions shipped as first-class packs, with version locks and authentication for fetches against private repos. Today you can fork and extend packs manually; private-source authoring ships next.
+As of v0.6.0, bare `anywhere-agents` is the canonical apply command. One verb runs bootstrap, deploys declared state, applies prompt-policy drift on mutable refs, and regenerates `CLAUDE.md` / `agents/codex.md`. Direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback) handles public and private repos.
 
 ## How It Works
 
 A **pack** is a small bundle (a rule set, a skill, or a permission policy) that the composer deploys to wherever it needs to land: `AGENTS.md`, `.claude/skills/`, `.claude/commands/`, `~/.claude/hooks/`, or `~/.claude/settings.json`.
 
-In v0.4.0, `bootstrap` installs the shipped defaults (`agent-style`, `aa-core-skills`) and any project-level selections from `agent-config.yaml` or `agent-config.local.yaml` when those files use the legacy `rule_packs:` key. It also accepts `AGENT_CONFIG_PACKS` as a transient name list.
+`anywhere-agents` installs the shipped defaults (`agent-style`, `aa-core-skills`) and assembles project-level selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field.
 
-The `anywhere-agents pack add | remove | list` CLI writes `packs:` to user-level config today; `bootstrap` starts consuming that user-level file, and the project-level `packs:` key, in v0.4.x. Private-source packs land in v0.5.0.
+The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows). As of v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command. Bundled-default policy (v0.6.0): `agent-style` (passive) → `auto`; `aa-core-skills` (active) → `prompt`; third-party packs default to `prompt`.
 
-`bootstrap` is the sync step. Re-run it on any machine or repo, and `bootstrap` reproduces the shipped defaults plus the bootstrap-active project-level selections.
+`anywhere-agents` is the sync step. Re-run it on any machine or repo, and the same command reproduces shipped defaults plus project-level selections, applies any drift, and refreshes generated files. The legacy aliases `pack verify --fix` and `pack update` continue to work through all v0.x; each prints a one-line stderr notice and dispatches to the canonical apply path.
 
 ## Quick Install
 
@@ -70,18 +70,20 @@ For more, see [Install](install.md).
 ![anywhere-agents pack CLI demo: list (empty), add with --ref, list again, remove, list again](pack-cli-demo.gif)
 
 ```bash
+anywhere-agents                                                           # canonical apply: bootstrap + deploy + drift + generator
 anywhere-agents pack list
-anywhere-agents pack add aa-core-skills --ref v0.4.0
-anywhere-agents pack remove aa-core-skills
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
+anywhere-agents pack list --drift                                         # read-only audit against pack-lock.json
+anywhere-agents pack remove profile
 ```
 
-**v0.4.0 boundary.** For pack selections that must affect `bootstrap` today, use the legacy `rule_packs:` key in `agent-config.yaml` or `agent-config.local.yaml`, or pass names through `AGENT_CONFIG_PACKS`. The `anywhere-agents pack` CLI writes user-level `packs:` config now; bootstrap starts reading that user-level file and the project-level `packs:` key in v0.4.x.
+**Legacy aliases.** `pack verify --fix [--yes]` and `pack update [<name>]` are full-fidelity dispatch paths into the canonical apply, retained through all v0.x. CI scripts using these forms continue to work without changes; each prints a one-line stderr notice pointing at `anywhere-agents`. Removal is allowed only at v1.0 with explicit CI-migration guidance.
 
 **Authoring your own pack.** [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack) is a public reference repo that declares three packs (two passive, one active) using the v2 manifest schema. Fork it as a starting point.
 
 ## What's Next
 
-`v0.4.0` ships the pack runtime (state files, cross-platform locks, recoverable transactions) and the pack CLI. `v0.4.x` wires the composer to acquire those locks and to reconcile installed packs against the manifest on every session start. `v0.5.0` adds private-source packs: fetch packs from private repos with the standard Git authentication you already have configured (SSH key, `gh auth login`, or `GITHUB_TOKEN`). Shipped-status details live in the [changelog](changelog.md).
+`v0.5.0` shipped direct-URL pack fetch with the 4-method auth chain, the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.2` shipped end-to-end pack management: `pack add` is one-shot install (writes user-level rows, runs composer, deploys), and the AC→AA migration is automatic. `v0.6.0` collapses the day-to-day update flow into a single verb: bare `anywhere-agents` is the canonical apply path; `pack verify --fix` and `pack update` survive as compatibility aliases through all v0.x; prompt-policy drift on mutable refs applies inline by default with stderr summary lines and per-run skip via `ANYWHERE_AGENTS_UPDATE=skip` or `--no-apply-drift`. `update_policy: auto` on active entries is rejected at parse with an actionable error. Shipped-status details live in the [changelog](changelog.md).
 
 ## What This Site Covers
 

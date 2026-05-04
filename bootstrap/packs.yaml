@@ -18,7 +18,7 @@ packs:
     source:
       repo: https://github.com/yzhao062/agent-style
       ref: v0.3.5
-    update_policy: locked
+    update_policy: auto
     passive:
       - files:
           - from: docs/rule-pack-compact.md
@@ -34,7 +34,7 @@ packs:
       during v0.4.0 (see pack-architecture.md § "Pack-emitted command
       pointers") and are pack-emitted to consumer's .claude/commands/
       alongside the skill directories.
-    update_policy: locked
+    update_policy: prompt
     hosts: [claude-code]
     active:
       - kind: skill

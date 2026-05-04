@@ -43,7 +43,7 @@ Four problems this fixes:
 
 **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one. Without `anywhere-agents`, the banned words land in your files. With it, the guard blocks the write.
 
-**As of v0.5.0:** Direct-URL pack fetch + auth chain + drift prompts shipped. The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the **blueprint** for any pack you want to author: your own profile, paper workflow, team conventions, custom skills. The pattern is fork-and-replace. Fork ap, replace its three packs with your content, tag a release, then point `pack add` at your fork:
+**As of v0.6.0:** Bare `anywhere-agents` is the canonical apply command — one verb that bootstraps, deploys, applies prompt-policy drift on mutable refs, and regenerates `CLAUDE.md`. Direct-URL pack fetch + auth chain + drift application all run in the same command. The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the **blueprint** for any pack you want to author: your own profile, paper workflow, team conventions, custom skills. The pattern is fork-and-replace. Fork ap, replace its three packs with your content, tag a release, then point `pack add` at your fork:
 
 ```bash
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
@@ -57,9 +57,9 @@ A **pack** is a small bundle (a rule set, a skill, or a permission policy) that 
 
 `bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
 
-`update_policy` defaults to `prompt`: every bootstrap surfaces upstream drift and asks before applying. `update_policy: locked` opts a pack out for content that must never auto-refresh. The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`. As of v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command.
+As of v0.6.0, the bundled-default policy table is `agent-style` (passive) → `auto` (silent refresh + stderr summary) and `aa-core-skills` (active) → `prompt` (apply-by-default + stderr summary). Third-party packs default to `prompt`. Bare `anywhere-agents` applies prompt-policy drift on mutable refs inline; the run prints one stderr summary line per affected pack (`applied 1 update for <pack> @ <ref>: <old> -> <new>`). Per-run skip is available via `ANYWHERE_AGENTS_UPDATE=skip` (v0.5.0 contract) or the `--no-apply-drift` CLI flag (the flag wins when both are set). Durable fail-closed: pin `update_policy: locked` in `agent-config.yaml`. The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`. As of v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command.
 
-`bootstrap` is the sync step. Re-run it on any machine or repo, and `bootstrap` reproduces the shipped defaults plus the bootstrap-active project-level selections.
+`anywhere-agents` is the sync step. Re-run it on any machine or repo, and the same command reproduces the shipped defaults plus the project-level selections, applies any drift, and refreshes generated files.
 
 ## What This Looks Like
 
@@ -225,28 +225,29 @@ Install the `anywhere-agents` CLI (via `pipx install anywhere-agents`) to manage
 ![anywhere-agents pack CLI demo: list (empty), add with --ref, list again, remove, list again](docs/pack-cli-demo.gif)
 
 ```bash
+anywhere-agents                              # canonical apply: bootstrap + deploy + drift + generator
 anywhere-agents pack list
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
-anywhere-agents pack update profile         # update one of the rows ap added
-anywhere-agents pack list --drift           # read-only audit against pack-lock.json
+anywhere-agents pack list --drift             # read-only audit against pack-lock.json
 anywhere-agents pack remove profile
-anywhere-agents uninstall --all             # clean everything from the current project
+anywhere-agents uninstall --all               # clean everything from the current project
 ```
 
 `pack add <url>` reads the remote `pack.yaml` and writes one user-level row per declared pack (e.g., `agent-pack` expands to `profile`, `paper-workflow`, `acad-skills`). `--ref` is optional and defaults to `main`; pin a tag for production. The CLI writes to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows).
 
 ### Audit Pack Deployment
 
-`pack add` is one-shot in v0.5.2: it writes user-level config rows and runs the composer to deploy into the current project in a single command. Use `pack verify` to audit existing state or reconcile drift across machines:
+`pack add` is one-shot in v0.5.2: it writes user-level config rows and runs the composer to deploy into the current project in a single command. Use `pack verify` to audit existing state without writing:
 
 ```bash
 anywhere-agents pack verify              # read-only audit (user, project, lock)
-anywhere-agents pack verify --fix --yes  # write missing project rows + run the composer
 ```
 
-`verify --fix` in v0.5.2 collapses the previous "write rows + re-run bootstrap" two-step into a single command.
+To reconcile drift, run bare `anywhere-agents` — the canonical apply path applies prompt-policy drift on mutable refs and prints one stderr summary line per affected pack. Per-run skip: `ANYWHERE_AGENTS_UPDATE=skip` env var or `--no-apply-drift` CLI flag.
 
-**Migrating from a project that bootstrapped from `agent-config`?** As of v0.5.2, just run `anywhere-agents` (or `bash .agent-config/bootstrap.sh` directly). The CLI auto-detects the legacy `yzhao062/agent-config` upstream from `.agent-config/upstream` or the cached `.git/config`, deletes the legacy cache, and bootstraps from anywhere-agents. The detection lives in both the Python CLI and the raw shell scripts, so any entry path triggers the migration once.
+> **Legacy aliases (still supported through all v0.x).** The v0.5.x commands `anywhere-agents pack verify --fix [--yes]` and `anywhere-agents pack update [<name>]` continue to work and execute the canonical apply path; each prints a one-line stderr notice pointing at `anywhere-agents`. CI scripts that use these forms keep working without changes. Removal is allowed only at v1.0 with explicit CI-migration guidance.
+
+**Migrating from a project that bootstrapped from `agent-config`?** Run bare `anywhere-agents` (or `bash .agent-config/bootstrap.sh` directly). The CLI auto-detects the legacy `yzhao062/agent-config` upstream from `.agent-config/upstream` or the cached `.git/config`, deletes the legacy cache, and bootstraps from anywhere-agents. The detection lives in both the Python CLI and the raw shell scripts, so any entry path triggers the migration once.
 
 Then bring back the User Profile, paper workflow, and 3 academic skills (`bibref-filler`, `dual-pass-workflow`, `figure-prompt-builder`) that previously lived in `agent-config` by adding [`agent-pack`](https://github.com/yzhao062/agent-pack):
 
@@ -268,13 +269,13 @@ rule_packs:
     source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
 ```
 
-The next `bootstrap` applies them, or run `anywhere-agents pack verify --fix` to deploy immediately.
+Bare `anywhere-agents` applies them and prints a stderr summary line per affected pack.
 
 For the rule-pack composition contract that backs project-level `rule_packs:`, including cache, offline behavior, and failure modes, see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
 
 ## What's Next
 
-`v0.5.0` shipped direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback), the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.2` ships end-to-end pack management: `pack add` is one-shot install (writes user-level rows, runs composer, deploys), `pack verify --fix` reconciles drift in a single command, and the AC→AA migration is automatic. `v0.6.0` lands the end-to-end command-log harness for tighter CI token-leak coverage; v0.5.0 ships the redaction primitives and unit assertions that already cover the auth-chain primitive. Shipped-status details live in the [changelog](CHANGELOG.md).
+`v0.5.0` shipped direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback), the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.2` ships end-to-end pack management: `pack add` is one-shot install (writes user-level rows, runs composer, deploys), and the AC→AA migration is automatic. `v0.6.0` collapses the day-to-day update flow into a single verb: bare `anywhere-agents` is the canonical apply path; `pack verify --fix` and `pack update` survive as compatibility aliases through all v0.x; prompt-policy drift on mutable refs applies inline by default with stderr summary lines and per-run skip via `ANYWHERE_AGENTS_UPDATE=skip` or `--no-apply-drift`. `update_policy: auto` on active entries is rejected at parse with an actionable error. Shipped-status details live in the [changelog](CHANGELOG.md).
 
 The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the canonical blueprint for any pack you author: profile, paper workflow conventions, team conventions, custom skills, anything you want to share across projects. The v2 manifest schema lives there in working form. Fork ap, replace its three packs (`profile`, `paper-workflow`, `acad-skills`) with your content, tag a release, then `anywhere-agents pack add https://github.com/<you>/<your-pack> --ref <tag>`. As of v0.5.2 this is one-shot: the CLI writes user-level config rows and runs the composer to deploy in a single command.
 

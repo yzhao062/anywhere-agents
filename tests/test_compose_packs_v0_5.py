@@ -833,111 +833,57 @@ def _pending_fixture(name: str = "profile") -> tuple:
 
 
 class TestPromptUserForUpdates(unittest.TestCase):
-    """``prompt_user_for_updates`` — TTY detection + env-var fallback.
+    """``prompt_user_for_updates`` — env-driven decision under v0.6.0.
 
-    When stdin/stdout are TTYs, ask interactively. When non-interactive,
-    consult ``ANYWHERE_AGENTS_UPDATE`` (apply / skip / fail; default
-    skip; fail raises ``PackLockDriftAborted``). Per Round 3 plan."""
+    v0.6.0 (locked design at pack-architecture.md:657, :921; PLAN
+    lines 84-88) retires the pre-existing TTY interactive prompt and
+    flips the default from skip to apply. ``ANYWHERE_AGENTS_UPDATE``
+    (apply / skip / fail; default apply) is the only decision input;
+    interactivity is not reintroduced. The CLI flag ``--no-apply-drift``
+    is the env=skip equivalent at a higher layer (flag wins over env).
 
-    def test_tty_apply_returns_apply(self) -> None:
-        """Interactive path: stdin/stdout TTYs + Y → ``apply``."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-            patch("builtins.input", return_value="Y"),
-            patch("builtins.print"),  # silence interactive prompt output
-        ):
-            stdin.isatty.return_value = True
-            stdout.isatty.return_value = True
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
-        self.assertEqual(result, "apply")
-
-    def test_tty_default_yes_returns_apply(self) -> None:
-        """Default response (empty enter) is treated as Y."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-            patch("builtins.input", return_value=""),
-            patch("builtins.print"),
-        ):
-            stdin.isatty.return_value = True
-            stdout.isatty.return_value = True
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
-        self.assertEqual(result, "apply")
-
-    def test_tty_n_returns_skip(self) -> None:
-        """Interactive 'n' — keep current locked commit."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-            patch("builtins.input", return_value="n"),
-            patch("builtins.print"),
-        ):
-            stdin.isatty.return_value = True
-            stdout.isatty.return_value = True
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
-        self.assertEqual(result, "skip")
+    Pre-v0.6.0 tests covering TTY-Y/N/EOF behavior are removed because
+    the TTY branch is gone. The Round 3 + Round 4 design notes referenced
+    by those tests are superseded by the v0.6.0 update-flow plan-review
+    closure.
+    """
 
     @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "skip"}, clear=False)
-    def test_non_tty_skip_default(self) -> None:
-        """Non-TTY + ``ANYWHERE_AGENTS_UPDATE=skip`` → ``skip``."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-        ):
-            stdin.isatty.return_value = False
-            stdout.isatty.return_value = False
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
+    def test_env_skip_returns_skip(self) -> None:
+        """``ANYWHERE_AGENTS_UPDATE=skip`` → ``skip`` (per-run override)."""
+        result = compose_packs.prompt_user_for_updates([_pending_fixture()])
         self.assertEqual(result, "skip")
 
     @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "apply"}, clear=False)
-    def test_non_tty_apply_returns_apply(self) -> None:
-        """Non-TTY + ``ANYWHERE_AGENTS_UPDATE=apply`` → ``apply``."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-        ):
-            stdin.isatty.return_value = False
-            stdout.isatty.return_value = False
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
+    def test_env_apply_returns_apply(self) -> None:
+        """``ANYWHERE_AGENTS_UPDATE=apply`` → ``apply``. Same as default."""
+        result = compose_packs.prompt_user_for_updates([_pending_fixture()])
         self.assertEqual(result, "apply")
 
     @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "fail"}, clear=False)
-    def test_non_tty_fail_raises(self) -> None:
-        """Non-TTY + ``ANYWHERE_AGENTS_UPDATE=fail`` → ``PackLockDriftAborted``."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-        ):
-            stdin.isatty.return_value = False
-            stdout.isatty.return_value = False
-            with self.assertRaises(compose_packs.PackLockDriftAborted):
-                compose_packs.prompt_user_for_updates([_pending_fixture()])
+    def test_env_fail_raises(self) -> None:
+        """``ANYWHERE_AGENTS_UPDATE=fail`` → ``PackLockDriftAborted``."""
+        with self.assertRaises(compose_packs.PackLockDriftAborted):
+            compose_packs.prompt_user_for_updates([_pending_fixture()])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_non_tty_unset_defaults_to_skip(self) -> None:
-        """Non-TTY + env var unset → ``skip`` (no surprise apply)."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-        ):
-            stdin.isatty.return_value = False
-            stdout.isatty.return_value = False
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
-        self.assertEqual(result, "skip")
+    def test_unset_defaults_to_apply(self) -> None:
+        """v0.6.0 default flip: env unset → ``apply`` (was ``skip``).
+
+        This is the locked v0.6.0 contract. The default applies inline
+        regardless of TTY state because the canonical bare-command path
+        does not reintroduce interactivity. Pinned here so a future
+        accidental revert of the default surfaces as a clear failure.
+        """
+        result = compose_packs.prompt_user_for_updates([_pending_fixture()])
+        self.assertEqual(result, "apply")
 
     @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "garbage"}, clear=False)
-    def test_non_tty_unknown_value_raises_value_error(self) -> None:
-        """An unrecognized env-var value should fail loudly so a typo
-        surfaces at first use rather than silently picking a default."""
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-        ):
-            stdin.isatty.return_value = False
-            stdout.isatty.return_value = False
-            with self.assertRaises(ValueError):
-                compose_packs.prompt_user_for_updates([_pending_fixture()])
+    def test_unknown_value_raises_value_error(self) -> None:
+        """An unrecognized env-var value fails loudly so a typo surfaces
+        at first use rather than silently picking a default."""
+        with self.assertRaises(ValueError):
+            compose_packs.prompt_user_for_updates([_pending_fixture()])
 
 
 # =====================================================================
@@ -1309,22 +1255,10 @@ class TestReconcileOrphansWiredIntoCompose(unittest.TestCase):
 # =====================================================================
 
 
-class TestPromptUserForUpdatesEOF(unittest.TestCase):
-    """Round 4 Issue 5: a Ctrl-D / EOF at the interactive prompt must
-    surface as ``skip`` rather than letting EOFError leak out of the
-    composer. Empty stdin closing mid-pipe is the same path."""
-
-    def test_eof_returns_skip(self) -> None:
-        with (
-            patch("compose_packs.sys.stdin") as stdin,
-            patch("compose_packs.sys.stdout") as stdout,
-            patch("builtins.input", side_effect=EOFError),
-            patch("builtins.print"),  # silence prompt + cleanup newline
-        ):
-            stdin.isatty.return_value = True
-            stdout.isatty.return_value = True
-            result = compose_packs.prompt_user_for_updates([_pending_fixture()])
-        self.assertEqual(result, "skip")
+# Note: the pre-v0.6.0 ``TestPromptUserForUpdatesEOF`` class (Round 4
+# Issue 5 — Ctrl-D / EOF at the interactive prompt → ``skip``) was
+# removed when v0.6.0 retired the TTY-interactive prompt branch. With
+# no interactive prompt, there is no EOF surface to trap.
 
 
 # =====================================================================
@@ -1583,8 +1517,12 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         self.assertEqual(rc, 0)
         prompt.assert_called_once()
         # The pending list must include profile with the new archive.
+        # v0.6.0 Phase 4: pending_updates entries grew from 3-tuple to
+        # 4-tuple to carry drift_kind. Accept both shapes here so the
+        # test covers either v0.5.x or v0.6.0 entry layout.
         self.assertEqual(len(captured), 1)
-        sel, archive, pack_def = captured[0]
+        entry = captured[0]
+        sel, archive, pack_def = entry[0], entry[1], entry[2]
         self.assertEqual(sel["name"], "profile")
         self.assertIs(archive, self.new_archive)
         self.assertEqual(pack_def["name"], "profile")
@@ -1648,10 +1586,12 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         self.assertEqual(args[0], self.root.resolve())
         # host arg present.
         self.assertEqual(args[1], "claude-code")
-        # pending list shaped as (selection, archive, pack_def).
+        # pending list shaped as (selection, archive, pack_def[, drift_kind]).
+        # v0.6.0 Phase 4: 4-tuple accepted alongside the legacy 3-tuple.
         pending = args[2]
         self.assertEqual(len(pending), 1)
-        sel, archive, pack_def = pending[0]
+        entry = pending[0]
+        sel, archive, pack_def = entry[0], entry[1], entry[2]
         self.assertEqual(sel["name"], "profile")
         # Skip path MUST NOT clear; the file is the deferred-state record.
         clear.assert_not_called()

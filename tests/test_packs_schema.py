@@ -178,8 +178,16 @@ class UnifiedV2Tests(_TmpDirCase):
         with self.assertRaisesRegex(schema.ParseError, r"unknown 'kind' 'widget'"):
             schema.parse_manifest(path)
 
-    def test_active_entry_accepts_auto_policy(self) -> None:
-        """v0.5.0: active entries may use update_policy: auto (was parse-rejected in v0.4.0)."""
+    def test_active_entry_rejects_auto_policy(self) -> None:
+        """v0.6.0: active entries may NOT use update_policy: auto.
+
+        v0.5.0 silently dropped the parser check for this case; v0.6.0
+        restores it (pack-architecture.md § "Source resolution and
+        active-code trust" already documents this as a manifest error).
+        Passive entries with update_policy: auto remain accepted; only
+        active entries (kind: skill | hook | permission | command) are
+        rejected.
+        """
         path = _write_manifest(
             self.root,
             "version: 2\n"
@@ -195,10 +203,134 @@ class UnifiedV2Tests(_TmpDirCase):
             "        files:\n"
             "          - {from: skills/foo/, to: .claude/skills/foo/}\n",
         )
-        parsed = schema.parse_manifest(path)
-        self.assertEqual(
-            parsed["packs"][0]["active"][0]["update_policy"], "auto"
+        with self.assertRaisesRegex(
+            schema.ParseError, r"update_policy: auto"
+        ):
+            schema.parse_manifest(path)
+
+    def test_active_auto_rejected_with_actionable_error(self) -> None:
+        """v0.6.0: the rejection error must name the pack, the active
+        entry's files[].to path, the offending policy literal, and the
+        rewrite hint mentioning both 'prompt' and 'locked'."""
+        pack_name = "demo-active-auto"
+        to_path = ".claude/hooks/demo/01-x.py"
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            f"  - name: {pack_name}\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    active:\n"
+            "      - kind: hook\n"
+            "        hosts: [claude-code]\n"
+            "        update_policy: auto\n"
+            "        files:\n"
+            f"          - {{from: scripts/x.py, to: {to_path}}}\n",
         )
+        with self.assertRaises(schema.ParseError) as ctx:
+            schema.parse_manifest(path)
+        msg = str(ctx.exception)
+        # All four required pieces must appear in a single-line message.
+        self.assertIn(pack_name, msg)
+        self.assertIn(to_path, msg)
+        self.assertIn("update_policy: auto", msg)
+        self.assertIn("prompt", msg)
+        self.assertIn("locked", msg)
+        # Single-line: no embedded newlines so CLI output stays readable.
+        self.assertNotIn("\n", msg)
+
+    def test_passive_entry_accepts_auto_policy(self) -> None:
+        """v0.6.0: passive entries with update_policy: auto remain accepted
+        per the trust-model paragraph (silent refresh on hash change)."""
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            "  - name: passive-auto\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    update_policy: auto\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: docs/rule-pack.md, to: AGENTS.md}\n",
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(parsed["packs"][0]["update_policy"], "auto")
+
+    def test_pack_level_auto_with_active_entries_rejects(self) -> None:
+        """v0.6.0 Q5 — pack-level ``update_policy: auto`` on a pack with
+        active entries must reject at parse, regardless of which active
+        kind is present. The manifest-level shape (pack-level policy +
+        active entries with no per-entry policy) is what aa's bundled
+        manifest and most third-party packs use; entry-level auto is
+        covered separately by ``test_active_entry_rejects_auto_policy``.
+
+        Deep-review Round 1 finding: the v0.6.0 entry-level rejection
+        landed but did not cover this real shape, leaving the
+        supply-chain risk that ``update_policy: prompt`` was designed
+        to gate. See pack-architecture.md:670 + :206.
+        """
+        cases = [
+            (
+                "hook",
+                "      - kind: hook\n"
+                "        hosts: [claude-code]\n"
+                "        files: [{from: x.py, to: .claude/hooks/x/01-x.py}]\n",
+            ),
+            (
+                "skill",
+                "      - kind: skill\n"
+                "        hosts: [claude-code]\n"
+                "        files: [{from: skills/x/, to: .claude/skills/x/}]\n",
+            ),
+            (
+                "permission",
+                "      - kind: permission\n"
+                "        hosts: [claude-code]\n"
+                "        files: [{from: x.json, to: ~/.claude/settings.json}]\n"
+                "        merge: permissions\n",
+            ),
+            (
+                "command",
+                "      - kind: command\n"
+                "        hosts: [claude-code]\n"
+                "        files: [{from: x.md, to: .claude/commands/x.md}]\n",
+            ),
+        ]
+        for kind, active_yaml in cases:
+            with self.subTest(kind=kind):
+                path = _write_manifest(
+                    self.root,
+                    "version: 2\n"
+                    "packs:\n"
+                    "  - name: pack-level-auto-{kind}\n".format(kind=kind)
+                    + "    source: { repo: https://example/x, ref: main }\n"
+                    "    update_policy: auto\n"
+                    "    active:\n"
+                    + active_yaml,
+                )
+                with self.assertRaisesRegex(
+                    schema.ParseError,
+                    r"update_policy: auto",
+                ):
+                    schema.parse_manifest(path)
+
+    def test_pack_level_auto_with_only_passive_still_accepts(self) -> None:
+        """Companion guard: a pack with pack-level auto and ONLY passive
+        entries must NOT trigger the active-entry rejection (the new
+        check at v0.6.0 must not over-fire on passive-only packs)."""
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            "  - name: pack-level-auto-passive-only\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    update_policy: auto\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: docs/rule-pack.md, to: AGENTS.md}\n",
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(parsed["packs"][0]["update_policy"], "auto")
 
     def test_active_entry_unknown_update_policy_rejects(self) -> None:
         """v0.5.0: unknown active update_policy values still parse-reject."""

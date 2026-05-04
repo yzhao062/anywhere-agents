@@ -276,6 +276,22 @@ def _bootstrap_main(argv: list[str]) -> int:
         action="version",
         version=f"anywhere-agents {__version__}",
     )
+    # v0.6.0 Phase 4: per-run skip override for prompt-policy drift
+    # apply. CLI flag takes precedence over the ANYWHERE_AGENTS_UPDATE
+    # env var (when both are set, the flag wins). Threaded through to
+    # the composer subprocess.  ``update_policy: locked`` drift still
+    # fails closed regardless.
+    parser.add_argument(
+        "--no-apply-drift",
+        action="store_true",
+        dest="no_apply_drift",
+        help=(
+            "Report prompt-policy drift but do not apply it. "
+            "Equivalent to ANYWHERE_AGENTS_UPDATE=skip; the CLI flag "
+            "wins when both are set. Locked-policy drift continues "
+            "to fail closed."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -342,13 +358,29 @@ def _bootstrap_main(argv: list[str]) -> int:
     # also heals any generator-stale state (Gap B).  Run unconditionally so
     # both fresh installs and upgraders with broken bootstrap.sh benefit.
     log("Running post-bootstrap heal pass (pack verify --fix --yes)...")
+    # v0.6.0 Phase 4: thread --no-apply-drift through to the heal pass
+    # so the bare command's drift behavior matches the user's intent.
+    # v0.6.0 Phase 5: set a sentinel env var so the _pack_main dispatch
+    # suppresses the alias notice; bare ``anywhere-agents`` IS the
+    # canonical command and should not print "this is an alias" on
+    # every invocation.
+    fix_argv = ["pack", "verify", "--fix", "--yes"]
+    if getattr(args, "no_apply_drift", False):
+        fix_argv.append("--no-apply-drift")
+    prior_internal = os.environ.get(_ALIAS_NOTICE_SUPPRESS_ENV)
+    os.environ[_ALIAS_NOTICE_SUPPRESS_ENV] = "1"
     try:
-        fix_rc = main(["pack", "verify", "--fix", "--yes"])
+        fix_rc = main(fix_argv)
     except SystemExit as exc:
         fix_rc = exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:  # pragma: no cover - belt and suspenders
         log(f"warning: post-bootstrap reconcile raised: {exc}")
         fix_rc = 1
+    finally:
+        if prior_internal is None:
+            os.environ.pop(_ALIAS_NOTICE_SUPPRESS_ENV, None)
+        else:
+            os.environ[_ALIAS_NOTICE_SUPPRESS_ENV] = prior_internal
 
     if bootstrap_rc != 0:
         if fix_rc == 0:
@@ -403,6 +435,13 @@ def _bootstrap_main(argv: list[str]) -> int:
 
 _USER_CONFIG_APP_DIR = "anywhere-agents"
 _USER_CONFIG_FILENAME = "config.yaml"
+
+# v0.6.0 Phase 5: sentinel env var. ``_bootstrap_main`` sets this when
+# calling ``main(["pack", "verify", "--fix", "--yes"])`` as the post-
+# bootstrap heal pass so the canonical-bare path does not surface the
+# alias notice. External callers should NOT set this; it exists solely
+# to break the bare-command -> _pack_main internal recursion.
+_ALIAS_NOTICE_SUPPRESS_ENV = "_AA_ALIAS_NOTICE_SUPPRESS"
 
 
 def _user_config_path() -> Path | None:
@@ -495,12 +534,35 @@ def _pack_main(path: Path | None, argv: list[str]) -> int:
 
     p_update = sub.add_parser(
         "update",
-        help="Refresh a pack's user-config ref pin and re-run the project composer.",
+        help="Apply pack drift through the canonical anywhere-agents path.",
     )
-    p_update.add_argument("name", help="Pack name to update")
+    # v0.6.0 Phase 5: ``pack update`` is a compatibility alias for the
+    # canonical bare command. ``pack update <name>`` survives as a
+    # selective power-user verb. ``pack update --all`` is the retained
+    # CI compatibility form (PLAN lines 114, 199; CHANGELOG entry).
+    p_update.add_argument(
+        "name",
+        nargs="?",
+        help="Pack name to update selectively. Omit only when using --all.",
+    )
+    p_update.add_argument(
+        "--all",
+        action="store_true",
+        help="Compatibility alias for applying all pending pack drift.",
+    )
     p_update.add_argument(
         "--ref",
-        help="New ref to pin. Default: keep the existing ref recorded in user-level config.",
+        help="New ref to pin for the named pack. Not valid with --all.",
+    )
+    # v0.6.0 Phase 4: per-run skip override (CLI flag wins over env).
+    p_update.add_argument(
+        "--no-apply-drift",
+        action="store_true",
+        dest="no_apply_drift",
+        help=(
+            "Report prompt-policy drift but do not apply it. "
+            "Equivalent to ANYWHERE_AGENTS_UPDATE=skip; CLI flag wins."
+        ),
     )
 
     p_verify = sub.add_parser(
@@ -524,6 +586,18 @@ def _pack_main(path: Path | None, argv: list[str]) -> int:
         # v0.5.8: opt-out for CI / offline / inspect-only use.
         help="Write config rows but skip the composer deploy step (--fix only). Useful for CI or offline inspection.",
     )
+    # v0.6.0 Phase 4: per-run skip override (CLI flag wins over env).
+    # Compatibility-alias visibility: ``pack verify --fix`` is a v0.6.0
+    # alias for the canonical bare command, so it accepts the same flag.
+    p_verify.add_argument(
+        "--no-apply-drift",
+        action="store_true",
+        dest="no_apply_drift",
+        help=(
+            "Report prompt-policy drift but do not apply it (--fix only). "
+            "Equivalent to ANYWHERE_AGENTS_UPDATE=skip; CLI flag wins."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -542,10 +616,42 @@ def _pack_main(path: Path | None, argv: list[str]) -> int:
             return _pack_list_drift()
         return _pack_list(path)
     if args.action == "update":
+        # v0.6.0 Phase 5: ``pack update`` is now a compatibility alias
+        # for the canonical bare command. Print a one-line stderr
+        # notice before dispatching. ``--all`` dispatches the canonical
+        # apply-everything path; ``<name>`` survives as a selective
+        # power-user verb (pack-architecture.md ~line 653).
+        if not os.environ.get(_ALIAS_NOTICE_SUPPRESS_ENV):
+            print(
+                "note: 'pack update' is now an alias for 'anywhere-agents'; "
+                "the bare command does the same thing",
+                file=sys.stderr,
+            )
+        if args.all:
+            if args.name or args.ref:
+                log("error: pack update --all does not accept a pack name or --ref")
+                return 2
+            composer_argv: tuple[str, ...] = ()
+            if getattr(args, "no_apply_drift", False):
+                composer_argv = ("--no-apply-drift",)
+            return _invoke_composer_with_gen_fallback(Path.cwd(), *composer_argv)
+        if not args.name:
+            log("error: pack update requires <name> or --all")
+            return 2
         return _pack_update(path, args)
     if args.action == "verify":
         project_root = Path.cwd()
         if args.fix:
+            # v0.6.0 Phase 5: ``pack verify --fix`` is now a
+            # compatibility alias for the canonical bare command.
+            # Print a one-line stderr notice before dispatching to
+            # the existing reconcile + materialize path.
+            if not os.environ.get(_ALIAS_NOTICE_SUPPRESS_ENV):
+                print(
+                    "note: 'pack verify --fix' is now an alias for "
+                    "'anywhere-agents'; the bare command does the same thing",
+                    file=sys.stderr,
+                )
             return _pack_verify_fix(path, project_root, args)
         return _pack_verify(path, project_root, args)
     return 2  # unreachable due to argparse required=True
@@ -920,8 +1026,21 @@ def _invoke_composer(
         )
         return 2
     composer = _bundled_composer_path() or project_composer
-    cmd = [sys.executable, str(composer)] + list(args)
-    if not args:
+    # v0.5.x: when ``args`` was empty, ``--root`` was auto-appended.
+    # v0.6.0 keeps that behavior but also auto-appends ``--root`` when
+    # ``args`` carries flags only (e.g., ``--no-apply-drift``,
+    # ``--apply-name <name>``); a sub-mode like ``uninstall <name>``
+    # still suppresses the auto-append because ``uninstall`` carries
+    # its own ``--root`` parser. Detect by checking whether the first
+    # positional in ``args`` is a known sub-mode word.
+    args_list = list(args)
+    cmd = [sys.executable, str(composer)] + args_list
+    needs_root = True
+    if args_list and not args_list[0].startswith("-"):
+        # First arg is positional (sub-mode like "uninstall"); skip the
+        # auto-append, the sub-mode parser owns --root.
+        needs_root = False
+    if not any(a == "--root" for a in args_list) and needs_root:
         cmd.extend(["--root", str(project_root)])
     env = None
     if env_extra:
@@ -968,6 +1087,113 @@ def _run_generator_only(project_root: Path) -> int:
         return 0
 
 
+def _has_pack_lock_commit_drift(project_root: Path) -> bool:
+    """Return True when ``pack-lock.json`` records at least one entry
+    whose ``latest_known_head`` differs from ``resolved_commit``.
+
+    v0.6.0 Phase 4: this is the signal that triggers the canonical
+    apply path even when every pack-lock entry is otherwise DEPLOYED.
+    The v0.5.2 ``pack verify`` step opportunistically refreshes
+    ``latest_known_head`` from a ``git ls-remote`` probe; v0.6.0 reads
+    the resulting drift to decide whether to invoke the composer.
+    Returns False on a missing or unreadable lock so the empty-project
+    case stays quiet.
+    """
+    lock_path = project_root / ".agent-config" / "pack-lock.json"
+    if not lock_path.exists():
+        return False
+    import json
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, dict):
+        return False
+    for body in packs.values():
+        if not isinstance(body, dict):
+            continue
+        resolved = body.get("resolved_commit") or ""
+        latest = body.get("latest_known_head") or ""
+        if not resolved or not latest:
+            continue
+        # Both populated (the v0.5.2 ls-remote pass found the upstream
+        # head); commit drift exists when they differ.
+        if resolved != latest:
+            return True
+    return False
+
+
+def _emit_apply_summary(project_root: Path) -> int:
+    """v0.6.0 Phase 4: read ``applied-updates.json`` and emit one stderr
+    summary line per applied drift entry, then unlink the file.
+
+    Output lines per record:
+
+    - Commit-drift (``drift_kind == "commit"``)::
+
+        applied 1 update for <pack> @ <ref>: <old_short> -> <new_short>
+
+    - Same-ref source-path drift (``drift_kind == "path"``)::
+
+        migrated 1 path for <pack> @ <ref>: <old_path> -> <new_path>
+
+    Multi-pack runs aggregate one line per pack. Returns the number of
+    summary lines emitted (0 when the file is absent or empty). Errors
+    reading or unlinking the file are non-fatal; the caller proceeds.
+    """
+    path = project_root / ".agent-config" / "applied-updates.json"
+    if not path.exists():
+        return 0
+    import json
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return 0
+    applied = data.get("applied") if isinstance(data, dict) else None
+    if not isinstance(applied, list):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return 0
+    emitted = 0
+    for record in applied:
+        if not isinstance(record, dict):
+            continue
+        name = record.get("name") or "?"
+        ref_str = record.get("ref") or "?"
+        drift_kind = record.get("drift_kind")
+        if drift_kind == "path":
+            old_paths = record.get("old_paths") or []
+            new_paths = record.get("new_paths") or []
+            old_repr = old_paths[0] if old_paths else "?"
+            new_repr = new_paths[0] if new_paths else "?"
+            print(
+                f"migrated 1 path for {name} @ {ref_str}: "
+                f"{old_repr} -> {new_repr}",
+                file=sys.stderr,
+            )
+        else:
+            old_short = record.get("old_short") or "?"
+            new_short = record.get("new_short") or "?"
+            print(
+                f"applied 1 update for {name} @ {ref_str}: "
+                f"{old_short} -> {new_short}",
+                file=sys.stderr,
+            )
+        emitted += 1
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return emitted
+
+
 def _invoke_composer_with_gen_fallback(
     project_root: Path,
     *args: str,
@@ -984,12 +1210,25 @@ def _invoke_composer_with_gen_fallback(
       to stderr; returns the original composer rc.
     - Generator failure is non-fatal: the original composer rc still wins.
     - If generate_agent_configs.py is absent: skip silently.
+
+    v0.6.0 Phase 4: after the composer + generator complete (regardless
+    of rc), emit the v0.6.0 stderr summary lines for any drifts the
+    composer applied. The composer writes ``applied-updates.json`` on
+    every successful apply path; this function reads + unlinks it.
     """
     composer_rc = _invoke_composer(project_root, *args, env_extra=env_extra)
 
     # v0.5.8: Gap B — reuse the extracted helper so both call sites share
     # the same generator-discovery logic.
     _run_generator_only(project_root)
+
+    # v0.6.0 Phase 4: emit one stderr summary line per applied drift.
+    # Errors are non-fatal (e.g., consumer's project root is read-only
+    # for the .agent-config dir).
+    try:
+        _emit_apply_summary(project_root)
+    except Exception:  # pragma: no cover — defensive
+        pass
 
     if composer_rc != 0:
         log(
@@ -1252,8 +1491,16 @@ def _pack_update(user_config_path: Path, args) -> int:
 
     project_root = Path.cwd()
     # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent even on composer abort.
+    # v0.6.0 Phase 5: ``pack update <name>`` is selective — only the
+    # named pack's drift applies; others are left as if --no-apply-drift
+    # were active. ``--apply-name=<name>`` threads through to the
+    # composer's selective apply path.
+    composer_argv: list[str] = ["--apply-name", args.name]
+    if getattr(args, "no_apply_drift", False):
+        composer_argv.append("--no-apply-drift")
     return _invoke_composer_with_gen_fallback(
         project_root,
+        *composer_argv,
         env_extra={"ANYWHERE_AGENTS_UPDATE": "apply"},
     )
 
@@ -1381,6 +1628,78 @@ _STATE_GLYPHS = {
 # Mirrors compose_packs.DEFAULT_V2_SELECTIONS so verify and bootstrap see
 # the same baseline.
 _DEFAULT_V2_SELECTIONS = ("agent-style", "aa-core-skills")
+
+# v0.6.0 post-review host-aware default seeding. aa-core-skills declares
+# ``hosts: [claude-code]`` in bootstrap/packs.yaml; under
+# ``AGENT_CONFIG_HOST=codex`` (or any non-claude host) the seed drops it
+# so bare ``anywhere-agents`` does not hit a host-mismatch error on
+# first run. The full ``_DEFAULT_V2_SELECTIONS`` tuple stays canonical
+# for "is this a known bundled name" checks (BC-guard, identity, drift
+# detection) — those still need to recognize aa-core-skills as a known
+# default name even under codex, so a user-pinned aa-core-skills row
+# still resolves to the synthetic bundled identity rather than a
+# sentinel.
+#
+# Keep in sync with ``hosts:`` declarations in bootstrap/packs.yaml. A
+# bundled default that gates on host needs an entry here.
+_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset({"aa-core-skills"})
+
+
+# Mirrors ``compose_packs.KNOWN_HOSTS``. Kept as a literal here to avoid
+# importing the script-tree composer from the wheel-bundled CLI; if a
+# future host is added (e.g., ``cursor``), update both sides in lockstep.
+_KNOWN_HOSTS: tuple[str, ...] = ("claude-code", "codex")
+
+
+def _active_host() -> str:
+    """Read ``AGENT_CONFIG_HOST`` env var, defaulting to ``claude-code``.
+
+    Mirrors the env-var path of ``compose_packs.detect_host``. The
+    verify CLI does not expose a ``--host`` flag, so the env var is the
+    only signal at this layer; an explicit ``--host`` passed to
+    ``compose_packs.py`` is re-detected on that side. Unknown values
+    fall back to ``claude-code`` rather than raising — verify is
+    inspection-only and a typo here should not block the table; the
+    composer-side ``detect_host`` already validates ``--host`` arguments
+    at parse time.
+    """
+    env_value = os.environ.get("AGENT_CONFIG_HOST", "").strip()
+    return env_value if env_value in _KNOWN_HOSTS else "claude-code"
+
+
+def _default_v2_seed_for_host(host: str) -> tuple[str, ...]:
+    """Return ``_DEFAULT_V2_SELECTIONS`` with claude-only names filtered
+    out when the active host is non-claude.
+
+    Used at the verify-seeding call site only; identity-check and
+    BC-guard usages of ``_DEFAULT_V2_SELECTIONS`` still consult the
+    full tuple so a user-pinned ``aa-core-skills`` row is still
+    recognized under codex.
+    """
+    if host == "claude-code":
+        return _DEFAULT_V2_SELECTIONS
+    return tuple(
+        name for name in _DEFAULT_V2_SELECTIONS
+        if name not in _CLAUDE_ONLY_DEFAULTS
+    )
+
+
+# v0.6.0 deep-review Round 3: the auto-reconciliation rewrite helper
+# (``_rewrite_auto_reconciled_default_refs``) advances a stale default-name
+# ref to the bundled default ONLY when the consumer-side ref is a known
+# residue from a prior aa auto-reconciliation pass. Any other minimal
+# default-name ref is a deliberate user pin per the BC-guard contract at
+# pack-architecture.md:678 and must NOT be rewritten. This map enumerates
+# the historical aa-written refs; extend only when a future aa release
+# auto-writes a new minimal-shape default entry that needs forward
+# migration.
+_AUTO_RECONCILED_DEFAULT_REF_REWRITES: dict[str, set[str]] = {
+    # v0.5.x aa reconciliation wrote this minimal agent-style row into
+    # consumer projects before the bundled default moved to v0.3.5.
+    # See pack-architecture.md "Reconciliation-aware BC guard refinement"
+    # section and the random-project reproduction (`v0.3.2` stale shape).
+    "agent-style": {"v0.3.2"},
+}
 _BUNDLED_IDENTITY_URL = "bundled:aa"
 _BUNDLED_IDENTITY_REF = "bundled"
 _AGENT_STYLE_BLOCK_RE = re.compile(
@@ -1661,8 +1980,14 @@ def _load_project_observations(project_root: Path):
                 grouped.setdefault(entry["name"], []).append(entry)
         return grouped
 
+    # v0.6.0 post-review: filter the seed by host so non-claude
+    # consumers (``AGENT_CONFIG_HOST=codex``) do not pre-seed
+    # claude-only bundled defaults like aa-core-skills. A user who
+    # explicitly pins aa-core-skills under codex still flows through
+    # the merge below and surfaces in the verify table.
     merged_lists: dict[str, list] = {
-        name: [{"name": name}] for name in _DEFAULT_V2_SELECTIONS
+        name: [{"name": name}]
+        for name in _default_v2_seed_for_host(_active_host())
     }
     for layer in (tracked, local):
         if layer is None:
@@ -2026,6 +2351,31 @@ def _annotate_default_rows(rows, project_root: Path):
     return rows
 
 
+def _bundled_default_for_name(name: str) -> dict | None:
+    """Return the bundled-manifest pack-def for ``name`` (or ``None``).
+
+    Loads the wheel-bundled ``composer/bootstrap/packs.yaml`` and walks
+    its ``packs:`` list; ``None`` when the manifest is missing /
+    unreadable or the name is not declared. Used by
+    :func:`_has_explicit_default_override` to compare an entry's ref and
+    update_policy against the maintainer-declared default.
+    """
+    bundled_yaml = _bundled_packs_yaml_path()
+    if bundled_yaml is None:
+        return None
+    try:
+        data = _read_yaml_or_none(bundled_yaml) or {}
+    except _VerifyParseError:
+        return None
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, list):
+        return None
+    for pack in packs:
+        if isinstance(pack, dict) and pack.get("name") == name:
+            return pack
+    return None
+
+
 def _has_explicit_default_override(
     project_root: Path,
     row: dict,
@@ -2034,14 +2384,51 @@ def _has_explicit_default_override(
     """Return True when consumer config has an explicit override for ``name``.
 
     An "explicit" override is a user-level or project-level pack entry
-    that names a real source / ref / passive / active / update_policy —
-    distinct from a name-only entry that just selects the bundled default.
-    Used to short-circuit bundled-default drift detection: consumer-pinned
-    packs must remain stable across maintainer-declared bundled bumps.
+    that genuinely deviates from the bundled-default — distinct from
+    aa's own auto-reconciliation output (``_user_only_rule_pack_entry``
+    / ``_project_only_user_pack_entry``), which writes minimal
+    ``{name, source: {url, ref}}`` entries that match the bundled
+    default. Used to short-circuit bundled-default drift detection so
+    consumer-pinned packs stay stable across maintainer-declared
+    bundled bumps without trapping auto-reconciled entries.
+
+    v0.6.0 refinement (PLAN-aa-v0.6.0 § Phase 3): an entry is treated as
+    a deliberate pin only when one of the following holds:
+
+      - ``passive`` keys present (real shape override), OR
+      - ``active`` keys present (real shape override), OR
+      - ``ref`` (under ``source.ref`` or top-level ``ref``) deviates
+        from the bundled-manifest default for the same pack name, OR
+      - ``update_policy`` deviates from the bundled-manifest default.
+
+    Entries byte-equivalent to what aa's reconciliation would produce
+    (minimal ``{name, source: {url, ref}}`` where the ref matches the
+    bundled default) no longer count as opaque pins; bundled-default
+    drift detection runs on them so the auto-reconciled minimal entry
+    no longer blocks bundled migration (the v0.5.7 ``random``-style
+    failure mode that motivated this refinement).
     """
     user_ident = row.get("u")
     if user_ident is not None and len(user_ident) >= 4 and user_ident[3] != _BUNDLED_IDENTITY_URL:
         return True
+
+    bundled_def = _bundled_default_for_name(name)
+    bundled_ref = ""
+    bundled_policy = ""
+    if isinstance(bundled_def, dict):
+        bundled_source = bundled_def.get("source")
+        if isinstance(bundled_source, dict):
+            ref = bundled_source.get("ref")
+            if isinstance(ref, str):
+                bundled_ref = ref
+        if not bundled_ref:
+            top_ref = bundled_def.get("ref")
+            if isinstance(top_ref, str):
+                bundled_ref = top_ref
+        bundled_policy_value = bundled_def.get("update_policy")
+        if isinstance(bundled_policy_value, str):
+            bundled_policy = bundled_policy_value
+
     for path in (
         project_root / "agent-config.yaml",
         project_root / "agent-config.local.yaml",
@@ -2060,12 +2447,119 @@ def _has_explicit_default_override(
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("name") != name:
                 continue
-            if any(
-                key in entry
-                for key in ("source", "ref", "passive", "active", "update_policy")
-            ):
+            # v0.6.0 refinement: shape-override keys (passive / active)
+            # always count as a deliberate pin.
+            if "passive" in entry or "active" in entry:
+                return True
+            # v0.6.0 refinement: ref / update_policy count only when
+            # they DEVIATE from the bundled-manifest default. An entry
+            # carrying source.ref that matches the bundled ref is what
+            # auto-reconciliation produces and must not be classified
+            # as a pin.
+            entry_ref = ""
+            source = entry.get("source")
+            if isinstance(source, dict):
+                src_ref = source.get("ref")
+                if isinstance(src_ref, str):
+                    entry_ref = src_ref
+            if not entry_ref:
+                top_ref = entry.get("ref")
+                if isinstance(top_ref, str):
+                    entry_ref = top_ref
+            if entry_ref and entry_ref != bundled_ref:
+                return True
+            entry_policy = entry.get("update_policy")
+            if isinstance(entry_policy, str) and entry_policy != bundled_policy:
                 return True
     return False
+
+
+def _rewrite_auto_reconciled_default_refs(project_root: Path) -> set[str]:
+    """Advance minimal auto-reconciled bundled-default refs in project YAML.
+
+    A minimal default-source row with no ``passive`` / ``active`` /
+    ``update_policy`` keys is aa reconciliation residue, not a durable
+    user pin. Durable pins must carry an explicit shape override (those
+    keys) or a deliberate policy override. v0.6.0 deep-review Round 2
+    finding: without this rewrite, the ``random``-project shape
+    (`{name, source: {url, ref: <stale>}}`) is mis-classified as a
+    deliberate pin by `_has_explicit_default_override` (because the ref
+    deviates from bundled), so the canonical apply path leaves the
+    stale ref in `agent-config.yaml` indefinitely. Smoke item 28
+    requires all three artifacts (yaml, lock, AGENTS.md) to converge
+    under bare `anywhere-agents`; this helper closes the yaml side.
+
+    Returns the set of pack names whose ref was rewritten (empty set
+    when nothing matched).
+    """
+    try:
+        import yaml
+    except ImportError:
+        return set()
+
+    path = project_root / "agent-config.yaml"
+    try:
+        data = _read_yaml_or_none(path)
+    except _VerifyParseError:
+        return set()
+    if not isinstance(data, dict):
+        return set()
+
+    key = "packs" if isinstance(data.get("packs"), list) else "rule_packs"
+    entries = data.get(key)
+    if not isinstance(entries, list):
+        return set()
+
+    rewritten: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if name not in _DEFAULT_V2_SELECTIONS:
+            continue
+        if "passive" in entry or "active" in entry or "update_policy" in entry:
+            continue
+
+        bundled = _bundled_default_for_name(name)
+        if not isinstance(bundled, dict):
+            continue
+        bundled_source = bundled.get("source")
+        if not isinstance(bundled_source, dict):
+            continue
+        bundled_url = bundled_source.get("repo") or bundled_source.get("url")
+        bundled_ref = bundled_source.get("ref") or bundled.get("ref")
+        if not isinstance(bundled_url, str) or not isinstance(bundled_ref, str):
+            continue
+
+        source = entry.get("source")
+        if not isinstance(source, dict):
+            continue
+        entry_url = source.get("repo") or source.get("url")
+        entry_ref = source.get("ref") or entry.get("ref")
+        # v0.6.0 deep-review Round 3: only rewrite refs that are KNOWN
+        # aa-reconciliation residue. A minimal default-name entry whose
+        # ref is not in the allow-list is a deliberate user pin (per
+        # pack-architecture.md:678 BC-guard contract) and must survive.
+        known_auto_refs = _AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(name, set())
+        if (
+            isinstance(entry_url, str)
+            and isinstance(entry_ref, str)
+            and _normalize_url(entry_url) == _normalize_url(bundled_url)
+            and entry_ref in known_auto_refs
+            and entry_ref != bundled_ref
+        ):
+            source["ref"] = bundled_ref
+            entry.pop("ref", None)
+            rewritten.add(name)
+
+    if not rewritten:
+        return set()
+
+    out_text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(out_text, encoding="utf-8")
+    os.replace(str(tmp), str(path))
+    return rewritten
 
 
 def _classify_pack_states(user, project, lock, lock_health):
@@ -2462,18 +2956,24 @@ def _pack_verify(user_config_path, project_root, args):
 
     bad = [r for r in rows if r["state"] != _VERIFY_STATE_DEPLOYED]
     if update_count > 0:
+        # v0.6.0 Phase 5: recommend the canonical bare command. The
+        # legacy ``pack verify --fix`` is now a compatibility alias
+        # that runs the same canonical apply path; teaching the
+        # canonical command directly avoids reinforcing the legacy
+        # surface in fresh consumer-facing output.
         print("", file=sys.stdout)
         print(
             f"ℹ {update_count} pack(s) have updates available "
-            "(run `pack verify --fix` to apply).",
+            "(run `anywhere-agents` to apply).",
             file=sys.stdout,
         )
     if not bad:
         return 0
     if any(r["state"] == _VERIFY_STATE_USER_ONLY for r in bad):
+        # v0.6.0 Phase 5: recommend the canonical bare command.
         print("", file=sys.stdout)
         print(
-            "To deploy: run `anywhere-agents pack verify --fix` "
+            "To deploy: run `anywhere-agents` "
             "(writes rule_packs: entries to agent-config.yaml and "
             "invokes the composer).",
             file=sys.stdout,
@@ -2595,6 +3095,14 @@ def _pack_verify_fix(user_config_path, project_root, args):
                     f"self-heal of {user_config_path}; skipping rewrite"
                 )
 
+    # v0.6.0 deep-review Round 2: advance any stale auto-reconciled
+    # bundled-default refs in agent-config.yaml BEFORE the verify-gather
+    # classifies them as deliberate user pins. Without this, the
+    # `random`-project shape (`{name, source: {url, ref: <stale>}}`)
+    # would be left untouched indefinitely. See
+    # `_rewrite_auto_reconciled_default_refs` docstring for details.
+    _rewrite_auto_reconciled_default_refs(project_root)
+
     try:
         rows, env_var_value = _verify_gather(user_config_path, project_root)
     except _VerifyParseError as exc:
@@ -2681,13 +3189,57 @@ def _pack_verify_fix(user_config_path, project_root, args):
                 _VERIFY_STATE_BUNDLED_DRIFT,
             )
         ]
+        # v0.6.0 Phase 4: build composer env_extra so the no-apply-drift
+        # CLI flag threads through to the subprocess. The flag wins over
+        # the env var per pack-architecture.md § "aa v0.6.0" Q1; we
+        # implement that by passing the CLI flag directly to the composer
+        # via argv (composer's argparse owns the flag).
+        composer_argv: tuple[str, ...] = ()
+        if getattr(args, "no_apply_drift", False):
+            composer_argv = ("--no-apply-drift",)
+        # v0.6.0 Phase 4: detect upstream prompt-policy drift so the
+        # canonical-apply path runs even when every pack reports
+        # DEPLOYED. The v0.5.x message "--fix: nothing to repair" was
+        # misleading: it printed even when ``latest_known_head !=
+        # resolved_commit``, leaving drift silently unapplied. The
+        # signal is the same one ``_pack_verify`` uses: any pack-lock
+        # entry whose recorded ``resolved_commit`` differs from the
+        # ``latest_known_head`` recorded by the v0.5.2 ls-remote pass.
+        has_prompt_policy_drift = _has_pack_lock_commit_drift(project_root)
         if not bad:
+            # v0.6.0 Phase 4: when there's actual upstream drift, route
+            # through the composer so the apply path emits the new
+            # stderr summary line. The composer is idempotent on the
+            # no-drift case but we skip the call when no drift signal
+            # exists to keep the empty-project case quiet.
+            if has_prompt_policy_drift:
+                if getattr(args, "no_deploy", False):
+                    # --no-deploy opts out of composer; still run
+                    # generator for CLAUDE.md coherence.
+                    _run_generator_only(project_root)
+                    return 0
+                print("", file=sys.stdout)
+                print(
+                    "--fix: invoking composer to apply prompt-policy drift "
+                    "and refresh pack-lock entries...",
+                    file=sys.stdout,
+                )
+                rc = _invoke_composer_with_gen_fallback(
+                    project_root, *composer_argv,
+                )
+                if rc != 0:
+                    log(
+                        f"error: composer failed (rc={rc}). Recovery: "
+                        "back up local edits to managed files and rerun "
+                        "`anywhere-agents`."
+                    )
+                    return rc
+                return 0
+            # No drift, no bad: legacy v0.5.8 nothing-to-repair path
+            # preserved (generator-only heal). The "nothing to repair"
+            # output stays so existing v0.5.x test pins continue to pass.
             print("", file=sys.stdout)
             print("--fix: nothing to repair.", file=sys.stdout)
-            # v0.5.8: Gap B — even when pack-lock is fully DEPLOYED, the
-            # generator may be out of date (e.g., stale CLAUDE.md after a
-            # pipx --force upgrade).  Run it as a final coherence step.
-            # Gated by --no-deploy so CI / offline callers can opt out.
             if not getattr(args, "no_deploy", False):
                 _run_generator_only(project_root)
             return 0
@@ -2708,12 +3260,15 @@ def _pack_verify_fix(user_config_path, project_root, args):
                 file=sys.stdout,
             )
             # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent on abort.
-            rc = _invoke_composer_with_gen_fallback(project_root)
+            # v0.6.0: thread --no-apply-drift to composer when set.
+            rc = _invoke_composer_with_gen_fallback(
+                project_root, *composer_argv,
+            )
             if rc != 0:
                 log(
                     f"error: composer failed (rc={rc}). Recovery: back up "
                     "local edits to managed files and rerun "
-                    "`pack verify --fix`."
+                    "`anywhere-agents`."
                 )
                 return rc
             print("✓ Deployed.", file=sys.stdout)
@@ -2727,7 +3282,7 @@ def _pack_verify_fix(user_config_path, project_root, args):
         print(
             f"--fix: no automatic repair for {len(bad)} pack(s): "
             f"{unresolved}. Resolve these rows manually, then rerun "
-            "`pack verify --fix`.",
+            "`anywhere-agents`.",
             file=sys.stdout,
         )
         return 1
@@ -2889,12 +3444,16 @@ def _pack_verify_fix(user_config_path, project_root, args):
         file=sys.stdout,
     )
     # v0.5.8: gen-fallback wrapper keeps CLAUDE.md coherent on abort.
-    rc = _invoke_composer_with_gen_fallback(project_root)
+    # v0.6.0 Phase 4: thread --no-apply-drift through to composer.
+    composer_argv: tuple[str, ...] = ()
+    if getattr(args, "no_apply_drift", False):
+        composer_argv = ("--no-apply-drift",)
+    rc = _invoke_composer_with_gen_fallback(project_root, *composer_argv)
     if rc != 0:
         log(
             f"error: composer failed (rc={rc}). Configs are persistent; "
             "back up local edits to managed files and rerun "
-            "`pack verify --fix`."
+            "`anywhere-agents`."
         )
         return rc
     repaired = len(user_only_rows) + len(project_only_rows)

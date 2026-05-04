@@ -19,8 +19,10 @@ This module validates structure and fails closed at parse time with a
   manifest packs is preserved as defense in depth; the v0.5.0 auth chain
   handles private fetch via inline-selection sources at the compose layer.
 - An ``update_policy`` value outside ``{locked, auto, prompt}``. As of
-  v0.5.0, ``auto`` on active entries is accepted; only unknown values
-  raise.
+  v0.6.0, ``auto`` on **active** entries is rejected (restoration of the
+  pre-v0.5.0 manifest error per pack-architecture.md § "Source resolution
+  and active-code trust"); ``auto`` on passive entries remains accepted.
+  Unknown values continue to raise as before.
 - A ``kind:`` value outside the known active kinds.
 
 No network or filesystem side effects happen here; parsing is pure.
@@ -241,6 +243,35 @@ def _validate_v2_pack(path: Path, idx: int, entry: dict[str, Any]) -> None:
 
     active = entry.get("active")
     if active is not None:
+        # v0.6.0 Q5 — pack-level update_policy: auto on a pack with
+        # active entries is the supply-chain risk that update_policy:
+        # prompt was designed to gate. Entry-level auto is rejected
+        # below in _validate_active; the pack-level shape (which is
+        # how aa's bundled manifests express the policy) must reject
+        # here, before the entries are dispatched. See
+        # pack-architecture.md:670 + :206 (trust-model paragraph).
+        if isinstance(active, list) and update_policy == "auto":
+            first_to = "<files[].to missing>"
+            for active_entry in active:
+                if not isinstance(active_entry, dict):
+                    continue
+                files = active_entry.get("files")
+                if not isinstance(files, list):
+                    continue
+                for mapping in files:
+                    if not isinstance(mapping, dict):
+                        continue
+                    candidate = mapping.get("to")
+                    if isinstance(candidate, str) and candidate:
+                        first_to = candidate
+                        break
+                if first_to != "<files[].to missing>":
+                    break
+            raise ParseError(
+                f"pack {entry['name']!r}: active entry at files[].to "
+                f"{first_to!r} uses 'update_policy: auto'; rewrite to "
+                "'prompt' for default-apply or 'locked' for fail-closed"
+            )
         _validate_active(path, idx, entry["name"], active, pack_hosts)
 
 
@@ -320,11 +351,13 @@ def _validate_active(
                 f"{type(required).__name__})"
             )
 
-        # v0.5.0: active entries may carry update_policy: auto. The parse-time
-        # rejection from v0.4.0 was removed because compose now resolves the
-        # three-mode policy (locked / auto / prompt) before any apply step,
-        # and the active-code trust gate moved to dispatch / compose. Only
-        # validate that the policy is a known value when explicitly set.
+        # v0.6.0: re-reject update_policy: auto on active entries. The
+        # trust-model paragraph in pack-architecture.md (§ "Source resolution
+        # and active-code trust") and the churn-semantics paragraph already
+        # state "Active entries never use 'auto'; attempting to set it on an
+        # active entry is a manifest error." v0.5.0 silently dropped the
+        # parse-time check; v0.6.0 restores it. Passive entries with
+        # update_policy: auto remain accepted (silent-refresh trust model).
         active_update_policy = entry.get("update_policy")
         if (
             active_update_policy is not None
@@ -335,6 +368,24 @@ def _validate_active(
                 f"({pack_name}) unknown 'update_policy' "
                 f"{active_update_policy!r}; expected one of "
                 f"{sorted(KNOWN_UPDATE_POLICIES)}"
+            )
+        if active_update_policy == "auto":
+            # Surface the first files[].to path for the actionable hint;
+            # falls back to a placeholder when the files list is missing
+            # or malformed (the dedicated files-list validation below will
+            # then raise the precise structural error).
+            first_to = "<files[].to missing>"
+            files = entry.get("files")
+            if isinstance(files, list) and files:
+                first = files[0]
+                if isinstance(first, dict):
+                    candidate = first.get("to")
+                    if isinstance(candidate, str) and candidate:
+                        first_to = candidate
+            raise ParseError(
+                f"pack {pack_name!r}: active entry at files[].to "
+                f"{first_to!r} uses 'update_policy: auto'; rewrite to "
+                "'prompt' for default-apply or 'locked' for fail-closed"
             )
 
         _validate_files_list(

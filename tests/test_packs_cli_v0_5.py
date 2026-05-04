@@ -2847,6 +2847,15 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
             user_config_path.parent.mkdir(parents=True)
             user_config_path.write_text("packs: []\n", encoding="utf-8")
 
+            # v0.6.0 evidence sentinel: cli._bootstrap_main inspects
+            # `Path.cwd() / "AGENTS.md"` to credit recovery; without an
+            # explicit chdir + sentinel this test would be cwd-sensitive
+            # (passes when pytest runs from a repo root that has AGENTS.md,
+            # fails on a clean shell like spark Ubuntu running from $HOME).
+            (pathlib.Path(d) / "AGENTS.md").write_text(
+                "# evidence sentinel\n", encoding="utf-8"
+            )
+
             captured: list[list[str]] = []
 
             def fake_main(argv: list[str] | None = None) -> int:
@@ -2856,15 +2865,20 @@ class V054BootstrapAutoReconcileTests(unittest.TestCase):
             class FakeResult:
                 returncode = 1  # bootstrap script failed
 
-            with patch.object(cli, "_user_config_path", return_value=user_config_path), \
-                 patch("subprocess.run", return_value=FakeResult()), \
-                 patch("urllib.request.urlretrieve"), \
-                 patch.object(cli, "_detect_legacy_ac", return_value=False), \
-                 patch.object(cli, "main", side_effect=fake_main), \
-                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
-                rc = cli._bootstrap_main([])
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                with patch.object(cli, "_user_config_path", return_value=user_config_path), \
+                     patch("subprocess.run", return_value=FakeResult()), \
+                     patch("urllib.request.urlretrieve"), \
+                     patch.object(cli, "_detect_legacy_ac", return_value=False), \
+                     patch.object(cli, "main", side_effect=fake_main), \
+                     redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                    rc = cli._bootstrap_main([])
+            finally:
+                os.chdir(original_cwd)
 
-            # Gap A: reconcile runs, recovery succeeds → return 0.
+            # Gap A: reconcile runs, recovery succeeds, evidence present → return 0.
             self.assertEqual(rc, 0)
             # Reconcile must have been invoked.
             self.assertIn(["pack", "verify", "--fix", "--yes"], captured)
@@ -3045,17 +3059,19 @@ class V058VerifyFixAutoDeployTests(unittest.TestCase):
                              "composer must not run when there is nothing to repair")
 
     def test_fix_healthy_project_with_prompt_policy_drift_does_not_auto_deploy(self) -> None:
-        """v0.6.0 boundary: a healthy project where all packs are DEPLOYED but
-        ``latest_known_head != resolved_commit`` (an update is available upstream)
-        must NOT invoke the composer during ``pack verify --fix``.
+        """v0.6.0 PLAN inversion: this test was authored in v0.5.8 to pin
+        the (then-current) behavior that ``pack verify --fix`` must NOT
+        invoke the composer when ``latest_known_head != resolved_commit``,
+        and to fail explicitly the moment v0.6.0 crossed that boundary.
 
-        Prompt-policy drift (update availability) is a v0.6.0 concern.
-        v0.5.8 ``--fix`` only repairs structural broken states; detecting that
-        a newer upstream commit exists does NOT constitute a repairable defect
-        in v0.5.8 terms and must not trigger auto-deploy.
-
-        This guards the Q1 v0.6.0 boundary so a future change that accidentally
-        starts deploying on update-drift fails this test explicitly.
+        Per ``PLAN-aa-v0.6.0-update-flow-coherence.md`` § "Phase 4 — Inline
+        prompt-policy drift apply (Q1) with skip overrides", v0.6.0 now
+        invokes the composer on prompt-policy drift so the canonical
+        apply path can apply the update inline (or skip per
+        ``--no-apply-drift`` / ``ANYWHERE_AGENTS_UPDATE=skip``). The test
+        is therefore inverted: composer MUST be invoked when there is
+        upstream commit drift on a deployed pack, and the misleading
+        "nothing to repair" message no longer appears in that case.
         """
         from anywhere_agents.cli import _pack_verify_fix
         with tempfile.TemporaryDirectory() as d:
@@ -3133,20 +3149,21 @@ class V058VerifyFixAutoDeployTests(unittest.TestCase):
             finally:
                 os.chdir(cwd_before)
 
-            # Pack is DEPLOYED; latest_known_head drift is NOT a repairable
-            # defect in v0.5.8.  --fix must report nothing to repair and must
-            # NOT call the composer.
+            # v0.6.0 inversion: composer MUST be invoked so the prompt-
+            # policy commit drift can apply (or skip per --no-apply-drift).
             self.assertEqual(rc, 0)
             self.assertEqual(
-                len(composer_calls), 0,
-                "v0.5.8 must NOT auto-deploy for prompt-policy (update-available) drift; "
+                len(composer_calls), 1,
+                "v0.6.0 invokes the composer on prompt-policy drift so the "
+                "canonical apply path can apply the update inline; "
                 f"composer was invoked {len(composer_calls)} time(s)."
             )
-            self.assertIn(
+            self.assertNotIn(
                 "nothing to repair",
                 out_buf.getvalue(),
-                "--fix must report 'nothing to repair' when all packs are deployed "
-                "even if latest_known_head differs from resolved_commit."
+                "v0.6.0 no longer prints 'nothing to repair' when there is "
+                "upstream commit drift on a deployed pack; the canonical "
+                "apply path runs instead.",
             )
 
 

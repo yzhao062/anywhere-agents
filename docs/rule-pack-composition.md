@@ -139,6 +139,19 @@ Fields:
 | `packs[].description` | no | Short description. Surfaces in docs and error messages. |
 | `packs[].maintainer` | no | GitHub handle of the pack maintainer. |
 
+## `update_policy` boundary (v0.6.0)
+
+The v2 manifest accepts `update_policy:` per pack with three values: `auto` (silent refresh + stderr summary), `prompt` (apply by default + stderr summary), and `locked` (fail-closed). v0.6.0 restores the parse-time boundary first stated in the trust-model paragraph at `pack-architecture.md` line 208:
+
+| Entry kind | `update_policy: auto` | `update_policy: prompt` | `update_policy: locked` |
+|---|---|---|---|
+| Passive (raw text injected into `AGENTS.md`) | accepted | accepted | accepted |
+| Active (skill files, hooks, permission rules, command pointers) | **rejected at parse** | accepted | accepted |
+
+The bundled-default policy table flips in v0.6.0: `agent-style` (passive) → `auto`, `aa-core-skills` (active) → `prompt`. Third-party packs default to `prompt`. Consumers can pin `update_policy: locked` in `agent-config.yaml` for any pack where they want fail-closed behavior; the bundled defaults are the *default*, not the only option.
+
+The active-entry rejection of `auto` is doc-coherence repair, not new policy. The trust-model rationale (silent install of arbitrary code from a mutable ref is the supply-chain risk `prompt` was designed to gate) has stood since the v0.4.0 manifest contract; v0.5.0 silently dropped the parser check, and v0.6.0 restores it. The parse error names the pack, the `files[].to` path of the offending active entry, the policy literal, and the required rewrite (`prompt` for default-apply behavior, `locked` for fail-closed).
+
 ## Dependency contract
 
 | Path | Requires |

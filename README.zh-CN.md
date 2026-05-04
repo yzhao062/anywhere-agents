@@ -43,7 +43,7 @@
 
 **你想 agent 写东西自动不带 AI 味儿。** 默认的 `agent-style` rule pack 禁了 ~45 个典型 AI-tell 词和格式（em-dash 当随手用、散文被切成 bullet 之类），再加一个 PreToolUse `guard`，任何 `.md` / `.tex` / `.rst` 的 tool 调用只要 outgoing 里撞上这些词，`guard` 直接 deny。没它，那些词就进你文件了；有它，写入在落盘前就被拦下来。
 
-**v0.5.0 已经发了：** Direct-URL pack fetch + auth chain + drift prompt 都已经发布。[`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 的**蓝本**：你自己的 profile、paper workflow、团队约定、自定义 skill，全都按这个形状来。模式就是 fork-and-replace。fork ap，把它的三个 pack 换成你自己的内容，打 tag 发布，然后让 `pack add` 指向你 fork 的版本：
+**v0.6.0 已经发了：** 裸 `anywhere-agents` 是规范的 apply 命令 —— 一个动词搞定 bootstrap、部署、对 mutable ref 的 prompt-policy drift 应用、以及 `CLAUDE.md` 重新生成。Direct-URL pack fetch + auth chain + drift 应用都跑在同一条命令里。[`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 的**蓝本**：你自己的 profile、paper workflow、团队约定、自定义 skill，全都按这个形状来。模式就是 fork-and-replace。fork ap，把它的三个 pack 换成你自己的内容，打 tag 发布，然后让 `pack add` 指向你 fork 的版本：
 
 ```bash
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
@@ -57,9 +57,9 @@ anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
 
 `bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
 
-`update_policy` 默认是 `prompt`：每次 bootstrap 把上游 drift 列出来，你说装才装。`update_policy: locked` 是给那种永远不能自动刷新的内容做的 per-pack 退出。`anywhere-agents pack add | remove | list` CLI 写一份用户级 manifest 到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`。从 v0.5.2 起，`pack add` 是一步到位：写行 + 跑 composer + 部署，全在一个命令里。
+从 v0.6.0 起，bundled 默认 policy 表是：`agent-style`（passive）→ `auto`（静默刷新 + stderr 摘要），`aa-core-skills`（active）→ `prompt`（默认应用 + stderr 摘要）。第三方 pack 默认 `prompt`。裸 `anywhere-agents` 对 mutable ref 上的 prompt-policy drift 走 inline apply；每个被命中的 pack 输出一行 stderr 摘要（`applied 1 update for <pack> @ <ref>: <old> -> <new>`)。每次跑要跳过：用 `ANYWHERE_AGENTS_UPDATE=skip` 环境变量（v0.5.0 契约）或 `--no-apply-drift` CLI flag（两者都设时 flag 优先）。需要长期 fail-closed：在 `agent-config.yaml` 里 pin `update_policy: locked`。`anywhere-agents pack add | remove | list` CLI 写一份用户级 manifest 到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`。从 v0.5.2 起，`pack add` 是一步到位：写行 + 跑 composer + 部署，全在一个命令里。
 
-`bootstrap` 就是同步那一步。换一台机器或 repo 再跑一遍，结果一致：自带默认 + 你声明的项目级 selection。
+`anywhere-agents` 就是同步那一步。换一台机器或 repo 再跑一遍，结果一致：自带默认 + 你声明的项目级 selection + 应用 drift + 刷新生成文件。
 
 ## 长什么样
 
@@ -227,28 +227,29 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 ![anywhere-agents pack CLI 演示：list（空）→ add --ref → list → remove → list](docs/pack-cli-demo.gif)
 
 ```bash
+anywhere-agents                              # 规范 apply 路径：bootstrap + 部署 + drift + 生成
 anywhere-agents pack list
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
-anywhere-agents pack update profile         # 更新 ap 装出来的其中一行
-anywhere-agents pack list --drift           # 只读 audit，对比 pack-lock.json
+anywhere-agents pack list --drift             # 只读 audit，对比 pack-lock.json
 anywhere-agents pack remove profile
-anywhere-agents uninstall --all             # 把当前项目里的所有东西清掉
+anywhere-agents uninstall --all               # 把当前项目里的所有东西清掉
 ```
 
 `pack add <url>` 读远端 `pack.yaml`，按 manifest 里声明的每个 pack 写一行用户级配置（比如 `agent-pack` 展开成 `profile`、`paper-workflow`、`acad-skills` 三行）。`--ref` 可选，省略时默认 `main`；生产环境 pin tag。CLI 写到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`（POSIX）或 `%APPDATA%\anywhere-agents\config.yaml`（Windows）。
 
 ### 验证 pack 部署状态
 
-`pack add` 在 v0.5.2 是一步到位：写用户级 config 行 + 跑 composer 把 pack 部署到当前项目，全在一个命令里。`pack verify` 用来审计现状或在多台机器之间对齐 drift：
+`pack add` 在 v0.5.2 是一步到位：写用户级 config 行 + 跑 composer 把 pack 部署到当前项目，全在一个命令里。`pack verify` 用来在不写盘的情况下审计现状：
 
 ```bash
 anywhere-agents pack verify              # 只读审计（user / project / lock 三层）
-anywhere-agents pack verify --fix --yes  # 写入缺失的 project rows + 跑 composer 部署
 ```
 
-`verify --fix` 在 v0.5.2 把以前"先写 rows、再 re-run bootstrap"的两步合成一个命令。
+要 reconcile drift，跑裸 `anywhere-agents` —— 规范 apply 路径会对 mutable ref 上的 prompt-policy drift 做 inline 应用，每个被命中的 pack 输出一行 stderr 摘要。每次跑要跳过：`ANYWHERE_AGENTS_UPDATE=skip` 环境变量或 `--no-apply-drift` CLI flag。
 
-**项目原本是从 `agent-config` bootstrap 的，怎么过渡？** 从 v0.5.2 起，直接跑 `anywhere-agents`（或者 `bash .agent-config/bootstrap.sh` 都行）。CLI 会自动从 `.agent-config/upstream` 或缓存的 `.git/config` 里识别遗留的 `yzhao062/agent-config` upstream，把旧 cache 删掉，再从 anywhere-agents bootstrap。检测逻辑同时存在于 Python CLI 和 raw shell 脚本里，任何入口都会触发一次性迁移。
+> **遗留别名（在所有 v0.x 中继续支持）。** v0.5.x 的 `anywhere-agents pack verify --fix [--yes]` 和 `anywhere-agents pack update [<name>]` 命令继续可用，并执行规范 apply 路径；每个会先在 stderr 打一行提示指向 `anywhere-agents`。用这两个老形式的 CI 脚本不用改就能用。要移除别名只在 v1.0 时允许，并需要附明确的 CI 迁移指引。
+
+**项目原本是从 `agent-config` bootstrap 的，怎么过渡？** 跑裸 `anywhere-agents`（或者 `bash .agent-config/bootstrap.sh` 都行）。CLI 会自动从 `.agent-config/upstream` 或缓存的 `.git/config` 里识别遗留的 `yzhao062/agent-config` upstream，把旧 cache 删掉，再从 anywhere-agents bootstrap。检测逻辑同时存在于 Python CLI 和 raw shell 脚本里，任何入口都会触发一次性迁移。
 
 之后用 [`agent-pack`](https://github.com/yzhao062/agent-pack) 把原本 `agent-config` 自带的 User Profile、paper workflow、3 个学术 skill（`bibref-filler`、`dual-pass-workflow`、`figure-prompt-builder`）补回来：
 
@@ -270,13 +271,13 @@ rule_packs:
     source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
 ```
 
-下一次 `bootstrap` 会把这些 pack 应用上，或者跑 `anywhere-agents pack verify --fix` 立即部署。
+跑裸 `anywhere-agents` 会把这些 pack 应用上，每个被命中的 pack 输出一行 stderr 摘要。
 
 项目级 `rule_packs:` 的那套 composition 契约（manifest、cache、离线行为、失败模式）见 [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md)。
 
 ## 下一步
 
-`v0.5.0` 发的是 direct-URL pack fetch、4-method auth chain（SSH agent、`gh` CLI token、`GITHUB_TOKEN`、匿名 fallback）、信任模型转向（`update_policy` 默认从 `locked` 改成 `prompt`），加上 `pack update` + `pack list --drift` 这两个 CLI 命令。`v0.5.2` 发的是端到端 pack 管理：`pack add` 一步到位（写用户级行、跑 composer、部署）、`pack verify --fix` 一个命令对齐 drift、AC→AA 迁移自动检测。`v0.6.0` 把 end-to-end command-log harness 接上来收紧 CI token-leak 覆盖；v0.5.0 自带的 redaction primitives 和 unit assertions 已经覆盖 auth-chain primitive。发布状态详情在 [changelog](CHANGELOG.md)。
+`v0.5.0` 发的是 direct-URL pack fetch、4-method auth chain（SSH agent、`gh` CLI token、`GITHUB_TOKEN`、匿名 fallback）、信任模型转向（`update_policy` 默认从 `locked` 改成 `prompt`），加上 `pack update` + `pack list --drift` 这两个 CLI 命令。`v0.5.2` 发的是端到端 pack 管理：`pack add` 一步到位（写用户级行、跑 composer、部署）、AC→AA 迁移自动检测。`v0.6.0` 把日常更新流合并成一个动词：裸 `anywhere-agents` 是规范 apply 路径；`pack verify --fix` 和 `pack update` 在所有 v0.x 中作为兼容别名继续可用；mutable ref 上的 prompt-policy drift 默认 inline 应用并打 stderr 摘要行,每次跑要跳过用 `ANYWHERE_AGENTS_UPDATE=skip` 或 `--no-apply-drift`。active entry 上的 `update_policy: auto` 在 parse 时被拒,带可执行的错误消息。发布状态详情在 [changelog](CHANGELOG.md)。
 
 [`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 作者的**蓝本**：profile、paper workflow 约定、团队约定、自定义 skill，所有你想跨项目复用的 personalization 都按这个形状来。v2 manifest schema 在那里以可工作的形态摆着。fork ap，把它的三个 pack（`profile`、`paper-workflow`、`acad-skills`）换成你自己的内容，打 tag 发布，然后用 `anywhere-agents pack add https://github.com/<your-user>/<your-repo> --ref <tag>`。从 v0.5.2 起这是一步到位：CLI 写用户级配置行 + 跑 composer 在一个命令里完成部署。
 

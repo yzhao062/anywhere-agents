@@ -1,6 +1,6 @@
 # Install
 
-Every install path does the same thing: download the shell bootstrap and run it in the current directory. The bootstrap is idempotent — safe to run every session even if `.agent-config/` already exists.
+Every install path does the same thing: install `anywhere-agents` and run the bare command in the current directory. As of v0.6.0, bare `anywhere-agents` is the canonical apply command — one verb that bootstraps the project, deploys declared state, applies prompt-policy drift on mutable refs, and regenerates `CLAUDE.md` / `agents/codex.md`. The command is idempotent — safe to run every session even if `.agent-config/` already exists.
 
 ```mermaid
 flowchart LR
@@ -80,6 +80,36 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 4. Merges shared `.claude/settings.json` keys into the project's copy. Project-only keys are preserved.
 5. Installs `scripts/guard.py` into `~/.claude/hooks/` and merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, `CLAUDE_CODE_EFFORT_LEVEL=max`, user-level permissions).
 6. Appends `.agent-config/` to the project's `.gitignore` if not already present.
+
+## Pack manifest schema (v0.6.0)
+
+Pack manifests declare passive entries (raw text injected into `AGENTS.md`) and active entries (skill files, hooks, permission rules, command pointers). v0.6.0 restores a parse-time check on the `update_policy:` field of active entries.
+
+`update_policy:` accepts three values:
+
+- `auto` — silent refresh on resolved-commit change. Allowed only on **passive** entries, where the wheel can pin the bundled ref and the content is plain text.
+- `prompt` — apply by default with a stderr summary line on resolved-commit change. Allowed on both passive and active entries; this is the safe default for active code from third-party packs.
+- `locked` — fail-closed on any drift. Allowed on both passive and active entries.
+
+Active entries with `update_policy: auto` are rejected at parse with an error like:
+
+```
+pack 'foo': active entry at files[].to '.claude/skills/foo/' uses 'update_policy: auto'; rewrite to 'prompt' for default-apply behavior or 'locked' for fail-closed
+```
+
+The error names the offending pack, the `files[].to` path of the active entry, the policy literal, and the required rewrite. v0.5.0 silently dropped this check; v0.6.0 restores it. The trust-model rationale (silent install of arbitrary code from a mutable ref is the supply-chain risk `prompt` was designed to gate) has stood since the v0.4.0 manifest contract; see `pack-architecture.md` line 208.
+
+## Same-ref source-path migration
+
+Consumers pinned to `agent-style v0.3.2` whose `.agent-config/pack-lock.json` records `source_path: docs/rule-pack.md` will see the lock auto-migrate to `source_path: docs/rule-pack-compact.md` on the next bare `anywhere-agents` run. The composer detects the path mismatch against the lock for the same `requested_ref`, routes through the drift-and-migrate flow, and rewrites the deployed `AGENTS.md` body to the compact source. This honors the v0.5.7 § Compatibility commitment that consumers requiring same-ref source-path switching should stay on aa v0.5.6 until v0.6.0.
+
+The migration prints a stderr summary line of the form:
+
+```
+migrated 1 path for agent-style @ v0.3.2: docs/rule-pack.md -> docs/rule-pack-compact.md
+```
+
+Consumers who want to keep the old full-body source must set an explicit override in `agent-config.yaml` (a `passive.files[].from: docs/rule-pack.md` block, or `update_policy: locked`); the BC-guard refinement in v0.6.0 preserves any entry with positive shape signals (`passive` / `active` keys, or `ref` / `update_policy` deviating from the bundled default).
 
 ## Prerequisites
 
