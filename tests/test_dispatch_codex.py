@@ -323,7 +323,13 @@ class _DispatchContractMixin:
                               f"stdin log must contain: {needle!r}")
 
     def test_codex_invoked_exec_dash_not_review(self) -> None:
-        """codex must be called as `exec -`, never `exec review ...`."""
+        """codex must be called as `exec [flags] -`, never `exec review ...`.
+
+        After the ac 7fa0559 / aa 2de6c32 sandbox-flag fix the dispatcher's
+        positional shape is `codex exec --sandbox <mode> -`. Stdin marker
+        `-` must always be the FINAL positional, and `review` must never
+        appear at any position.
+        """
         with _temp_dir() as td:
             tmpdir = Path(td)
             codex, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -336,8 +342,8 @@ class _DispatchContractMixin:
                                     f"codex must receive at least 2 args: {args}")
             self.assertEqual(args[0], "exec",
                              f"first arg must be 'exec', got: {args}")
-            self.assertEqual(args[1], "-",
-                             f"second arg must be '-' (stdin), got: {args}")
+            self.assertEqual(args[-1], "-",
+                             f"last arg must be '-' (stdin), got: {args}")
             self.assertNotIn("review", args,
                              f"'review' positional must not appear: {args}")
 
