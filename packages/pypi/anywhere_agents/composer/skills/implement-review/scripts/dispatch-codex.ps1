@@ -207,11 +207,24 @@ $ErrorActionPreference = 'Continue'
 # Stream interleaving: stdout and stderr merge into <state-dir>/tail in
 # real time as cmd writes them, so stall-watch observes live growth (no
 # need for the dual-file workaround used in the prior revision).
+# --sandbox danger-full-access aligns Auto-terminal's trust model with
+# Terminal-relay: the user invoked /implement-review on their own machine
+# and Codex has the same fs / network / shell access it would have in an
+# interactive Codex terminal. This also sidesteps Codex's workspace-write
+# sandbox CreateProcessAsUserW failed: 1312 bug on Windows 0.130.0, where
+# Codex's own shell runner could not spawn git / grep / pwsh subprocesses
+# so the review came back as "could not access files". Scope discipline
+# (review-only, save to Review-Codex.md, no commits / pushes) is enforced
+# at the prompt level, identical to Terminal-relay. For CI / shared
+# environments where this trust posture is too broad, override via
+# $env:CODEX_DISPATCH_SANDBOX (default: danger-full-access).
 $cmdHelper = Join-Path $stateDir 'run-codex.cmd'
 $codexBinEsc = $codexBin -replace '%', '%%'
 $tailPathEsc = $tailPath -replace '%', '%%'
 $promptFileEsc = $PromptFile -replace '%', '%%'
-$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`n""$codexBinEsc"" exec - > ""$tailPathEsc"" 2>&1 < ""$promptFileEsc""`r`n"
+$sandboxMode = if ($env:CODEX_DISPATCH_SANDBOX) { $env:CODEX_DISPATCH_SANDBOX } else { 'danger-full-access' }
+$sandboxModeEsc = $sandboxMode -replace '%', '%%'
+$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`n""$codexBinEsc"" exec --sandbox $sandboxModeEsc - > ""$tailPathEsc"" 2>&1 < ""$promptFileEsc""`r`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
 

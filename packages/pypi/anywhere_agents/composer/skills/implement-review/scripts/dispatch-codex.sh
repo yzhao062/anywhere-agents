@@ -121,9 +121,22 @@ if [ -x "$STALL_WATCH" ]; then
     STALL_WATCH_PID=$!
 fi
 
-# Run codex exec with prompt via stdin (NOT positional arg; not codex exec review)
+# Run codex exec with prompt via stdin (NOT positional arg; not codex exec review).
+#
+# --sandbox danger-full-access aligns Auto-terminal's trust model with
+# Terminal-relay: the user invoked /implement-review on their own machine
+# and Codex has the same fs / network / shell access it would have in an
+# interactive Codex terminal. This also sidesteps Codex's workspace-write
+# sandbox CreateProcessAsUserW failed: 1312 bug on Windows 0.130.0, where
+# Codex's own shell runner could not spawn git / grep / pwsh subprocesses
+# so the review came back as "could not access files". Scope discipline
+# (review-only, save to Review-Codex.md, no commits / pushes) is enforced
+# at the prompt level, identical to Terminal-relay. For CI / shared
+# environments where this trust posture is too broad, override via
+# CODEX_DISPATCH_SANDBOX (default: danger-full-access).
 CODEX_BIN="${CODEX_BIN:-codex}"
-"$CODEX_BIN" exec - < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
+CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
+"$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" - < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
 CODEX_EXIT=$?
 
 # Pipe last 80 lines of tail to stderr for caller visibility
