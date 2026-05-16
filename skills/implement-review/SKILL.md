@@ -1,13 +1,13 @@
 ---
 name: implement-review
-description: Review loop for staged changes. Detects content type, prepares a review request for Codex (terminal or plugin), categorizes feedback, revises, and iterates. Works for code, papers, proposals, or any text-based output.
+description: Review loop for staged changes. Detects content type, prepares a review request for Codex (Terminal-relay manual default, opt-in Auto-terminal codex-exec subprocess, or IDE plugin), categorizes feedback, revises, and iterates. Works for code, papers, proposals, or any text-based output.
 ---
 
 # Implement-Review
 
 ## Overview
 
-A review loop for staged changes. Claude Code detects the content type, sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the primary reviewer via two channels: terminal relay (default on all platforms) or IDE plugin. Other reviewers (Copilot, Gemini, Claude Code, etc.) are driven ad-hoc by the user through their own UI and only need to honor the `Review-<AgentName>.md` save contract defined in Phase 1c.
+A review loop for staged changes. Claude Code detects the content type, sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the primary reviewer via three channels: terminal relay (manual copy-paste, default on every platform), Auto-terminal (opt-in `codex exec` subprocess dispatch), or IDE plugin. Other reviewers (Copilot, Gemini, Claude Code, etc.) are driven ad-hoc by the user through their own UI and only need to honor the `Review-<AgentName>.md` save contract defined in Phase 1c.
 
 ## When to plan-review first
 
@@ -81,11 +81,21 @@ In the agent-config 0.1.9 release cycle, two plan-review rounds caught a High-se
 
 ## Codex Channels
 
-Two paths to Codex are supported. The skill picks the best available path automatically.
+Three paths to Codex are supported. Default is Terminal-relay (manual copy-paste). Auto-terminal (`codex exec` subprocess) is opt-in via the trigger rules in Path selection below. Plugin is user-initiated. The skill picks the channel based on those rules.
 
 ### Terminal path (default)
 
 The user has a Codex interactive terminal window open alongside Claude Code. Claude Code prepares a copy-pasteable review prompt (summary, diff, lens, round number) and presents it as a fenced text block. The user copies it into the Codex terminal, then relays the feedback back to Claude Code.
+
+### Auto-terminal path (opt-in, codex exec subprocess)
+
+When the user opts in via the trigger rules in Path selection below, Claude Code dispatches Codex via plain `codex exec` as a Bash subprocess in background. The dispatch script writes the prompt to a per-dispatch temp file under `%TEMP%` / `$TMPDIR`, feeds it on stdin (`codex exec -`), and emits a state-dir path to stdout for Phase 2 to consume. Codex writes its review to `Review-Codex.md` per the save contract; the same Phase 1d auto-watch fires on file appearance.
+
+This channel preserves the byte-identical prompt invariant with Terminal-relay: the assembled prompt bytes are the same regardless of channel. The dispatch script must NOT call `codex exec review`, `codex exec review --uncommitted`, or any other Codex `exec` subcommand, because those carry Codex's own built-in review prompt template which would compete with the skill's lens-aware prompts.
+
+The Auto-terminal path requires `codex` on PATH. Probe before dispatch; if absent, warn and downgrade to Terminal-relay for the round. On non-zero `codex exec` exit, timeout, or stdin-pipe failure (rare on Windows with PowerShell quirks or Bitdefender input-stream interception), downgrade to Terminal-relay for that round; do NOT add a truncated positional-argument fallback, which would break the prompt invariant. Sticky downgrade applies session-wide once Auto-terminal fails: subsequent rounds default to Terminal-relay until the user re-opts-in explicitly.
+
+**Script presence is also required**: if any of the `dispatch-codex` / `health-check` / `stall-watch` scripts for the current platform is missing (e.g., Phase B has not landed yet in a given checkout), this path is documented-only — Phase 1c automatically downgrades to Terminal-relay **without** setting sticky downgrade, because the absence is design state, not a runtime failure. See the "Auto-terminal path (opt-in)" subsection in Phase 1c for the script-presence probe specifics.
 
 ### Plugin path (IDE sidebar)
 
@@ -93,9 +103,16 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
 
 ### Path selection
 
-1. Default to the terminal path on all platforms.
-2. The plugin path is available on all platforms when the user initiates it, but it is not a default.
-3. The user can override at any time (e.g., "use the plugin", "use the terminal").
+1. **Default**: Terminal-relay (manual copy-paste) on every platform. Users who do not opt into another channel get the current Terminal-relay flow without modification.
+2. **Auto-terminal opt-in triggers**, evaluated in detection order at Phase 1c entry:
+   - Mid-flow override toward manual: "back to manual" / "next round manual" / "use terminal-relay" in the user's most recent message forces Terminal-relay.
+   - Mid-flow opt-in toward auto: "next round use cli" / "next round auto codex" forces Auto-terminal.
+   - Slash-arg opt-in: `/implement-review cli`, `/implement-review auto`, and `/implement-review auto-terminal` are equivalent synonyms; `auto` is the most natural keyword and is accepted.
+   - Plain-phrase opt-in in the invoking message: case-insensitive substring match on any of `cli mode`, `use cli`, `auto codex`, `use codex exec`, AND no negation word (`do not`, `don't`, `no`, `not`, `avoid`, `manual`) within 4 words before the matched phrase.
+3. **Plugin path** is available on every platform when the user initiates it (e.g., "use the plugin") but is never a default. The user can override at any time (e.g., "use the plugin", "use the terminal").
+4. **MCP forward-compat slot**: when an MCP-based Codex channel is later added (currently out of scope), it follows the same trigger pattern: `/implement-review mcp` slash arg + analogous plain phrases (`use mcp`, `mcp mode`) under the same negation guard. The trigger UX is a single extensible mechanism across all channels.
+
+Emit one line at Phase 1c entry stating which channel was picked and why (e.g., `Channel: Auto-terminal (triggered by "/implement-review auto"; codex on PATH at C:\...\codex.cmd)`), so the user can immediately override if it picked wrong.
 
 ## Prerequisites
 
@@ -157,7 +174,7 @@ All review prompts sent to the reviewer (regardless of channel) must include a s
 
 **Recording the expected reviewer set**: Before presenting the prompt, record two pieces of Claude-side state that Phase 2 will use:
 
-- **Expected reviewer set**: the reviewers the user intends to invoke this round. Infer from, in order of preference: (1) explicit user statement in this or a recent turn (e.g., "I'll run Codex and Copilot", "just Gemini", "only Codex"); (2) prior-round pattern with no change announced; (3) channel default of `{Codex}` when only the Codex terminal or plugin has been engaged and no other reviewer is in scope. If none of these produces a confident set, ask the user which reviewers they plan to invoke before presenting the prompt; do not guess.
+- **Expected reviewer set**: the reviewers the user intends to invoke this round. Infer from, in order of preference: (1) explicit user statement in this or a recent turn (e.g., "I'll run Codex and Copilot", "just Gemini", "only Codex"); (2) prior-round pattern with no change announced; (3) channel default of `{Codex}` when only Terminal-relay, Auto-terminal, or Plugin has been engaged and no other reviewer is in scope. If none of these produces a confident set, ask the user which reviewers they plan to invoke before presenting the prompt; do not guess.
 - **Phase 1c emission time**: the timestamp when the prompt is shown to the user. Used as an mtime tiebreaker in Phase 2 for files that cannot be classified by expected set alone.
 
 Phase 2 uses the expected set as a scope partition axis and the emission time as a freshness tiebreaker.
@@ -186,14 +203,38 @@ Prior findings:
 
 Then wait for the user to relay the reviewer's feedback or confirm that the reviewer has finished (see Phase 2 for how Claude Code picks up the review).
 
-**Plugin path**: Tell the user the changes are ready for review and suggest what to tell the reviewer in the plugin. The suggestion inherits the full save contract stated above. Example:
-> "Review the staged changes (round N). Focus on [detected lens]. Save your complete review to `Review-<YourAgentName>.md` in the repo root. Normalize your name: pick the stable product name, whitespace → one dash, keep only ASCII letters/digits/dashes, collapse repeated dashes, trim edge dashes. Examples: `Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Gemini-31-Pro.md`, `Review-Claude-Code.md`. Use `Review-Unknown.md` if the result is empty or you cannot identify yourself, and note the uncertainty at the top of the file. Overwrite any existing content for that filename. Start the file with `<!-- Round N -->`. Begin with a `Verification notes` paragraph or short bulleted list (what you compiled, ran, or verified; 'none' if nothing). Include file/diff scope and review lens. Separate findings into New and Previously raised (Fixed / Still open / Reopened / Deferred) sections. For any High-priority finding, include an exact rewrite with file:line. If the diff spans two or more variant targets (long + short, narrative + tracker, internal + external), review each target in its own top-level section and add a Cross-variant drift check at the end."
+**Auto-terminal path (opt-in)**: When the user has opted in per the trigger rules in Codex Channels > Path selection, **first check whether the required Auto-terminal scripts exist**. Look up all three script pairs in this order: repo-local `skills/implement-review/scripts/`, then bootstrapped `.agent-config/repo/skills/implement-review/scripts/`. Required scripts are `dispatch-codex.{ps1,sh}`, `health-check.{ps1,sh}`, and `stall-watch.{ps1,sh}`. If any required script for the current platform is missing, say `Auto-terminal is documented but unavailable until the Phase B scripts are present; using Terminal-relay for this round.` Then downgrade to Terminal-relay **without** setting sticky downgrade (the absence is design state, not failure; sticky should kick in only for real Auto-terminal runtime failures).
+
+If the scripts are present, Claude Code does NOT present a copy-paste prompt block. Instead, the skill:
+
+1. Probes `codex` on PATH (`Get-Command codex` on Windows, `command -v codex` on POSIX). If absent: warn the user and downgrade to Terminal-relay for this round.
+2. Probes session sticky-downgrade state. If active: downgrade to Terminal-relay (silent unless the user asks why).
+3. Assembles the prompt: byte-identical to the fenced Terminal-relay block above (same save contract, lens, focus, scope-challenge focus, prior findings).
+4. Writes the prompt to a temp file under `%TEMP%` / `$TMPDIR`.
+5. Invokes `skills/implement-review/scripts/dispatch-codex.{ps1,sh}` (repo-local first, then bootstrapped under `.agent-config/repo/`) with `--prompt-file <temp-path>`, `--round <N>`, `--expected-review-file Review-Codex.md`. Run via the Bash tool with `run_in_background=True` and `timeout=1200000` (20 minutes; sized for paper-review-scale prompts under xhigh reasoning effort). The dispatch script internally launches `stall-watch.{ps1,sh}` in the background to monitor tail-file growth; stall events are recorded to `<state-dir>/stall-warning` for Health check 9 to surface post-hoc.
+6. Reads the dispatch script's stdout: it emits exactly one line `STATE-DIR <abs-path>` (the only stdout line). Capture this path for Phase 2 to pass to `health-check --state-dir <abs-path>`. All other dispatch diagnostics plus the last-80 codex-exec lines go to the script's stderr.
+7. Phase 1d auto-watch runs unchanged; it polls for `Review-Codex.md` with the current round marker. Phase 2 prologue (defined in Phase 2 below) adds Auto-terminal-specific gating before silent advance.
+
+On Auto-terminal failure (non-zero exit, timeout, missing fresh review file, or Health check fail): downgrade to Terminal-relay for that round AND set sticky downgrade for the rest of the session. Do not add a truncated positional-argument fallback.
+
+**Script contract invariants** (apply to all `dispatch-codex` / `health-check` / `stall-watch` `.sh` and `.ps1` variants):
+
+- **State-dir lifecycle**: created per-dispatch by `dispatch-codex` under `%TEMP%` / `$TMPDIR`; preserved on any `WARN` or `FAIL` outcome so the user can inspect; deleted only after a clean Phase 2 intake completes silently. State-dir names carry `<pid>-<nonce>` and are never recycled across dispatches.
+- **Timestamp units**: all values in `<state-dir>/timestamp` and `<state-dir>/pre-mtime` are **Unix epoch seconds** (integer or float). mtime comparisons happen in UTC; cross-platform stat is the implementer's responsibility. POSIX may use `stat -c %Y` (GNU) or `stat -f %m` (BSD/macOS). PowerShell must convert `LastWriteTimeUtc` to Unix epoch seconds, for example `$utc = (Get-Item -LiteralPath <path>).LastWriteTimeUtc; ([DateTimeOffset]$utc).ToUnixTimeSeconds()` (two-step form, avoids cast-precedence confusion) or an equivalent Unix-epoch conversion. **Do NOT write Windows FILETIME values from `ToFileTimeUtc()`** (FILETIME is 100-nanosecond ticks since 1601-01-01, not Unix epoch; mixing units across `.ps1` and `.sh` would silently break Health check 2 freshness comparisons).
+- **stdin invocation shape**: PowerShell variant uses an explicit stream pipe (`Get-Content -Raw <prompt-file> | codex exec -`); POSIX variant uses redirection (`codex exec - < <prompt-file>`). Neither variant may use command substitution (`codex exec "$(cat <file>)"`) or positional-arg passing of the full prompt, because both hit ARG_MAX on Windows.
+- **`stall-watch` parent-PID liveness**: best-effort check every poll (`kill -0 <pid>` on POSIX, `Get-Process -Id <pid>` on Windows). The check is informational only; `stall-watch` **must never kill `codex exec`** under any circumstance. If `stall-watch` itself errors, it exits silently.
+- **Exit codes**: `dispatch-codex` propagates Codex's own exit code unchanged. `health-check` exits non-zero only when Phase 2 must refuse to read the review file (Check 1-6 FAIL or required dispatch state missing/stale); WARN-only outcomes (Check 7/8/9 hit, Substance heuristic flag) exit 0 with WARN lines on stdout. **Phase 2 must parse `health-check` stdout and treat any `WARN` line as a silent-advance blocker; exit code 0 alone is NOT sufficient to proceed silently.** `stall-watch` exits 0 regardless of what it detected.
+
+**Plugin path**: Tell the user the changes are ready for review and provide **the same review prompt content used by the Terminal-relay path** (save contract first, then round, diff scope, summary, lens, focus, scope-challenge focus when applicable, variant targets when applicable, prior findings for rounds 2+). The user pastes the same content into the plugin sidebar; the surrounding Markdown fence may be omitted if the plugin UI does not need it, but the prompt content itself must match Terminal-relay byte-for-byte (after the optional fence-strip). This preserves the cross-channel prompt invariant: Codex receives the same instructions regardless of channel.
+
+Example instruction to the user:
+> Paste the same review prompt shown for Terminal-relay into the Codex plugin sidebar. The plugin can inspect the repository directly (so the diff is visible without copying), but the prompt content itself must still include the save contract, round number, files changed, summary, lens, focus, scope-challenge focus when applicable, variant targets when applicable, and prior findings when applicable. Ask the plugin reviewer to save the complete review to `Review-<YourAgentName>.md` in the repo root using the normal Phase 1c save contract.
 
 Then wait for the user to relay the reviewer's feedback or confirm that the reviewer has finished.
 
-### 1d. Auto-watch (terminal path only)
+### 1d. Auto-watch (Terminal-relay and Auto-terminal channels)
 
-After Phase 1c emits the prompt and records the expected reviewer set + emission time, the terminal path **automatically** launches a background watcher that detects when the reviewer writes `Review-<expected>.md` and resumes Phase 2 — eliminating the manual "done" relay. The watcher runs by default; the user does not need to confirm. To opt out, the user can say so explicitly (e.g., "stop auto-watch", "manual mode this round") and the skill terminates the background process and falls through to the wait-for-user path. Plugin paths skip this subsection entirely (IDE plugins typically have the file open and gain little from auto-watch).
+After Phase 1c emits the Terminal-relay prompt or dispatches Auto-terminal (and records the expected reviewer set + emission/dispatch time), the skill **automatically** launches a background watcher that detects when the reviewer writes `Review-<expected>.md` and resumes Phase 2 — eliminating the manual "done" relay. The watcher runs by default for both channels; the user does not need to confirm. To opt out, the user can say so explicitly (e.g., "stop auto-watch", "manual mode this round") and the skill terminates the background process and falls through to the wait-for-user path. Plugin path skips this subsection entirely (IDE plugins typically have the file open and gain little from auto-watch).
 
 Launch the platform-appropriate watcher script immediately after emitting the prompt, using positional arguments `(FILE_GLOB, ROUND_NUMBER, EXPECTED_REVIEWERS)`. Look up the script in this order: `skills/implement-review/scripts/auto-watch.{sh,ps1}` (repo-local), then `.agent-config/repo/skills/implement-review/scripts/auto-watch.{sh,ps1}` (bootstrapped). Use the Bash variant on macOS / Linux and the PowerShell variant on Windows. `FILE_GLOB` is `Review-<expected>.md` for a single expected reviewer or `Review-*.md` for multiple; `EXPECTED_REVIEWERS` is the comma-separated normalized name list from Phase 1c (e.g., `Codex` or `Codex,GitHub-Copilot`). Run the watcher in the background so the skill can keep accepting user input while it polls.
 
@@ -204,6 +245,72 @@ When the watcher emits `DONE <path>`, resume Phase 2 immediately. The watcher's 
 When the watcher emits `TIMEOUT`, print `Auto-watch timed out after 60 min; reply 'done' when the reviewer finishes.` and resume the existing wait-for-user path. On explicit opt-out, user interrupt, or watcher launch failure, also fall through to the same wait-for-user path. The fallback is the unchanged Phase 1c → Phase 2 flow, so no Phase 2 logic depends on whether auto-watch was used.
 
 ## Phase 2: Intake Feedback
+
+### Phase 2.0 prologue: Auto-terminal Health check (Auto-terminal channel only; Terminal-relay and Plugin skip)
+
+For the Auto-terminal channel only, run 9 structural Health checks plus 3 Substance heuristics on `Review-Codex.md` before the existing freshness + scope partition begins. Required dispatch state files (`<state-dir>/pre-mtime`, `<state-dir>/timestamp`, `<state-dir>/tail`, plus optionally `<state-dir>/stall-warning` when stall-watch wrote it) come from the `dispatch-codex` and `stall-watch` scripts via dispatch-codex's stdout `STATE-DIR <abs-path>` line. Health checks 2, 7, 8, 9 and the Substance heuristics depend on these files.
+
+| # | Check | Failure → |
+|---|---|---|
+| 1 | `Review-Codex.md` exists at repo root | Surface failure; offer downgrade-retry via Terminal-relay |
+| 2 | File mtime is later than the Phase 1c dispatch timestamp AND later than `<state-dir>/pre-mtime` (catches stale file from prior round or task) | Same as 1 |
+| 3 | First line equals `<!-- Round N -->` | Same as 1 |
+| 4 | File size ≥ 500 chars | Same as 1 |
+| 5 | "Verification notes" section present (`Verification notes:` paragraph form OR `## Verification notes` / `**Verification notes**` heading) | Same as 1 |
+| 6 | If the dispatch prompt named a plan file or staged file list, the review's file scope mentions that current scope | Same as 1 |
+| 7 | **Review-text** suspicious-phrase scan: case-insensitive match in the saved review body on any of `could not`, `i cannot`, `failed to`, `permission denied`, `rate limit`, `unable to access`, `do not have access`, `not authenticated`, `authentication failed`, `unauthorized`, `timed out`, `timeout`, `quota`, `command not found`, `no such file`, `sandbox.*fail`. Exclude content inside backtick code spans (Codex meta-discussing the pattern list is not failure narration). | Do not hard-fail; block silent advance and surface: `Auto-terminal review-text scan: N suspicious phrases (lines L1, L2, ...) -- review may be partial. Proceed?` |
+| 8 | **Dispatch-tail** tool-failure scan: case-insensitive regex match in `<state-dir>/tail` (full codex-exec stdout+stderr, NOT the review body) for `tool ... failed`, `mcp tool failed`, HTTP/status 429/5xx, `rate limit`, `quota exceeded`, `insufficient_quota`, `connection refused/reset/timed out`, `context_length_exceeded`, `maximum context length`, errno forms `ENOSPC` / `EACCES` / `ETIMEDOUT` / `ECONNRESET` / `ECONNREFUSED`. See `skills/implement-review/scripts/health-check.{sh,ps1}` for the canonical pattern list. | Do not hard-fail; block silent advance and surface: `Auto-terminal dispatch-tail scan: N tool-failure markers -- Codex's CLI / OS / network layer leaked errors. Proceed?` |
+| 9 | **Stall-watch** check: `<state-dir>/stall-warning` file does NOT exist. The `stall-watch` background daemon (launched by `dispatch-codex` alongside `codex exec`) appends to this file when `<state-dir>/tail` has zero growth for ≥ 5 min, which signals Codex paused (CLI deadlock, network stall, long reasoning, or corrupted-prompt loop) without self-narrating an error. File present = at least one stall period occurred. | Do not hard-fail; block silent advance and surface: `Auto-terminal stall-watch: N stall period(s) detected (first at T+<min>); Codex output paused for 5+ min during run. Review may have been produced under stress. Proceed?` |
+
+> Implementer note: pipes inside Check 7 and Check 8 regex patterns are escaped as `\|` where Markdown-table parsing requires it. The runtime regex engine (Python `re`, PowerShell `-match`, etc.) must receive unescaped alternation (`|`). The health-check script should compile patterns from a source-of-truth list rather than from the rendered Markdown.
+
+**Outcomes**:
+
+- Checks 1-6 all pass AND Checks 7, 8, and 9 all clear (0 suspicious phrases, 0 tool-failure markers, no stall-warning file present) → eligible for silent proceed (still subject to Substance heuristics and Phase 1d coordination below).
+- Checks 1-6 all pass AND Check 7, 8, OR 9 hit (any marker or stall-warning present) → emit the corresponding one-line note(s); block silent advance; ask user to Proceed or Downgrade.
+- Any of Checks 1-6 fails → do not read the file; surface specifically which check failed; offer Terminal-relay retry.
+
+**Required dispatch state contract**: Missing or stale `<state-dir>/pre-mtime` or `<state-dir>/timestamp` is `FAIL` (Health check 2 freshness and the time-floor heuristic cannot be trusted). Missing `<state-dir>/tail` is `WARN check-8 1 missing-dispatch-tail` and blocks silent advance; it must NOT be silently treated as Check 8 hit 0.
+
+#### Substance heuristics (Auto-terminal only; soft signals; ANY hit blocks silent advance; never hard-fails)
+
+The 9 structural Health checks above only verify the file looks well-formed and the dispatch didn't visibly stall. They do NOT catch a review that is structurally clean but substantively shallow (Codex's tools silently failed mid-run; rate limit; context overflow; or the model did not engage). Three lens-aware heuristics fire after the 9 Health checks and surface independently. **Any hit blocks silent advance**: the user is prompted "Proceed? / Downgrade?" before Phase 2 reads the file.
+
+| Heuristic | Signal | Surface format |
+|---|---|---|
+| Time-to-completion floor | Elapsed wall time from `<state-dir>/timestamp` to `Review-Codex.md` finalization is less than 30s, when the dispatched prompt is ≥ 2000 chars | `Substance heuristic: review completed in <T>s for <P>-char prompt -- Codex may have bailed early. Spot-check before trusting.` |
+| Anchor density | Review body > 1000 chars AND zero file-line anchors matching `:\d+`, `\bline \d+\b`, `\blines? \d+\s*[-–]\s*\d+\b`, or `<file>:<line>` patterns | `Substance heuristic: review has <N> chars and 0 file:line anchors -- may be generic prose without code/line grounding. Spot-check High findings.` |
+| Scope-challenge engagement (plan-review lens only) | Review does NOT contain visible evidence of ALL three scope-challenge axes. Evidence per axis = `(a)` / `(b)` / `(c)` enumeration OR keyword coverage (case-insensitive): **Axis 1** (`scope` AND one of `smaller` / `larger`), **Axis 2** (one of `deferral` / `process tax` / `release cycle`), **Axis 3** (one of `simplest` / `do nothing` / `doing nothing` / `smaller path` / `shrink` / `docs only` / `document only` / `script only` / `no-op`). Axis-3 keyword set is intentionally broad to avoid false positives on substantive reviews. | `Substance heuristic: plan-review did not visibly engage scope-challenge axes <missing-axis-numbers>. May be incomplete per skill mandate.` |
+
+Substance heuristics are skipped for Terminal-relay and Plugin path (the user has direct eyes on the run).
+
+#### Phase 1d coordination (Auto-terminal-specific silent-intake rule)
+
+For Terminal-relay, auto-watch `DONE` is sufficient signal to silently advance into Phase 2. For Auto-terminal, `DONE` is necessary but not sufficient. Phase 2 may silently advance only when ALL of the following hold:
+
+1. Auto-watch emits `DONE <path>` (file appeared with current round marker).
+2. The dispatch subprocess exited 0 (Bash background task notification reports `exit code 0`).
+3. Health checks 1-6 all pass.
+4. Health check 7 hits 0 phrases.
+5. Health check 8 hits 0 markers.
+6. Health check 9 (stall-warning file absent) holds.
+7. Substance heuristics flag 0 signals.
+
+If 2 fails, 3 fails, 4 hits ≥ 1 phrase, 5 hits ≥ 1 marker, 6 detects the stall-warning file, or 7 flags ≥ 1 signal, Phase 2 stops at a human checkpoint with `Proceed? / Downgrade?`; no silent advance. Auto-watch `TIMEOUT` also stops at a human checkpoint.
+
+#### False-positive tuning principle
+
+The Health checks (especially Check 7) and Substance heuristics are intentionally soft (surface + block silent advance, never hard-fail) because false positives are expected. Observed FP modes during dogfooding:
+
+- Check 7 firing on Codex's own meta-discussion of the regex pattern list. Mitigated: Check 7 excludes content inside backtick code spans.
+- Substance axis-3 firing on synonym phrasings (`shrink to docs only` rather than `simplest path`). Mitigated: axis-3 keyword set broadened.
+- Anchor density firing on a precise convergence review with low anchor count. Accepted as rare; one-click Proceed.
+
+Operational principle: better to under-flag a real signal than to cry wolf so often the user clicks through every flag without reading. Alarm fatigue is not recoverable; once the user trains themselves to click past every surface, the silent-failure mitigation collapses. Track FP rate per check during the first ~10 Auto-terminal runs; if any check class exceeds 30% FP, tune the trigger criteria (broaden keywords, exclude additional contexts, raise size threshold) until signal-to-noise is workable.
+
+---
+
+### Phase 2.1: Partition and classify (all channels)
 
 Reviewers are instructed to write their review to a `Review-<AgentName>.md` file in the repository root, using their own self-reported name (see Phase 1c). When the user says a reviewer is done, or when multiple reviewers have been run in parallel for the same round, list the files matching `Review-*.md` at the repo root. Apply the two-axis partition described below (freshness + scope) to decide which files to read, and report any ignored files to the user.
 
