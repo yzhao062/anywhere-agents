@@ -132,55 +132,93 @@ if (Test-Path -LiteralPath $stallWatch -PathType Leaf) {
         -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
 }
 
-# Run codex exec with prompt via stdin (NOT positional arg; not codex exec review).
-# Use Start-Process -RedirectStandardInput <filepath>: Windows' process-creation
-# API reads the prompt file at byte level (no encoding conversion, no BOM, no
-# CRLF translation), matching the .sh path's `< $PromptFile` byte semantics and
-# preserving the byte-identical invariant declared in SKILL.md Phase 1c.
-# Avoids both: (1) PowerShell text pipeline `Get-Content | & <bin>`, which
-# re-encodes and can inject a UTF-8 BOM under PS 5.1; (2) System.Diagnostics
-# raw stream writes, which AV products sometimes flag because the same pattern
-# is used in process injection.
+# Resolve codex binary -----------------------------------------------------
+# Two real-world Windows pitfalls covered:
+# (1) npm / pnpm / yarn install codex as TWO files in the same PATH dir --
+#     an extensionless bash shim (`codex`) plus a `.cmd`/`.ps1` wrapper.
+#     CreateProcess matches the extensionless shim by exact name and
+#     fails ("not a valid Win32 application") because it has no PE header.
+#     Get-Command honors PathExt and returns the runnable .cmd/.exe.
+# (2) Microsoft Store App Execution Aliases under \WindowsApps\ would
+#     launch the Store rather than execute codex; skip those.
+# POSIX builds (pwsh on Linux/macOS) hit neither pitfall but the same
+# Get-Command lookup still resolves the extensionless executable; safe.
+#
+# Selection: prefer the FIRST extension-bearing candidate in PATH order.
+# Earlier revision used Sort-Object with a custom Expression scriptblock
+# to put extension-bearing entries before extensionless ones. Windows
+# PowerShell 5.1's Sort-Object is NOT stable under such custom keys --
+# reproduced live with PATH=A;B holding both A\codex.cmd and B\codex.cmd:
+# Sort-Object returned B first, so the dispatcher would pick the wrong
+# install on a user with multiple codex installs. The explicit two-pass
+# filter below preserves Get-Command's PATH-order output on every PS
+# version (5.1 and 7.x both verified).
 $codexBin = if ($env:CODEX_BIN) { $env:CODEX_BIN } else { 'codex' }
+$candidates = @(Get-Command -Name $codexBin -CommandType Application -ErrorAction SilentlyContinue |
+    Where-Object {
+        $src = [string]$_.Source
+        $src -and ($src -notlike '*\WindowsApps\*')
+    })
+$resolved = $candidates | Where-Object { $_.Extension } | Select-Object -First 1
+if (-not $resolved) {
+    $resolved = $candidates | Select-Object -First 1
+}
+if ($resolved) {
+    $codexBin = [string]$resolved.Source
+}
+# If still nothing resolvable, $codexBin may be an absolute path the
+# caller passed via $env:CODEX_BIN; let the invocation surface its own
+# error to the tail rather than guessing here.
+
 $tailPath = Join-Path $stateDir 'tail'
 
 $ErrorActionPreference = 'Continue'
 
-$stderrCap = Join-Path $stateDir 'tail.stderr-tmp'
+# Run codex exec with prompt via stdin (NOT positional arg; not codex exec
+# review). Spawn via a transient .cmd helper script. Three reasons:
+#
+# 1. Byte-parity: cmd's `< file > tail 2>&1` are byte-level OS-handle
+#    redirections that preserve the byte-identical prompt invariant
+#    declared in SKILL.md Phase 1c (no BOM injection, no CRLF drift).
+#    Matches the .sh path's `< \$PROMPT_FILE > tail 2>&1` semantics.
+#
+# 2. Session-token preservation: PowerShell's `Start-Process` with
+#    -RedirectStandardInput uses CreateProcessAsUserW under the hood,
+#    which strips the user's logon-session token when chaining child
+#    processes. codex then cannot spawn its own git/grep subprocess
+#    (Windows error 1312: "no logon session"). cmd /c uses plain
+#    CreateProcess, which inherits the calling thread's token cleanly
+#    so codex's children spawn normally.
+#
+# 3. AV behavior: standard Set-Content + invocation operator. The
+#    System.Diagnostics.Process.StandardInput.BaseStream.Write pattern
+#    used in an earlier revision was flagged by some AVs as a process-
+#    injection signature.
+#
+# Path handling: cmd treats `%NAME%` as env-var expansion. A user / tmp
+# / state-dir path containing `%` (e.g. project named `foo%bar`) would
+# be silently rewritten by cmd before codex saw the redirection. Escape
+# every `%` to `%%` in interpolated path values so cmd reads them as
+# literals. The helper is written as UTF-8 (no BOM) with a `chcp 65001`
+# prefix so non-ASCII user names (Cyrillic, CJK, accented Latin) survive
+# round-tripping through cmd's codepage layer; the earlier `-Encoding
+# ASCII` write rejected non-ASCII bytes entirely.
+#
+# Stream interleaving: stdout and stderr merge into <state-dir>/tail in
+# real time as cmd writes them, so stall-watch observes live growth (no
+# need for the dual-file workaround used in the prior revision).
+$cmdHelper = Join-Path $stateDir 'run-codex.cmd'
+$codexBinEsc = $codexBin -replace '%', '%%'
+$tailPathEsc = $tailPath -replace '%', '%%'
+$promptFileEsc = $PromptFile -replace '%', '%%'
+$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`n""$codexBinEsc"" exec - > ""$tailPathEsc"" 2>&1 < ""$promptFileEsc""`r`n"
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
 
-# Stream codex stdout directly to <state-dir>/tail so stall-watch can observe
-# real-time growth during the run (its Health check 9 signal depends on this).
-# Stderr is captured separately and appended after exit; this loses some
-# stream interleaving but preserves all diagnostic content. The earlier
-# variant of this script wrote both streams to side files and concatenated
-# only at exit, which silently broke stall-watch (tail did not exist during
-# the codex run, so no growth comparison was possible).
-$codexExit = 1
-try {
-    $proc = Start-Process -FilePath $codexBin `
-        -ArgumentList @('exec', '-') `
-        -RedirectStandardInput $PromptFile `
-        -RedirectStandardOutput $tailPath `
-        -RedirectStandardError $stderrCap `
-        -NoNewWindow -Wait -PassThru -ErrorAction Stop
-    $codexExit = $proc.ExitCode
-} catch {
-    [Console]::Error.WriteLine("dispatch-codex: failed to start codex: $_")
-    Set-Content -LiteralPath $tailPath -Value "dispatch-codex: failed to start codex: $_" -ErrorAction SilentlyContinue
-}
+& $cmdHelper
+$codexExit = $LASTEXITCODE
 
-# Append captured stderr to tail.
-if (Test-Path -LiteralPath $stderrCap -PathType Leaf) {
-    try {
-        $errText = Get-Content -Raw -LiteralPath $stderrCap -ErrorAction Stop
-        if ($errText) {
-            Add-Content -LiteralPath $tailPath -Value $errText -NoNewline -ErrorAction SilentlyContinue
-        }
-    } catch {
-        # Best-effort.
-    }
-    Remove-Item -LiteralPath $stderrCap -Force -ErrorAction SilentlyContinue
-}
+Remove-Item -LiteralPath $cmdHelper -Force -ErrorAction SilentlyContinue
 
 # Ensure the tail file exists even if codex emitted nothing -- Phase 2
 # Health check 8 distinguishes "tail empty" from "tail missing".
