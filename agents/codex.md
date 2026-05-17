@@ -148,22 +148,19 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
 5. **Hooks** — check `~/.claude/hooks/` for `guard.py` (PreToolUse) and `session_bootstrap.py` (SessionStart). If one is missing, include it in the Session check line as an issue.
 6. **Session check** — scan `.github/workflows/*.yml` for action version pins below the minimums in the GitHub Actions Standards section. Combine with any Codex-config or hook drift detected above. Emit `all clear` only when nothing needs attention.
 
-7. **Pack deployment** — perform this check exactly:
+7. **Pack deployment** — compute two counts:
 
-    a. Read user-level config: on Windows `%APPDATA%\anywhere-agents\config.yaml`; on POSIX `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`, default `~/.config/anywhere-agents/config.yaml`. If absent, `user_packs = []`.
+    **a. user_packs**: read `%APPDATA%\anywhere-agents\config.yaml` (Windows) or `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` / `~/.config/anywhere-agents/config.yaml` (POSIX); empty list if absent. `AGENT_CONFIG_PACKS` env var is excluded.
 
-    b. Read durable project config: `agent-config.yaml` then merge `agent-config.local.yaml` overrides by name. `AGENT_CONFIG_PACKS` env var is **excluded**. If both files absent, `project_packs = []`.
+    **b. project_packs**: read `agent-config.yaml` then merge `agent-config.local.yaml` by name; if both are absent, use an empty list. Local entries win on duplicates.
 
-    c. For each pack `u` in `user_packs`, normalize its identity tuple `(u.name, normalize_pack_source_url(u.source.url), u.source.ref)`. Find any pack `p` in `project_packs` with the same `u.name` (case-sensitive name match). If `project_packs` contains duplicate-named entries (e.g., the same name in both `agent-config.yaml` and `agent-config.local.yaml`), apply local-overrides-tracked: keep only the local entry. Count `u` toward `gap_count` if either: no matching `p` exists, OR `p`'s normalized identity tuple differs from `u`'s.
+    **c. gap_count**: for each `u` in user_packs, normalize `(name, normalize_pack_source_url(url), ref)`. Increment if no matching `p` in project_packs by case-sensitive name, OR if `p`'s normalized tuple differs from `u`'s.
 
-    d. Read `.agent-config/pack-lock.json` (the project-local lock written by the composer). For each entry in `data.packs`, count it toward `update_count` when **both** `latest_known_head` and `resolved_commit` are non-empty strings AND `latest_known_head != resolved_commit`. The optional `latest_known_head` / `fetched_at` fields land via `pack verify` (which runs `git ls-remote` opportunistically and lock-bracket-merges the result) and via composer fetches at install time. Old locks predating v0.5.2 omit both fields and contribute zero — no migration needed.
+    **d. update_count**: for each entry in `.agent-config/pack-lock.json` `data.packs`, increment when both `latest_known_head` and `resolved_commit` are non-empty AND they differ. (Lock entries predating v0.5.2 lack these fields and contribute zero.)
 
-    e. Compose the banner contribution from both counts. Each is a half-clause; drop the half whose count is 0; emit `all clear` only when both are 0:
-
-       - `gap_count > 0` → ``⚠ <gap_count> user-level pack(s) not deployed (run `anywhere-agents pack verify --fix`)``
-       - `update_count > 0` → ``ℹ <update_count> pack update(s) available (run `anywhere-agents pack verify --fix`)``
-
-       Append the surviving half-clauses to the Session check line, semicolon-separated. The CLI command differs from v0.5.1: v0.5.2 collapses the verify-then-bootstrap dance into `pack verify --fix`, which now invokes the composer subprocess after writing config rows.
+    **e. emit**: each non-zero count contributes a half-clause to the Session check line (semicolon-separated; `all clear` when both zero):
+    - gap_count > 0 → ``⚠ <gap_count> user-level pack(s) not deployed (run `anywhere-agents pack verify --fix`)``
+    - update_count > 0 → ``ℹ <update_count> pack update(s) available (run `anywhere-agents pack verify --fix`)``
 
 ## User Profile
 
@@ -186,20 +183,13 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
 
 ## Codex MCP Integration
 
-- Codex is available to Claude Code as an MCP server. Register it once at the user level so it applies to all projects and terminals (including PyCharm):
+- Codex can run as an MCP server callable from Claude Code. Register at user scope (NOT project scope; project-scoped entries do not propagate across directories):
   ```
   claude mcp add codex -s user -- codex mcp-server -c approval_policy=never
   ```
-- This writes to `~/.claude.json` top-level `mcpServers`. A session restart is required after registration for `/mcp` to pick it up.
-- **Migrating an existing registration:** If Codex was registered with the deprecated `on-failure` policy or without `-c approval_policy=never`, remove and re-add:
-  ```
-  claude mcp remove codex -s user
-  claude mcp add codex -s user -- codex mcp-server -c approval_policy=never
-  ```
-  On Windows, adjust the path as shown below.
-- **Gotcha:** Do not register under a project scope (e.g., from a specific working directory without `-s user`). That creates a project-scoped entry under `projects["<path>"].mcpServers` in `~/.claude.json`, which does not propagate to other directories.
-- Prerequisites: Node.js installed, Codex CLI installed (`npm install -g @openai/codex`), and `OPENAI_API_KEY` set.
-- **Recommended Codex defaults (as of April 2026):** Add or update these keys in `~/.codex/config.toml` on macOS/Linux or `%USERPROFILE%\.codex\config.toml` on Windows (create the file if it does not exist) so that both interactive sessions and the MCP server use the recommended default model with fast inference:
+  Writes to `~/.claude.json` `mcpServers`; session restart required for `/mcp` to pick it up. Available MCP tools after registration: `codex` (new prompt) and `codex-reply` (continue an existing session).
+- Prerequisites: Node.js + Codex CLI (`npm install -g @openai/codex`) + `OPENAI_API_KEY`.
+- **Recommended Codex defaults** (added to `~/.codex/config.toml` on POSIX or `%USERPROFILE%\.codex\config.toml` on Windows; the MCP server reads the same file as interactive sessions):
   ```toml
   model = "gpt-5.5"
   model_reasoning_effort = "xhigh"
@@ -208,21 +198,10 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
   [features]
   fast_mode = true
   ```
-  `service_tier = "fast"` selects the fast inference tier (1.5x speed, no quality reduction). For ChatGPT-authenticated users this costs 2x credits; API-key users pay standard API pricing. The `[features].fast_mode` flag gates the feature and defaults to `true`; set it explicitly alongside `service_tier` to persist the default in `config.toml`. Omit both if you prefer lower cost over latency. The MCP server reads the same `config.toml`, so these settings apply to both interactive sessions and MCP. These settings work identically on macOS, Linux, and Windows.
-- MCP tools available after registration: `codex` (new prompt) and `codex-reply` (continue an existing session).
-- **Windows note:** Claude Code launches MCP servers through bash, not cmd or PowerShell. This means `.cmd` wrappers and PowerShell variables like `$env:APPDATA` do not work. If `codex` is not on `PATH`, use the full path with forward slashes and **no `.cmd` extension** (npm installs a bash-compatible script alongside the `.cmd`):
-  ```
-  claude mcp add codex -s user -- C:/Users/<you>/AppData/Roaming/npm/codex mcp-server -c approval_policy=never
-  ```
-  Run `where codex` (cmd) or `Get-Command codex` (PowerShell) to find the actual path.
-- **MCP approval policy:** By default the Codex MCP server can prompt for approval on shell commands, which surfaces as "MCP server requests your input" dialogs in Claude Code. Pass `-c approval_policy=never` in the registration command (shown above) so the MCP server never asks for per-command approval; command failures return to Codex/Claude as tool errors. This trades away the deprecated `on-failure` retry prompt for unattended MCP operation. Claude Code's PreToolUse hooks still gate the outer MCP tool call, but they do not inspect each shell command that Codex runs inside the MCP server. Keep Codex sandboxing, repo rules, and command review discipline aligned with that trust boundary. For interactive Codex terminal sessions, prefer `approval_policy = "on-request"` in `~/.codex/config.toml`.
-- **Bitdefender false positives (Windows):** Bitdefender Advanced Threat Defense may flag Codex and Claude Code shell commands as "Malicious command lines detected." To suppress this, add exceptions in Bitdefender → Protection → Manage Exceptions. For each exception, enable the **Advanced Threat Defense** toggle (not just Antivirus). Recommended exceptions:
-  - `C:\Program Files\nodejs\node.exe` (process)
-  - `C:\Users\<you>\.local\bin\claude.exe` (process)
-  - `C:\Users\<you>\AppData\Roaming\npm\codex` (process)
-  - `C:\Users\<you>\AppData\Roaming\npm\codex.cmd` (process)
-  - `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe` (process, if Codex invokes PowerShell)
-- **Windows recommendation: use the terminal path.** On Windows (11 Build 26200+), the MCP path still has rough edges — residual approval prompts and Bitdefender false positives add friction even after the mitigations above. The terminal path (relay reviews via the Codex interactive terminal window) avoids both issues. Prefer the terminal path on Windows; use MCP on macOS/Linux where it works smoothly.
+  `service_tier = "fast"` enables 1.5x-speed inference (2x credits for ChatGPT auth; standard API pricing for API key); omit if cost matters more than latency.
+- **Windows PATH note**: Claude Code launches MCP servers through bash, not cmd or PowerShell, so `.cmd` wrappers and `$env:APPDATA` do not work. If `codex` is not on bash PATH, register with the full path using forward slashes and NO `.cmd` extension (e.g., `C:/Users/<you>/AppData/Roaming/npm/codex`). Run `where codex` (cmd) or `Get-Command codex` (PowerShell) to find it.
+- **`approval_policy=never` rationale**: without it, MCP shell commands trigger "MCP server requests your input" dialogs in Claude Code. With it, failures return to Codex/Claude as tool errors. Claude Code's PreToolUse hooks still gate the outer MCP tool call. For interactive Codex terminal sessions (NOT MCP), prefer `approval_policy = "on-request"` in `config.toml`.
+- **Windows recommendation: prefer the terminal path over MCP.** On Windows (11 Build 26200+), MCP has residual rough edges (approval prompts, AV false positives). The terminal path (Codex interactive window for reviews) avoids both. Prefer terminal on Windows; MCP is smoother on macOS/Linux.
 
 ## Writing Defaults
 
