@@ -85,6 +85,11 @@ nav:
     - implement-review:
       - skills/implement-review.md
       - Review lenses: skills/references/review-lenses.md
+      - 'Example reviews':
+        - 'Code (phased)': skills/references/example-reviews/example-code-phased.md
+        - 'Paper (verification)': skills/references/example-reviews/example-paper-verification.md
+        - 'Paper (multi-target)': skills/references/example-reviews/example-paper-multi-target.md
+        - 'Proposal (NSF)': skills/references/example-reviews/example-proposal-nsf.md
     - my-router:
       - skills/my-router.md
       - Routing table: skills/references/routing-table.md
