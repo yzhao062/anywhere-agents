@@ -742,11 +742,13 @@ class BannerGateTests(unittest.TestCase):
         self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
-class AutoWatchAllowTests(unittest.TestCase):
-    """The implement-review skill's auto-watch.ps1 watcher should auto-allow
-    on the PowerShell tool. Unrelated PowerShell calls fall through to the
-    existing permission flow. Bash invocations referencing the same path tail
-    are not affected because the auto-allow is keyed on tool_name.
+class ImplReviewPsAllowTests(unittest.TestCase):
+    """The implement-review skill's shipped PowerShell helpers (auto-watch,
+    health-check, dispatch-codex) should auto-allow on the PowerShell tool
+    when invoked via the call-operator. Unrelated PowerShell calls fall
+    through to the existing permission flow. Bash invocations referencing
+    the same path tail are not affected because the auto-allow is keyed on
+    tool_name.
     """
 
     def test_auto_watch_allowed_with_backslash(self):
@@ -885,6 +887,355 @@ class AutoWatchAllowTests(unittest.TestCase):
         self.assertEqual(hook["permissionDecision"], "allow")
         self.assertIsInstance(hook["permissionDecisionReason"], str)
         self.assertTrue(len(hook["permissionDecisionReason"]) > 0)
+
+    # --- health-check.ps1 (Phase 2.0) ---
+
+    def test_health_check_allowed_with_state_dir_args(self):
+        # Realistic Phase 2.0 invocation shape captured from a live session:
+        # `& '<path>\health-check.ps1' --state-dir '<tmp>...' --round 1
+        # --review-file Review-Codex.md`. Without auto-allow this triggers a
+        # manual approval prompt every review round.
+        cmd = (
+            "& 'C:\\Users\\me\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' --state-dir 'C:\\Users\\me"
+            "\\AppData\\Local\\Temp\\implement-review-codex-deadbeef-"
+            "round1-9268-fefc3103aff76c0a' --round 1 --review-file "
+            "Review-Codex.md"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_health_check_unrelated_path_not_allowed(self):
+        # Arbitrary health-check.ps1 elsewhere on disk does NOT auto-allow,
+        # mirroring the security guard for auto-watch.
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "& 'C:\\tmp\\health-check.ps1'"},
+        })
+        self.assertIsNone(resp)
+
+    def test_health_check_reason_names_leaf_script(self):
+        # The allow reason should name which leaf script matched so users
+        # debugging a surprise auto-allow can grep for it.
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review\\scripts"
+            "\\health-check.ps1' --state-dir 'C:\\tmp\\x' --round 1"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("health-check.ps1", reason)
+
+    # --- dispatch-codex.ps1 (Phase 1c) ---
+    # Normally invoked via Bash tool / pwsh -File, but cover the call-op
+    # shape for defense in depth in case a future flow uses it directly.
+
+    def test_dispatch_codex_allowed_via_call_operator(self):
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review\\scripts"
+            "\\dispatch-codex.ps1' --prompt-file 'C:\\tmp\\p.txt' "
+            "--round 1 --expected-review-file Review-Codex.md"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    # --- $env: prefix variants (real-world invocation shapes) ---
+
+    def test_dispatch_codex_with_env_prefix_allowed(self):
+        # Captured live: the skill sets $env:CODEX_BIN before dispatching
+        # to dodge the npm `codex` vs `codex.cmd` PATH collision on
+        # Windows. Without this branch the prefix breaks the leading-`&`
+        # anchor and forces a manual approval every retry.
+        cmd = (
+            "$env:CODEX_BIN = 'codex.cmd'; & 'C:\\Users\\me"
+            "\\PycharmProjects\\random\\.claude\\skills\\implement-review"
+            "\\scripts\\dispatch-codex.ps1' --prompt-file 'C:\\Users\\me"
+            "\\AppData\\Local\\Temp\\fhr-review-prompt-v2.txt' "
+            "--round 1 --expected-review-file Review-Codex.md"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_health_check_with_env_prefix_allowed(self):
+        # Parity with dispatch: setting STALL_THRESHOLD_SECONDS or any
+        # other env before health-check should also pass through.
+        cmd = (
+            "$env:STALL_THRESHOLD_SECONDS = '2'; "
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' --state-dir 'C:\\tmp\\x' "
+            "--round 1"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_multiple_env_assignments_allowed(self):
+        # Two env vars chained before the call operator must still
+        # match. This guards against future invocation shapes that set
+        # both CODEX_BIN and STALL_POLL_INTERVAL_SECONDS at once.
+        cmd = (
+            "$env:CODEX_BIN = 'codex.cmd'; "
+            "$env:STALL_POLL_INTERVAL_SECONDS = '30'; "
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\dispatch-codex.ps1' --prompt-file 'C:\\tmp\\p'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_env_prefix_with_untrusted_path_not_allowed(self):
+        # Security: the env-var prefix must not let a path tail outside
+        # the trusted set sneak through.
+        cmd = (
+            "$env:CODEX_BIN = 'malicious.exe'; "
+            "& 'C:\\tmp\\dispatch-codex.ps1' --prompt-file 'C:\\tmp\\p'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    # --- Round 1 regression: 4 guard-bypass patterns Codex flagged High ---
+    # Each of these passed the old single-flat-`\S+` env value + leading-`&`
+    # anchor + `(?=$|\s)` lookahead, smuggling arbitrary PowerShell past
+    # the auto-allow. The new safe-token grammar with `fullmatch` rejects
+    # them all; the tests below freeze that behavior so a future regex
+    # weakening cannot silently regress.
+
+    def test_bare_env_value_with_semicolon_not_allowed(self):
+        """Bare-value semicolon: `$env:X = foo;bar; & '<trusted>'`.
+
+        Old regex's bare value arm was `\\S+`, which matched `foo` and then
+        `\\s*;\\s*` consumed the `;`, leaving `bar; ` as a second statement
+        before the trusted call. PowerShell would execute `bar` as a bare
+        command between the env assignment and the trusted script -- a
+        full PS-execution channel through the auto-allow.
+        """
+        cmd = (
+            "$env:X = foo;bar; & 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' --state-dir 'C:\\tmp\\x' --round 1"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_double_quoted_dollar_subexpression_not_allowed(self):
+        """Double-quoted `$()`: `$env:X = "$(Write-Output evil)"; & '<trusted>'`.
+
+        Old regex's double-quoted arm was `"[^"]*"`, accepting any chars
+        inside the quotes. PowerShell expands `$()` inside double-quoted
+        strings at assignment time, so `Write-Output evil` (or anything)
+        ran before the trusted call.
+        """
+        cmd = (
+            "$env:X = \"$(Write-Output evil)\"; & 'C:\\proj\\.claude"
+            "\\skills\\implement-review\\scripts\\dispatch-codex.ps1' "
+            "--prompt-file 'C:\\tmp\\p'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_post_script_semicolon_command_not_allowed(self):
+        """Trailing `; <cmd>`: `& '<trusted>' ; Write-Output evil`.
+
+        Old regex used a `(?=$|\\s)` lookahead after the script path and
+        no end anchor, so any trailing statements after a space were
+        accepted as long as the prefix matched. The new grammar requires
+        every trailing arg to match a safe token (`;` is excluded),
+        and `\\s*$` anchors the whole match.
+        """
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\auto-watch.ps1' ; Write-Output evil"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_splatting_after_script_not_allowed(self):
+        """Splatting: `& '<trusted>' @params`.
+
+        Old regex's bare-path / trailing-args used `\\S+`, which matches
+        `@params`. PowerShell splatting expands `@params` into args from
+        a hashtable / array, opening an indirection channel that a
+        trusted-allow should not honor. The new grammar excludes `@` from
+        bare-safe tokens.
+        """
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' @params"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    # --- Round 2 regression: script-path-as-expansion + redirection ----
+    # The Round 1 grammar still captured the script path with
+    # `[^'"]+`, leaving two bypass classes open: (a) PS expansion inside
+    # double-quoted paths (`$()` subexpressions, `$env:VAR` lookups), and
+    # (b) redirection tokens (`>`, `2>`, `<`) accepted as bare args. Round
+    # 2's regex restricts the double-quoted path to the same safe-char
+    # set as env values and excludes `<>` from bare-safe.
+
+    def test_double_quoted_subexpression_in_script_path_not_allowed(self):
+        """`& "$(Write-Output evil)<trusted-tail>"`: PS expands $() at
+        call resolution time. The literal string ends with a trusted
+        tail, so the old tail-check approved it.
+        """
+        cmd = (
+            '& "$(Write-Output evil)C:\\proj\\.claude\\skills'
+            '\\implement-review\\scripts\\health-check.ps1" '
+            "--state-dir 'C:\\tmp\\x' --round 1"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_double_quoted_env_var_in_script_path_not_allowed(self):
+        """`& "$env:VAR\\<trusted-tail>"`: attacker pre-sets $env:VAR
+        before the call (env-prefix is auto-allowed). At runtime PS
+        resolves the variable, redirecting the call to a file the
+        attacker controls.
+        """
+        cmd = (
+            "$env:X = 'C:\\evil'; "
+            '& "$env:X\\skills\\implement-review\\scripts\\dispatch-codex.ps1" '
+            "--prompt-file 'C:\\tmp\\p'"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_stdout_redirect_after_script_not_allowed(self):
+        """`& '<trusted>' > file`: redirection token in args.
+
+        Old bare-safe set permitted `>` as a token, so dispatch's stdout
+        could be redirected to attacker-controlled paths.
+        """
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' > C:\\tmp\\out.txt"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_stderr_redirect_after_script_not_allowed(self):
+        """`& '<trusted>' 2> file`: stderr redirection."""
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' 2> C:\\tmp\\err.txt"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_stdin_redirect_after_script_not_allowed(self):
+        """`& '<trusted>' < file`: stdin redirection."""
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1' --x < C:\\tmp\\in.txt"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    # --- Round 3 regression: PowerShell statement-break via newline ----
+    # Python's `\s` character class matches `\r` and `\n`, but PowerShell
+    # treats those as statement separators. A grammar using `\s*` between
+    # tokens reads a newline as ordinary whitespace and accepts a second
+    # statement as a "trailing arg". Round 4 fix: restrict whitespace
+    # classes in the regex to [ \t] only, anchor with \A/\Z (not ^/$),
+    # and strip only " \t" from the input so CR/LF in the original
+    # command survives to break the match.
+
+    def test_lf_after_script_not_allowed(self):
+        """`& '<trusted>'\\nWrite-Output evil`: LF starts a new PS statement."""
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1'\nWrite-Output evil"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_crlf_after_script_not_allowed(self):
+        """`& '<trusted>'\\r\\nWrite-Output evil`: CRLF also starts a new statement."""
+        cmd = (
+            "& 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1'\r\nWrite-Output evil"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
+
+    def test_lf_after_env_and_script_not_allowed(self):
+        """env + script + LF + statement: realistic shape an attacker
+        might paste after an auto-allowed dispatch invocation."""
+        cmd = (
+            "$env:X = 'y'; & 'C:\\proj\\.claude\\skills\\implement-review"
+            "\\scripts\\health-check.ps1'\nWrite-Output evil"
+        )
+        resp = run_guard_with_payload({
+            "tool_name": "PowerShell",
+            "tool_input": {"command": cmd},
+        })
+        self.assertIsNone(resp)
 
 
 if __name__ == "__main__":

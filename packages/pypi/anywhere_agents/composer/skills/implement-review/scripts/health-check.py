@@ -83,9 +83,16 @@ AXIS_3_KEYWORDS = (
 def strip_code_spans(text: str) -> str:
     """Remove fenced ``` ... ``` blocks and inline `code` spans.
 
-    Health check 7 must exclude content inside backtick code spans so Codex
-    meta-discussing the pattern list does not count as failure narration
-    (SKILL.md FP-tuning principle).
+    Health checks 7 and 8 both apply this before pattern scanning so that
+    Codex meta-discussing the pattern list (e.g., quoting
+    `CreateProcessAsUserW failed: 1312` in its reasoning text or echoing a
+    SKILL.md snippet that names the patterns) does not count as real
+    failure narration. The same SKILL.md FP-tuning principle that
+    motivated this for the review body (Check 7) applies to the dispatch
+    tail (Check 8) -- whenever /implement-review runs on the
+    implement-review skill itself (or any review prompt that names the
+    pattern strings), Codex's stdout carries backticked references that
+    look like real tool errors without it.
     """
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]*`", "", text)
@@ -236,15 +243,45 @@ def main(argv: list[str] | None = None) -> int:
     else:
         emit("PASS", "check-7", "0-suspicious-phrases")
 
-    # ----- Check 8: dispatch-tail tool failures -----
+    # ----- Check 8: dispatch-tail tool failures (exclude code spans) -----
     if not tail_file.exists():
         emit("WARN", "check-8", "1", "missing-dispatch-tail")
     else:
         tail_text = tail_file.read_text(encoding="utf-8", errors="replace")
-        pattern_8 = re.compile("|".join(TOOL_FAILURE_PATTERNS), re.IGNORECASE)
-        hits = pattern_8.findall(tail_text)
-        if hits:
-            emit("WARN", "check-8", str(len(hits)), "tool-failure-markers")
+        tail_no_code = strip_code_spans(tail_text)
+        per_pattern_compiled = [
+            (p, re.compile(p, re.IGNORECASE)) for p in TOOL_FAILURE_PATTERNS
+        ]
+        per_pattern_counts: dict[str, int] = {}
+        total_hits = 0
+        for pat_src, pat_re in per_pattern_compiled:
+            n = len(pat_re.findall(tail_no_code))
+            if n:
+                per_pattern_counts[pat_src] = n
+                total_hits += n
+        if total_hits:
+            # Emit a compact breakdown alongside the WARN so downstream
+            # Claude can recognize known-noise patterns without re-grepping
+            # the tail. Example breakdown shape:
+            #   `1312:30 windows-sandbox:24 rate-limit:13 429:11`
+            # Downstream uses the FP-tuning doctrine in SKILL.md to map
+            # known-noise shapes (e.g. WSL-stub-bash 1312 burst when
+            # Substance heuristics pass) to a fast Proceed.
+            top = sorted(per_pattern_counts.items(), key=lambda kv: -kv[1])
+            breakdown_parts = []
+            for pat_src, n in top:
+                # Render a short pattern label: pick the longest run of
+                # word chars in the pattern, lowercased, max 20 chars.
+                # Falls back to the full raw pattern when no word run
+                # exists (rare).
+                words = re.findall(r"[A-Za-z0-9_]+", pat_src)
+                label = max(words, key=len).lower()[:20] if words else pat_src
+                breakdown_parts.append(f"{label}:{n}")
+            breakdown = " ".join(breakdown_parts)
+            emit(
+                "WARN", "check-8", str(total_hits),
+                "tool-failure-markers", f"breakdown={breakdown}",
+            )
         else:
             emit("PASS", "check-8", "0-tool-failure-markers")
 

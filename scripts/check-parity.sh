@@ -18,16 +18,30 @@
 #               it from either repo), .claude/settings.json,
 #               .githooks/pre-push, .github/workflows/real-agent-smoke.yml,
 #               .github/workflows/validate.yml,
-#               .claude/commands/*.md for each of the 4 shipped skills,
 #               skills/{implement-review,ci-mockup-figure,readme-polish}
-#               as recursive trees.
+#               as recursive trees, and the four shared-contract test
+#               files tests/test_{dispatch_codex,health_check,guard,
+#               prompt_byte_parity}.py (added 2026-05-16 to close the
+#               drift gap that broke aa CI on every shared-skill change;
+#               see the comment block above the strict_test_files loop
+#               for the rationale).
+#
+#               (v0.4.0 dropped the four shipped .claude/commands/*.md
+#               pointers from cross-repo STRICT; see the block-comment
+#               at "shipped .claude/commands pointers dropped from
+#               STRICT" below. The pointers still appear under
+#               STRICT (aa-internal) where they are checked against the
+#               wheel-bundled mirror.)
 #
 #   STRICT (aa-internal)
 #               aa source vs wheel-bundled composer mirror at
 #               packages/pypi/anywhere_agents/composer/. Independent of
-#               the cross-repo STRICT block above and only runs when the
-#               wheel mirror is present (so the script is a no-op for
-#               this category when invoked from ac). Covers
+#               the cross-repo STRICT block above; runs whenever $AA_ROOT
+#               points at an aa tree that contains the wheel mirror dir
+#               (which is the case for the default ac-to-sibling-aa
+#               invocation -- the block fires from ac too, not just from
+#               aa). Skipped only when $AA_ROOT lacks the mirror dir.
+#               Covers
 #               compose_packs.py, compose_rule_packs.py,
 #               generate_agent_configs.py, bootstrap/packs.yaml,
 #               scripts/packs/ recursive (excluding __pycache__/),
@@ -103,6 +117,34 @@ for f in "${strict_files[@]}"; do
   fi
 done
 
+# ---- STRICT: shared-contract test files (pin runtime behavior of shared scripts) ----
+# These tests assert the public contract of shared scripts that are themselves
+# in STRICT (dispatch-codex, health-check, guard, prompt body byte preservation).
+# Before this block landed, tests/ was aa-local and drifted: aa CI ran stale
+# assertions against fresh shared code, and every substantive shared-skill
+# change broke aa CI until a manual cp re-aligned the tests (e.g. aa 1295c60).
+# Gating these 4 files restores the property that a shared-contract change
+# proposed in either repo must mirror tests in the same commit. Each repo
+# may still have its own non-shared tests (aa: test_compose_packs.py,
+# test_pack_*.py; ac: test_repo.py, test_check_parity.py); those stay
+# aa-local and ac-local respectively.
+printf '\n== strict shared-contract tests ==\n'
+strict_test_files=(
+  tests/test_dispatch_codex.py
+  tests/test_health_check.py
+  tests/test_guard.py
+  tests/test_prompt_byte_parity.py
+)
+for f in "${strict_test_files[@]}"; do
+  if [ ! -f "$AC_ROOT/$f" ] || [ ! -f "$AA_ROOT/$f" ]; then
+    fail "$f (missing on one side)"
+    continue
+  fi
+  if ! diff -q "$AC_ROOT/$f" "$AA_ROOT/$f" >/dev/null 2>&1; then
+    fail "$f"
+  fi
+done
+
 # ---- (v0.4.0) shipped .claude/commands pointers dropped from STRICT ----
 # Since aa v0.4.0, the 4 shipped pointer files (implement-review,
 # my-router, ci-mockup-figure, readme-polish) are pack-emitted outputs
@@ -139,8 +181,10 @@ done
 # This block is independent of the cross-repo STRICT block above:
 # - cross-repo STRICT compares ac vs aa.
 # - aa-internal STRICT compares aa source vs the wheel-bundled mirror,
-#   both of which live inside the aa repo (so this block is a no-op when
-#   the script is run from ac, where the wheel mirror does not exist).
+#   both of which live inside the $AA_ROOT clone. The block fires from
+#   ac as well (against the sibling aa clone's mirror), not only from
+#   aa. Skipped only when $AA_ROOT points at an aa tree without the
+#   wheel composer dir.
 #
 # Drift policy: any byte-level difference fails the script with the
 # offending source-side path, matching the cross-repo STRICT exit shape.

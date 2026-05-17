@@ -325,10 +325,12 @@ class _DispatchContractMixin:
     def test_codex_invoked_exec_dash_not_review(self) -> None:
         """codex must be called as `exec [flags] -`, never `exec review ...`.
 
-        After the ac 7fa0559 / aa 2de6c32 sandbox-flag fix the dispatcher's
-        positional shape is `codex exec --sandbox <mode> -`. Stdin marker
-        `-` must always be the FINAL positional, and `review` must never
-        appear at any position.
+        The dispatcher's positional shape is `codex exec --sandbox <mode> -`
+        (the --sandbox flag was added to align Auto-terminal's trust model
+        with Terminal-relay; see test_codex_invoked_with_default_sandbox).
+        Stdin marker `-` must always be the FINAL positional, and the
+        `review` subcommand must never appear at any position because
+        that would trigger Codex's built-in review prompt template.
         """
         with _temp_dir() as td:
             tmpdir = Path(td)
@@ -346,6 +348,69 @@ class _DispatchContractMixin:
                              f"last arg must be '-' (stdin), got: {args}")
             self.assertNotIn("review", args,
                              f"'review' positional must not appear: {args}")
+
+    def test_codex_invoked_with_default_sandbox_flag(self) -> None:
+        """Default sandbox mode flows through to the actual codex args.
+
+        Static substring tests in DispatchSandboxFlagContract are not
+        enough: a future edit could leave `--sandbox danger-full-access`
+        in comments or doc strings while dropping the actual invocation,
+        and the substring tests would still pass. This test asserts the
+        runtime-logged args from the mock codex include the flag.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+            self.assertIn("--sandbox", args,
+                          f"--sandbox flag must be present in codex args: {args}")
+            sandbox_idx = args.index("--sandbox")
+            self.assertGreater(
+                len(args), sandbox_idx + 1,
+                f"--sandbox must be followed by a mode value: {args}",
+            )
+            self.assertEqual(
+                args[sandbox_idx + 1], "danger-full-access",
+                f"default sandbox mode must be danger-full-access: {args}",
+            )
+
+    def test_codex_invoked_with_overridden_sandbox_flag(self) -> None:
+        """CODEX_DISPATCH_SANDBOX env var overrides the default mode.
+
+        CI / sandbox-strict environments need to narrow the trust posture
+        below danger-full-access. The dispatcher honors the env var; this
+        test asserts the override actually reaches codex's command line.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            # _run_dispatch builds env from os.environ.copy(); pre-set the
+            # override there so it propagates into the subprocess.
+            old = os.environ.get("CODEX_DISPATCH_SANDBOX")
+            os.environ["CODEX_DISPATCH_SANDBOX"] = "workspace-write"
+            try:
+                result = self._run_dispatch(
+                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
+                )
+            finally:
+                if old is None:
+                    os.environ.pop("CODEX_DISPATCH_SANDBOX", None)
+                else:
+                    os.environ["CODEX_DISPATCH_SANDBOX"] = old
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+            self.assertIn("--sandbox", args,
+                          f"--sandbox flag must be present: {args}")
+            sandbox_idx = args.index("--sandbox")
+            self.assertEqual(
+                args[sandbox_idx + 1], "workspace-write",
+                f"CODEX_DISPATCH_SANDBOX override must reach codex: {args}",
+            )
 
     def test_exit_code_zero_propagation(self) -> None:
         with _temp_dir() as td:
@@ -463,6 +528,42 @@ class DispatchScriptsTracked(unittest.TestCase):
     def test_ps1_exists(self) -> None:
         self.assertTrue(DISPATCH_PS1.exists(),
                         f"dispatch-codex.ps1 missing: {DISPATCH_PS1}")
+
+
+class DispatchSandboxFlagContract(unittest.TestCase):
+    """Both dispatchers must invoke `codex exec --sandbox <mode>` so the
+    Auto-terminal trust model aligns with Terminal-relay. Default mode is
+    `danger-full-access`; `CODEX_DISPATCH_SANDBOX` env var overrides.
+
+    Background: Codex 0.130.0's default `workspace-write` sandbox runner
+    on Windows hits `CreateProcessAsUserW failed: 1312` when Codex spawns
+    its own git / grep / pwsh subprocess, so the review came back as
+    "could not access files". Passing `--sandbox danger-full-access` to
+    `codex exec` bypasses the broken sandbox runner and gives Codex the
+    same access it has in Terminal-relay. See SKILL.md "Trust model and
+    the sandbox flag" paragraph for the full rationale.
+
+    These tests freeze the dispatcher contract: a future refactor that
+    silently drops the flag would re-introduce the 1312 failure mode.
+    """
+
+    def test_sh_passes_sandbox_flag(self) -> None:
+        text = DISPATCH_SH.read_text(encoding="utf-8")
+        self.assertIn("--sandbox", text,
+                      "dispatch-codex.sh must pass --sandbox to codex exec")
+        self.assertIn("CODEX_DISPATCH_SANDBOX", text,
+                      "dispatch-codex.sh must read CODEX_DISPATCH_SANDBOX env var")
+        self.assertIn("danger-full-access", text,
+                      "dispatch-codex.sh must default sandbox to danger-full-access")
+
+    def test_ps1_passes_sandbox_flag(self) -> None:
+        text = DISPATCH_PS1.read_text(encoding="utf-8")
+        self.assertIn("--sandbox", text,
+                      "dispatch-codex.ps1 must pass --sandbox to codex exec")
+        self.assertIn("CODEX_DISPATCH_SANDBOX", text,
+                      "dispatch-codex.ps1 must read $env:CODEX_DISPATCH_SANDBOX")
+        self.assertIn("danger-full-access", text,
+                      "dispatch-codex.ps1 must default sandbox to danger-full-access")
 
 
 # Mock codex that consumes stdin then sleeps (writes nothing to stdout).
