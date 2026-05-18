@@ -184,6 +184,15 @@ if [ -n "$_py" ]; then
   fi
 fi
 
+if $_compose_ok && [ ! -f .agent-config/repo/scripts/compose_packs.py ] && [ ! -f .agent-config/repo/scripts/compose_rule_packs.py ]; then
+  # Upstream sparse clone has no composer script (e.g. the ac source repo
+  # itself, which intentionally ships only generate_agent_configs.py and
+  # not the v0.4.0 unified composer). Fall through to the verbatim-AGENTS.md
+  # path instead of crashing on a non-existent Python file.
+  printf '%s\n' '[anywhere-agents] no composer script in .agent-config/repo/scripts/; falling back to verbatim AGENTS.md' >&2
+  _compose_ok=false
+fi
+
 if $_compose_ok; then
   _NO_CACHE_FLAG=""
   [ -n "$NO_CACHE" ] && _NO_CACHE_FLAG="--no-cache"

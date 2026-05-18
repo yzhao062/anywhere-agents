@@ -181,6 +181,15 @@ if ($pyCmd) {
     }
 }
 
+if ($composeOk -and -not (Test-Path .agent-config/repo/scripts/compose_packs.py) -and -not (Test-Path .agent-config/repo/scripts/compose_rule_packs.py)) {
+    # Upstream sparse clone has no composer script (e.g. the ac source repo
+    # itself, which intentionally ships only generate_agent_configs.py and
+    # not the v0.4.0 unified composer). Fall through to the verbatim-AGENTS.md
+    # path instead of crashing on a non-existent Python file.
+    [Console]::Error.WriteLine("[anywhere-agents] no composer script in .agent-config/repo/scripts/; falling back to verbatim AGENTS.md")
+    $composeOk = $false
+}
+
 if ($composeOk) {
     $composeArgs = @("--root", ".")
     if ($NoCache) { $composeArgs += "--no-cache" }
