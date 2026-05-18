@@ -17,7 +17,12 @@
 #               sides carry an identical copy so the maintainer can run
 #               it from either repo), .claude/settings.json,
 #               .githooks/pre-push, .github/workflows/real-agent-smoke.yml,
-#               .github/workflows/validate.yml,
+#               .github/workflows/validate.yml, bootstrap/bootstrap.sh
+#               and bootstrap/bootstrap.ps1 (promoted from BY-DESIGN
+#               when ac/bootstrap was re-synced to aa's canonical
+#               composer-aware version; ac's bootstrap snippet still
+#               curls from ac but the file served is now byte-identical
+#               to aa and includes the AC->AA migration block),
 #               skills/{implement-review,ci-mockup-figure,readme-polish}
 #               as recursive trees, and the four shared-contract test
 #               files tests/test_{dispatch_codex,health_check,guard,
@@ -57,11 +62,9 @@
 #               unusual drift is visible. A byte-for-byte match is a
 #               warning (sanitization may have been skipped during
 #               backport). Covers: AGENTS.md (USC / Overleaf / PyCharm
-#               stripping), bootstrap/bootstrap.sh and .ps1
-#               (default-upstream + CRLF-config stripping),
-#               user/settings.json (additionalDirectories stripping),
-#               skills/my-router (routing-table rewrite with extension
-#               guidance for forks).
+#               stripping), user/settings.json (additionalDirectories
+#               stripping), skills/my-router (routing-table rewrite
+#               with extension guidance for forks).
 #
 # Usage:
 #   bash scripts/check-parity.sh                           # default sibling path
@@ -106,6 +109,8 @@ strict_files=(
   .githooks/pre-push
   .github/workflows/real-agent-smoke.yml
   .github/workflows/validate.yml
+  bootstrap/bootstrap.sh
+  bootstrap/bootstrap.ps1
 )
 for f in "${strict_files[@]}"; do
   if [ ! -f "$AC_ROOT/$f" ] || [ ! -f "$AA_ROOT/$f" ]; then
@@ -246,8 +251,6 @@ fi
 printf '\n== expected to differ by design (summary; eyeball if delta is unusual) ==\n'
 by_design_files=(
   AGENTS.md
-  bootstrap/bootstrap.sh
-  bootstrap/bootstrap.ps1
   user/settings.json
 )
 for f in "${by_design_files[@]}"; do
