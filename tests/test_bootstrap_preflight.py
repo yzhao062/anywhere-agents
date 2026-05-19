@@ -61,6 +61,37 @@ def _resolve_bash() -> str | None:
 BASH = _resolve_bash()
 
 
+_POSIX_SANDBOX_TOOLS = (
+    "sed", "uname", "printf", "tr", "grep", "cat", "mkdir", "echo", "rm",
+    "dirname", "basename", "test", "ls", "head", "tail", "sh",
+)
+
+
+def _build_posix_sandbox(parent: Path) -> Path:
+    """Create a sandbox bin dir with symlinks to shell utilities, no `git`.
+
+    The default POSIX PATH (`/usr/bin`, `/bin`, `/usr/local/bin`,
+    `/opt/homebrew/bin`) ships real git on macOS / Linux CI runners, so
+    "missing-git" tests that only strip a stub_dir fail-open. The sandbox
+    contains symlinks to a curated set of shell utilities (sed, uname, ...)
+    but deliberately does NOT include `git`. Tests prepend the stub_dir
+    (if any) and use the sandbox as the rest of PATH.
+    """
+    sandbox = parent / "sandbox_bin"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    for tool in _POSIX_SANDBOX_TOOLS:
+        src = shutil.which(tool)
+        if src:
+            link = sandbox / tool
+            if not link.exists():
+                try:
+                    os.symlink(src, link)
+                except (OSError, NotImplementedError):
+                    # Filesystem cannot symlink; copy instead.
+                    shutil.copy2(src, link)
+    return sandbox
+
+
 def _stripped_env(stub_dir: Path | None) -> dict[str, str]:
     """Build an env where PATH includes ONLY directories needed for bash
     builtins (sed, printf, sh) and the test stub_dir (if any).
@@ -69,6 +100,11 @@ def _stripped_env(stub_dir: Path | None) -> dict[str, str]:
     intentionally exclude `Git\\bin`, `Git\\cmd`, and `Git\\mingw64\\bin`
     because those contain the real `git` binary and would defeat the
     missing-git / stubbed-version scenarios.
+
+    On POSIX we build a per-call sandbox bin dir containing symlinks to a
+    curated set of shell utilities, and use ONLY that dir (plus the
+    optional stub_dir) as PATH. This excludes real git from `/usr/bin`,
+    `/usr/local/bin`, `/opt/homebrew/bin`, and any other default location.
     """
     env = os.environ.copy()
     keep_path: list[str] = []
@@ -107,7 +143,14 @@ def _stripped_env(stub_dir: Path | None) -> dict[str, str]:
             )):
                 keep_path.append(src)
     else:
-        keep_path = ["/usr/bin", "/bin", "/usr/local/bin"]
+        # POSIX: build a sandbox bin dir with no git. Anchor it under the
+        # stub_dir's parent so the same temp lifecycle cleans it up; fall
+        # back to a fresh tempdir if no stub_dir is provided.
+        if stub_dir is not None:
+            sandbox = _build_posix_sandbox(stub_dir.parent)
+        else:
+            sandbox = _build_posix_sandbox(Path(tempfile.mkdtemp(prefix="aa-preflight-sandbox-")))
+        keep_path = [str(sandbox)]
     if stub_dir is not None:
         keep_path.insert(0, str(stub_dir))
     env["PATH"] = os.pathsep.join(keep_path)
