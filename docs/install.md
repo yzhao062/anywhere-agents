@@ -9,7 +9,7 @@ flowchart LR
     C --> D[Sparse-clone<br/>skills/ .claude/ scripts/ user/]
     D --> E[Copy skill pointers<br/>to .claude/commands/]
     E --> F[Merge shared<br/>settings into project]
-    F --> G[Install guard.py<br/>to ~/.claude/hooks/]
+    F --> G[Install guard.py +<br/>statusline.py to ~/.claude/]
     G --> H[Merge user settings<br/>into ~/.claude/]
     H --> I[Add .agent-config/<br/>to .gitignore]
     I --> J[Done — agent<br/>reads AGENTS.md]
@@ -75,10 +75,10 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 ## What the bootstrap does
 
 1. Fetches the latest `AGENTS.md` from upstream and copies it into the project root (also `.agent-config/AGENTS.md` as the cached source).
-2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, and `user/settings.json` into `.agent-config/repo/`.
+2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, `scripts/statusline.py`, and `user/settings.json` into `.agent-config/repo/`.
 3. Copies shared `.claude/commands/*.md` into the project's `.claude/commands/`. Non-destructive — does not delete unrelated local pointer files.
 4. Merges shared `.claude/settings.json` keys into the project's copy. Project-only keys are preserved.
-5. Installs `scripts/guard.py` into `~/.claude/hooks/` and merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, `CLAUDE_CODE_EFFORT_LEVEL=max`, user-level permissions).
+5. Installs `scripts/guard.py` into `~/.claude/hooks/` and `scripts/statusline.py` into `~/.claude/statusline.py`, then merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=max`, user-level permissions).
 6. Appends `.agent-config/` to the project's `.gitignore` if not already present.
 
 ## Pack manifest schema (v0.6.0)

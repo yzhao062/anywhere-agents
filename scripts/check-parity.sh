@@ -79,8 +79,20 @@
 set -uo pipefail
 
 SCRIPT_DIR="$( cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd )"
-AC_ROOT="$(dirname "$SCRIPT_DIR")"
-AA_ROOT="${1:-$AC_ROOT/../anywhere-agents}"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# When invoked from an anywhere-agents checkout with a sibling agent-config/
+# present, swap roots so the comparison is genuinely cross-repo. Without this
+# guard, AC_ROOT defaulted to the script's own repo and AA_ROOT resolved back
+# to the same path, turning the script into a silent self-comparison that
+# always passes.
+if [ "$(basename "$REPO_ROOT")" = "anywhere-agents" ] && [ -d "$REPO_ROOT/../agent-config" ]; then
+  AC_ROOT="$REPO_ROOT/../agent-config"
+  AA_ROOT="${1:-$REPO_ROOT}"
+else
+  AC_ROOT="$REPO_ROOT"
+  AA_ROOT="${1:-$AC_ROOT/../anywhere-agents}"
+fi
 
 if [ ! -d "$AA_ROOT" ]; then
   printf 'error: anywhere-agents clone not found at %s\n' "$AA_ROOT" >&2
@@ -101,6 +113,7 @@ strict_files=(
   scripts/_python
   scripts/guard.py
   scripts/session_bootstrap.py
+  scripts/statusline.py
   scripts/generate_agent_configs.py
   scripts/pre-push-smoke.sh
   scripts/remote-smoke.sh

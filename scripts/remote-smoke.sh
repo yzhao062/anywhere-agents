@@ -96,6 +96,17 @@ git init -q
 next_step "Scaffold temp project at $TMPDIR"
 pass "git-initialized empty project"
 
+# Snapshot ~/.claude/settings.json mtime BEFORE install so the statusLine
+# step below can prove the install actually rewrote the file. Without this
+# guard, a regressed user-level merge would still false-pass on a release-gate
+# machine where a prior smoke run already left a statusLine entry behind.
+USER_SETTINGS="$HOME/.claude/settings.json"
+if [ -f "$USER_SETTINGS" ]; then
+  PRE_INSTALL_SETTINGS_MTIME=$(stat -c %Y "$USER_SETTINGS" 2>/dev/null || stat -f %m "$USER_SETTINGS" 2>/dev/null || echo 0)
+else
+  PRE_INSTALL_SETTINGS_MTIME=0
+fi
+
 # --- 1. Bootstrap via install command ---------------------------------------
 next_step "Run install command: $INSTALL_CMD"
 # Use eval so multi-command strings (with && chains) parse as shell, not
@@ -142,6 +153,18 @@ for f in "${HOOK_FILES[@]}"; do
   [ -f "$f" ] || fail "missing $f"
   pass "$f"
 done
+
+next_step "User-level statusLine deployed"
+STATUSLINE_FILE="$HOME/.claude/statusline.py"
+[ -f "$STATUSLINE_FILE" ] || fail "missing $STATUSLINE_FILE"
+[ -f "$USER_SETTINGS" ] || fail "missing $USER_SETTINGS"
+POST_INSTALL_SETTINGS_MTIME=$(stat -c %Y "$USER_SETTINGS" 2>/dev/null || stat -f %m "$USER_SETTINGS" 2>/dev/null || echo 0)
+if [ "$POST_INSTALL_SETTINGS_MTIME" -le "$PRE_INSTALL_SETTINGS_MTIME" ]; then
+  fail "$USER_SETTINGS mtime did not advance after install (post=$POST_INSTALL_SETTINGS_MTIME, pre=$PRE_INSTALL_SETTINGS_MTIME); statusLine entry below may be stale from a prior smoke run"
+fi
+grep -q '"statusLine"' "$USER_SETTINGS" || fail "missing statusLine entry in $USER_SETTINGS"
+grep -q '\.claude/statusline\.py' "$USER_SETTINGS" || fail "statusLine command in $USER_SETTINGS does not reference ~/.claude/statusline.py"
+pass "$STATUSLINE_FILE + settings entry (post-install mtime advanced)"
 
 # --- 3. Generated-file header --------------------------------------------
 next_step "Generated per-agent files carry the GENERATED FILE header"

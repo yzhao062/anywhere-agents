@@ -284,6 +284,10 @@ if [ -f .agent-config/repo/scripts/session_bootstrap.py ]; then
   mkdir -p "$HOME/.claude/hooks"
   cp -f .agent-config/repo/scripts/session_bootstrap.py "$HOME/.claude/hooks/session_bootstrap.py"
 fi
+if [ -f .agent-config/repo/scripts/statusline.py ]; then
+  mkdir -p "$HOME/.claude"
+  cp -f .agent-config/repo/scripts/statusline.py "$HOME/.claude/statusline.py"
+fi
 if [ -f .agent-config/repo/user/settings.json ]; then
   mkdir -p "$HOME/.claude"
   if [ -f "$HOME/.claude/settings.json" ]; then

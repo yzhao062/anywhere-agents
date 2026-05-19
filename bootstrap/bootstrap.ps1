@@ -274,6 +274,10 @@ if (Test-Path .agent-config/repo/scripts/session_bootstrap.py) {
   New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
   Copy-Item .agent-config/repo/scripts/session_bootstrap.py (Join-Path $hooksDir 'session_bootstrap.py') -Force
 }
+if (Test-Path .agent-config/repo/scripts/statusline.py) {
+  New-Item -ItemType Directory -Force -Path $userClaude | Out-Null
+  Copy-Item .agent-config/repo/scripts/statusline.py (Join-Path $userClaude 'statusline.py') -Force
+}
 if (Test-Path .agent-config/repo/user/settings.json) {
   New-Item -ItemType Directory -Force -Path $userClaude | Out-Null
   $userSettings = Join-Path $userClaude 'settings.json'

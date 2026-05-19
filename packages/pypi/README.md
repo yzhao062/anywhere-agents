@@ -24,7 +24,7 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 - Sparse-clones the upstream repo into `.agent-config/`
 - Syncs the shipped skills (`implement-review`, `my-router`) and their Claude Code command pointers
 - Deep-merges project-level `.claude/settings.json`
-- Deploys the safety guard hook to `~/.claude/hooks/guard.py` and merges user-level permissions
+- Deploys the safety guard hook to `~/.claude/hooks/guard.py` and the Claude Max + Codex quota statusLine to `~/.claude/statusline.py`, and merges user-level permissions
 - Adds `.agent-config/` to `.gitignore`
 
 Bootstrap logic lives in the shell bootstrap scripts at [`yzhao062/anywhere-agents/bootstrap/`](https://github.com/yzhao062/anywhere-agents/tree/main/bootstrap); the Python CLI invokes them so that agents and users in a Python-first workflow can run the same mechanism without reaching for `curl`. Pack management (`pack add | remove | verify | list | update`) and `uninstall` are implemented directly in the Python CLI.

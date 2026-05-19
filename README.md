@@ -85,7 +85,7 @@ your-project/
 └── skills/                # (optional) repo-local skill overrides
 ```
 
-Bootstrap also drops `guard.py` and `session_bootstrap.py` into `~/.claude/hooks/` and merges shared keys into `~/.claude/settings.json`. Everything above comes from one `bootstrap` run; re-running it keeps these files in sync with upstream.
+Bootstrap also drops `guard.py` and `session_bootstrap.py` into `~/.claude/hooks/`, `statusline.py` into `~/.claude/statusline.py` (Claude Max + Codex 5h / weekly quota readout in the Claude Code status row), and merges shared keys into `~/.claude/settings.json`. Everything above comes from one `bootstrap` run; re-running it keeps these files in sync with upstream.
 
 ### One `AGENTS.md`, Rules for Every Agent
 
@@ -351,6 +351,7 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
+│   ├── statusline.py              # statusLine renderer: Claude Max + Codex 5h / weekly quota
 │   ├── compose_packs.py           # v2 composer: bundled packs, direct URLs, drift prompt, locks, state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack modules: auth, config, source fetch, state, locks, transaction, handlers

@@ -85,7 +85,7 @@ your-project/
 └── skills/                # (optional) repo-local skill overrides
 ```
 
-`bootstrap` 还会把 `guard.py` 和 `session_bootstrap.py` 放到 `~/.claude/hooks/`，以及把共享 key 合并到 `~/.claude/settings.json`。以上都是一次 `bootstrap` 的结果；再跑一遍，这些文件都跟上游同步。
+`bootstrap` 还会把 `guard.py` 和 `session_bootstrap.py` 放到 `~/.claude/hooks/`、`statusline.py` 放到 `~/.claude/statusline.py`（Claude Max + Codex 5h / 周用量在 Claude Code 状态行常驻显示），以及把共享 key 合并到 `~/.claude/settings.json`。以上都是一次 `bootstrap` 的结果；再跑一遍，这些文件都跟上游同步。
 
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
@@ -353,6 +353,7 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
+│   ├── statusline.py              # statusLine renderer: Claude Max + Codex 5h / 周用量
 │   ├── compose_packs.py           # v2 composer: bundled pack、direct URL、drift prompt、locks、state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack 模块: auth、config、source fetch、state、locks、transaction、handlers

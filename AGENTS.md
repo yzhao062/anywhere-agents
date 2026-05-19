@@ -44,7 +44,7 @@ If a local `skills/<skill-name>/SKILL.md` exists in the project repo, the local 
 Copying `.agent-config/repo/.claude/commands/*.md` only overwrites command files with the same name as the shared repo and does not delete unrelated project-local commands.
 Merge shared Claude project defaults (e.g., `permissions`, `attribution`) from `.agent-config/repo/.claude/settings.json` into the project `.claude/settings.json`. Shared keys are updated on every bootstrap run; project-only keys are preserved. Merge requires Python; if unavailable the existing file is left untouched.
 Add `.agent-config/` to the project's `.gitignore` so fetched files are not committed.
-Bootstrap also sets up user-level config: it copies `scripts/guard.py` to `~/.claude/hooks/` (a PreToolUse hook that guards against destructive commands) and merges `user/settings.json` into `~/.claude/settings.json` (shared permissions, hook wiring, and the `CLAUDE_CODE_EFFORT_LEVEL=max` env entry that sets the default effort level). Remove the user-level section from the bootstrap script if this is not wanted.
+Bootstrap also sets up user-level config: it copies `scripts/guard.py` to `~/.claude/hooks/` (a PreToolUse hook that guards against destructive commands) and `scripts/statusline.py` to `~/.claude/statusline.py` (a statusLine renderer showing Claude Max + Codex 5h / weekly quota), and merges `user/settings.json` into `~/.claude/settings.json` (shared permissions, hook wiring, statusLine command, and the `CLAUDE_CODE_EFFORT_LEVEL=max` env entry that sets the default effort level). Remove the user-level section from the bootstrap script if this is not wanted.
 ````
 
 ### What gets shared
@@ -56,7 +56,7 @@ Bootstrap also sets up user-level config: it copies `scripts/guard.py` to `~/.cl
 | Shared skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`) | `skills/` directory (committed only) | sparse `git clone` |
 | Claude pointer commands for shared skills | `.claude/commands/` | sparse `git clone` plus non-destructive copy into the project `.claude/commands/` |
 | Claude project defaults (`permissions`, `attribution`, etc.) | `.claude/settings.json` | sparse `git clone` plus key-level merge into the project `.claude/settings.json` on every run |
-| User-level hooks (`guard.py`, `session_bootstrap.py`) + settings | `scripts/` + `user/settings.json` | Scripts copied to `~/.claude/hooks/`; settings merged into `~/.claude/settings.json` (shared permissions, PreToolUse guard, SessionStart bootstrap hook, `CLAUDE_CODE_EFFORT_LEVEL=max`) |
+| User-level scripts (`guard.py`, `session_bootstrap.py`, `statusline.py`) + settings | `scripts/` + `user/settings.json` | Hooks copied to `~/.claude/hooks/`, statusline to `~/.claude/statusline.py`; settings merged into `~/.claude/settings.json` (shared permissions, PreToolUse guard, SessionStart bootstrap hook, statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=max`) |
 
 ### Override rules
 
