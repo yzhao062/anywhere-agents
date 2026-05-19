@@ -117,6 +117,55 @@ _find_python() {
   return 1
 }
 
+# Detect git binary and reject pre-2.25 versions before any git invocation
+# below. Sparse clone uses `git clone --filter=blob:none --sparse`; `--sparse`
+# is the Git 2.25 floor (2020-01-13), while `--filter=blob:none` is the older
+# partial-clone option (Git 2.19+). macOS shipped pre-2.25 system git as late
+# as Big Sur, and a real consumer hit `unknown option 'sparse'` on 2026-05-18.
+# On parse failure default-pass with a stderr warning so unexpected version
+# strings (alpha builds, distro suffixes like `2.30.1.windows.1` or
+# `(Apple Git-141)`) do not block already-modern systems.
+_git_install_hint() {
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) printf 'install: brew install git' ;;
+    Linux)  printf 'install: sudo apt update && sudo apt install -y git (or your distro package manager)' ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) printf 'install: https://git-scm.com/download/win' ;;
+    *)      printf 'install: see https://git-scm.com/downloads' ;;
+  esac
+}
+
+check_git_preflight() {
+  if [ -n "${AGENT_CONFIG_SKIP_GIT_PREFLIGHT:-}" ]; then
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    printf '[anywhere-agents] git is not installed or not on PATH; bootstrap needs git >= 2.25 for sparse clone.\n' >&2
+    printf '[anywhere-agents] %s\n' "$(_git_install_hint)" >&2
+    exit 1
+  fi
+  _ver_line=$(git --version 2>/dev/null || true)
+  _ver_str=${_ver_line#git version }
+  _major=""
+  _minor=""
+  if [ -n "$_ver_str" ] && [ "$_ver_str" != "$_ver_line" ]; then
+    _major=$(printf '%s' "$_ver_str" | sed -n 's/^\([0-9][0-9]*\)\..*/\1/p')
+    _minor=$(printf '%s' "$_ver_str" | sed -n 's/^[0-9][0-9]*\.\([0-9][0-9]*\).*/\1/p')
+  fi
+  if [ -z "$_major" ] || [ -z "$_minor" ]; then
+    printf '[anywhere-agents] could not parse git version from %s; assuming OK.\n' "${_ver_line:-<empty>}" >&2
+    return 0
+  fi
+  if [ "$_major" -lt 2 ] || { [ "$_major" -eq 2 ] && [ "$_minor" -lt 25 ]; }; then
+    printf '[anywhere-agents] git %s.%s is too old; bootstrap needs git >= 2.25 for sparse clone.\n' "$_major" "$_minor" >&2
+    printf '[anywhere-agents] %s\n' "$(_git_install_hint)" >&2
+    exit 1
+  fi
+  return 0
+}
+
+check_git_preflight
+[ -n "${AGENT_CONFIG_PREFLIGHT_TEST:-}" ] && exit 0
+
 # Legacy AC -> AA migration for direct shell-bootstrap runs. If the
 # persisted upstream or cached repo origin still points at agent-config
 # and the caller did not pass an explicit upstream, delete the old cache

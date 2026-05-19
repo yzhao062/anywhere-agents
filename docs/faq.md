@@ -98,6 +98,16 @@
 
     While in 0.x, "minor" is used loosely per SemVer's 0.x convention.
 
+??? question "Bootstrap exits with `git is not installed` or `git X.Y is too old`. What changed?"
+    v0.7.0 added a git preflight before the sparse-clone path. Bootstrap needs `git >= 2.25` because the clone uses `git clone --filter=blob:none --sparse`; `--sparse` is the Git 2.25 floor (2020-01-13), while `--filter=blob:none` is the older partial-clone option (Git 2.19+). The check runs before any `git` invocation in both the fresh-clone and existing-repo refresh paths.
+
+    On failure, bootstrap exits non-zero with a platform-specific install line:
+    - macOS: `brew install git`
+    - Debian / Ubuntu: `sudo apt update && sudo apt install -y git`
+    - Windows: `https://git-scm.com/download/win`
+
+    Unparseable `git --version` strings (alpha builds, distro suffixes like `2.30.1.windows.1` or `(Apple Git-141)`) default-pass with a stderr warning so unusual systems with modern git are not blocked. If you have a modern git that the parser cannot read and the preflight still refuses to run, set `AGENT_CONFIG_SKIP_GIT_PREFLIGHT=1` as a one-shot escape hatch and file an issue with the version string the parser missed.
+
 ??? question "Where can I report bugs or propose changes?"
     - Bugs and clear fixes → [GitHub Issues](https://github.com/yzhao062/anywhere-agents/issues) or PR.
     - Feature requests that do not match the author's workflow → fork and maintain your own version; pull upstream fixes as they land.

@@ -156,6 +156,16 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
 - **Codex** is the gatekeeper: review, feedback, and quality checks on work produced by Claude Code or the user.
 - When both agents are available, default to this division of labor unless the user overrides it.
 
+## Agent Fungibility
+
+- The default routing (Claude Code primary, Codex gatekeeper) is a default, not a hard requirement. Two scenarios must remain workable: (1) **absence**, when one agent is unavailable (service outage, regional block, quota exhaustion, hardware-induced refusal); (2) **reversal testing**, when the user deliberately swaps primary and gatekeeper roles to evaluate quality drift.
+- **Principle**: not 1:1 replication. Core functions must work when either agent is absent or when roles are reversed. Where an ergonomic helper exists for one agent only (e.g., a hand-crafted slash command), the function must still be reachable via underlying primitives. Define "core function" by user value (review loop, structured dispatch, health check), not by surface convenience.
+- **How to apply** when designing or refactoring agent-facing skills, scripts, or docs:
+  - Default routing is fine; just make the alternative reachable.
+  - A skill, hook, or script that hard-codes one agent's CLI (`codex exec`, `claude -p`) should document or wire the other side's equivalent at the same time, even if the implementation is deferred.
+  - Docs that name one agent in step instructions should call out the cross-vendor equivalent at least once near the top, so a session reading the doc under role reversal can still proceed.
+  - When the deferred half ships later, the principle is satisfied; do not block the primary half on simultaneous parity.
+
 ## Task Routing
 
 - Before starting a task, read the router skill to determine which domain skill to use. Look for it in this order: `skills/my-router/SKILL.md` (repo-local), then `.agent-config/repo/skills/my-router/SKILL.md` (bootstrapped from shared config).

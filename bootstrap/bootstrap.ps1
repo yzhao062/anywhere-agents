@@ -32,6 +32,44 @@ function Find-RealPython {
   return $null
 }
 
+# Detect git binary and reject pre-2.25 versions before any git invocation
+# below. Sparse clone uses `git clone --filter=blob:none --sparse`; `--sparse`
+# is the Git 2.25 floor (2020-01-13), while `--filter=blob:none` is the older
+# partial-clone option (Git 2.19+). On parse failure default-pass with a
+# stderr warning so unexpected version strings (alpha builds, distro
+# suffixes like `2.30.1.windows.1`) do not block already-modern systems.
+function Invoke-GitPreflight {
+  if ($env:AGENT_CONFIG_SKIP_GIT_PREFLIGHT) { return }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    [Console]::Error.WriteLine("[anywhere-agents] git is not installed or not on PATH; bootstrap needs git >= 2.25 for sparse clone.")
+    [Console]::Error.WriteLine("[anywhere-agents] install: https://git-scm.com/download/win")
+    exit 1
+  }
+  $verLine = $null
+  try {
+    $verLine = (& git --version 2>$null | Select-Object -First 1)
+  } catch {
+    $verLine = $null
+  }
+  if (-not $verLine) {
+    [Console]::Error.WriteLine("[anywhere-agents] could not run git --version; assuming OK")
+    return
+  }
+  $verStr = $verLine -replace '^git version ', ''
+  if ($verStr -match '^(\d+)\.(\d+)') {
+    $major = [int]$matches[1]
+    $minor = [int]$matches[2]
+  } else {
+    [Console]::Error.WriteLine("[anywhere-agents] could not parse git version from '$verLine'; assuming OK")
+    return
+  }
+  if (($major -lt 2) -or (($major -eq 2) -and ($minor -lt 25))) {
+    [Console]::Error.WriteLine("[anywhere-agents] git $major.$minor is too old; bootstrap needs git >= 2.25 for sparse clone.")
+    [Console]::Error.WriteLine("[anywhere-agents] install: https://git-scm.com/download/win")
+    exit 1
+  }
+}
+
 if ($Help) {
     Write-Output "Usage: .\bootstrap.ps1 [UPSTREAM] [-RulePacks PACK] [-NoCache]"
     Write-Output "  UPSTREAM      user/repo form; overrides AGENT_CONFIG_UPSTREAM env and persisted file"
@@ -66,6 +104,9 @@ After committing agent-config.yaml, run:
     Write-Output $snippet
     exit 0
 }
+
+Invoke-GitPreflight
+if ($env:AGENT_CONFIG_PREFLIGHT_TEST) { exit 0 }
 
 # Legacy AC -> AA migration for direct PowerShell-bootstrap runs. If the
 # persisted upstream or cached repo origin still points at agent-config

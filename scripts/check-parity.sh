@@ -152,6 +152,7 @@ strict_test_files=(
   tests/test_health_check.py
   tests/test_guard.py
   tests/test_prompt_byte_parity.py
+  tests/test_bootstrap_preflight.py
 )
 for f in "${strict_test_files[@]}"; do
   if [ ! -f "$AC_ROOT/$f" ] || [ ! -f "$AA_ROOT/$f" ]; then

@@ -113,7 +113,7 @@ Consumers who want to keep the old full-body source must set an explicit overrid
 
 ## Prerequisites
 
-- **`git`** — required. Windows users: Git for Windows provides `bash`, which both bootstrap paths benefit from.
+- **`git >= 2.25`**: required for the sparse clone the bootstrap performs (`git clone --filter=blob:none --sparse`). `--sparse` is the Git 2.25 floor (2020-01-13); `--filter=blob:none` is the older partial-clone option (Git 2.19+). Bootstrap detects older git up front and exits with a platform-specific install line (macOS: `brew install git`; Debian / Ubuntu: `sudo apt update && sudo apt install -y git`; Windows: `https://git-scm.com/download/win`). Windows users: Git for Windows also provides `bash`, which both bootstrap paths benefit from. Unparseable `git --version` strings default-pass with a stderr warning so unusual distro suffixes do not block modern systems.
 - **Python 3.x** — required for the settings merge step (stdlib only, any recent version). If unavailable, bootstrap continues without merge.
 - **Claude Code** or **Codex** — the agents that consume this config. See their respective docs for install instructions.
 - **`pipx`** or **`npx`** — required only for the package-manager install paths, not for raw shell.
