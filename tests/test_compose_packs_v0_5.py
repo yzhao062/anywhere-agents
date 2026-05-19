@@ -349,44 +349,50 @@ class TestInlineSourceBranch(unittest.TestCase):
         fetch. The composer must thread URL, ref, policy, explicit
         auth, and pack-lock recorded commit through to
         ``source_fetch.fetch_pack``."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        # v0.7.0 Round 2 (H2 reopen): _process_selection now gates
+        # parse_manifest on manifest_path.exists() — use a real tmp dir
+        # with a placeholder pack.yaml so the parse_manifest mock fires.
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
 
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [
-                    {"name": "profile", "source": {"repo": "x", "ref": "v0.1.0"}}
-                ],
-            },
-        ):
-            selection = {
-                "name": "profile",
-                "source": {
-                    "url": "https://github.com/yzhao062/agent-pack",
-                    "ref": "v0.1.0",
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [
+                        {"name": "profile", "source": {"repo": "x", "ref": "v0.1.0"}}
+                    ],
                 },
-                "update_policy": "prompt",
-            }
-            pack_def, archive_dir = compose_packs._process_selection(
-                selection,
-                bundled_manifest={"packs": []},
-                cache_root=Path("/tmp"),
-                host="claude-code",
-            )
+            ):
+                selection = {
+                    "name": "profile",
+                    "source": {
+                        "url": "https://github.com/yzhao062/agent-pack",
+                        "ref": "v0.1.0",
+                    },
+                    "update_policy": "prompt",
+                }
+                pack_def, archive_dir_out = compose_packs._process_selection(
+                    selection,
+                    bundled_manifest={"packs": []},
+                    cache_root=Path("/tmp"),
+                    host="claude-code",
+                )
 
-        fetch.assert_called_once()
-        args, kwargs = fetch.call_args
-        # First positional argument is the URL; second is the ref. The
-        # composer normalizes ``source.url`` into the URL slot before
-        # calling source_fetch.
-        self.assertEqual(args[0], "https://github.com/yzhao062/agent-pack")
-        self.assertEqual(args[1], "v0.1.0")
-        self.assertEqual(kwargs.get("policy"), "prompt")
-        self.assertEqual(archive_dir, archive.archive_dir)
-        self.assertEqual(pack_def["name"], "profile")
+            fetch.assert_called_once()
+            args, kwargs = fetch.call_args
+            # First positional argument is the URL; second is the ref. The
+            # composer normalizes ``source.url`` into the URL slot before
+            # calling source_fetch.
+            self.assertEqual(args[0], "https://github.com/yzhao062/agent-pack")
+            self.assertEqual(args[1], "v0.1.0")
+            self.assertEqual(kwargs.get("policy"), "prompt")
+            self.assertEqual(archive_dir_out, archive.archive_dir)
+            self.assertEqual(pack_def["name"], "profile")
 
     @patch("compose_packs.source_fetch.fetch_pack")
     def test_entry_without_source_uses_bundled_lookup(self, fetch) -> None:
@@ -410,62 +416,71 @@ class TestInlineSourceBranch(unittest.TestCase):
         """``source.repo`` is the v0.4.0-shipped manifest key. v0.5.0
         adds ``source.url`` as the spec'd consumer-facing key. Both
         must work."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        # v0.7.0 Round 2 (H2 reopen): use real tmp dir + placeholder
+        # pack.yaml so the new manifest_path.exists() gate is satisfied.
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
 
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [{"name": "x", "source": {"repo": "https://example", "ref": "v1"}}],
-            },
-        ):
-            selection = {
-                "name": "x",
-                "source": {"repo": "https://github.com/x/y", "ref": "v1"},
-            }
-            pack_def, archive_dir = compose_packs._process_selection(
-                selection,
-                bundled_manifest={"packs": []},
-                cache_root=Path("/tmp"),
-                host="claude-code",
-            )
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [{"name": "x", "source": {"repo": "https://example", "ref": "v1"}}],
+                },
+            ):
+                selection = {
+                    "name": "x",
+                    "source": {"repo": "https://github.com/x/y", "ref": "v1"},
+                }
+                pack_def, archive_dir_out = compose_packs._process_selection(
+                    selection,
+                    bundled_manifest={"packs": []},
+                    cache_root=Path("/tmp"),
+                    host="claude-code",
+                )
 
-        fetch.assert_called_once()
-        args, _ = fetch.call_args
-        self.assertEqual(args[0], "https://github.com/x/y")
-        self.assertEqual(archive_dir, archive.archive_dir)
+            fetch.assert_called_once()
+            args, _ = fetch.call_args
+            self.assertEqual(args[0], "https://github.com/x/y")
+            self.assertEqual(archive_dir_out, archive.archive_dir)
 
     @patch("compose_packs.source_fetch.fetch_pack")
     def test_inline_source_default_ref_is_main(self, fetch) -> None:
         """When the consumer omits ``source.ref``, default to ``main``.
         Per spec § C: pinning is the consumer's responsibility, but a
         sensible default avoids a confusing rejection at fetch time."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        # v0.7.0 Round 2 (H2 reopen): real tmp dir + placeholder pack.yaml.
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
 
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [{"name": "x", "source": {"repo": "https://example", "ref": "main"}}],
-            },
-        ):
-            selection = {
-                "name": "x",
-                "source": {"url": "https://github.com/x/y"},
-            }
-            compose_packs._process_selection(
-                selection,
-                bundled_manifest={"packs": []},
-                cache_root=Path("/tmp"),
-                host="claude-code",
-            )
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [{"name": "x", "source": {"repo": "https://example", "ref": "main"}}],
+                },
+            ):
+                selection = {
+                    "name": "x",
+                    "source": {"url": "https://github.com/x/y"},
+                }
+                compose_packs._process_selection(
+                    selection,
+                    bundled_manifest={"packs": []},
+                    cache_root=Path("/tmp"),
+                    host="claude-code",
+                )
 
-        args, _ = fetch.call_args
-        self.assertEqual(args[1], "main")
+            args, _ = fetch.call_args
+            self.assertEqual(args[1], "main")
 
     @patch("compose_packs.source_fetch.fetch_pack")
     def test_inline_source_passes_pack_lock_recorded_commit(self, fetch) -> None:
@@ -473,38 +488,42 @@ class TestInlineSourceBranch(unittest.TestCase):
         this pack name, ``_process_selection`` threads it through to
         ``source_fetch.fetch_pack`` so the drift / locked-policy logic
         can compare upstream vs recorded."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        # v0.7.0 Round 2 (H2 reopen): real tmp dir + placeholder pack.yaml.
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
 
-        pack_lock = {
-            "version": 1,
-            "packs": {
-                "profile": {"resolved_commit": "abc123"},
-            },
-        }
-
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [{"name": "profile", "source": {"repo": "x", "ref": "v1"}}],
-            },
-        ):
-            selection = {
-                "name": "profile",
-                "source": {"url": "https://github.com/y/agent-pack", "ref": "v1"},
-                "update_policy": "locked",
+            pack_lock = {
+                "version": 1,
+                "packs": {
+                    "profile": {"resolved_commit": "abc123"},
+                },
             }
-            compose_packs._process_selection(
-                selection,
-                bundled_manifest={"packs": []},
-                cache_root=Path("/tmp"),
-                host="claude-code",
-                pack_lock=pack_lock,
-            )
 
-        _, kwargs = fetch.call_args
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [{"name": "profile", "source": {"repo": "x", "ref": "v1"}}],
+                },
+            ):
+                selection = {
+                    "name": "profile",
+                    "source": {"url": "https://github.com/y/agent-pack", "ref": "v1"},
+                    "update_policy": "locked",
+                }
+                compose_packs._process_selection(
+                    selection,
+                    bundled_manifest={"packs": []},
+                    cache_root=Path("/tmp"),
+                    host="claude-code",
+                    pack_lock=pack_lock,
+                )
+
+            _, kwargs = fetch.call_args
         self.assertEqual(kwargs.get("pack_lock_recorded_commit"), "abc123")
         self.assertEqual(kwargs.get("policy"), "locked")
 
@@ -513,37 +532,41 @@ class TestInlineSourceBranch(unittest.TestCase):
         """If the remote ``pack.yaml`` does not declare a pack with the
         consumer-requested name, fail with an actionable error rather
         than crashing later in the dispatch loop."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        # v0.7.0 Round 2 (H2 reopen): real tmp dir + placeholder pack.yaml.
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
 
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [
-                    {"name": "profile", "source": {"repo": "x", "ref": "v0.1.0"}},
-                    {"name": "paper-workflow", "source": {"repo": "x", "ref": "v0.1.0"}},
-                ],
-            },
-        ):
-            selection = {
-                "name": "no-such-pack",
-                "source": {
-                    "url": "https://github.com/yzhao062/agent-pack",
-                    "ref": "v0.1.0",
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [
+                        {"name": "profile", "source": {"repo": "x", "ref": "v0.1.0"}},
+                        {"name": "paper-workflow", "source": {"repo": "x", "ref": "v0.1.0"}},
+                    ],
                 },
-            }
-            with self.assertRaises(compose_packs.ComposeError) as cm:
-                compose_packs._process_selection(
-                    selection,
-                    bundled_manifest={"packs": []},
-                    cache_root=Path("/tmp"),
-                    host="claude-code",
-                )
-            msg = str(cm.exception)
-            self.assertIn("no-such-pack", msg)
-            self.assertIn("agent-pack", msg)
+            ):
+                selection = {
+                    "name": "no-such-pack",
+                    "source": {
+                        "url": "https://github.com/yzhao062/agent-pack",
+                        "ref": "v0.1.0",
+                    },
+                }
+                with self.assertRaises(compose_packs.ComposeError) as cm:
+                    compose_packs._process_selection(
+                        selection,
+                        bundled_manifest={"packs": []},
+                        cache_root=Path("/tmp"),
+                        host="claude-code",
+                    )
+                msg = str(cm.exception)
+                self.assertIn("no-such-pack", msg)
+                self.assertIn("agent-pack", msg)
 
     def test_bundled_lookup_unknown_pack_raises(self) -> None:
         """Bundled-name lookup with an unknown pack name surfaces as
@@ -691,49 +714,122 @@ class TestInlineSourceBranch(unittest.TestCase):
         """v0.5.4 fix: even when the upstream archive declares a
         ``pack.yaml`` that doesn't list the requested name, fall back
         to the bundled pack-def for ``DEFAULT_V2_SELECTIONS`` names. The
-        non-bundled case still raises the existing ComposeError."""
-        archive = MagicMock()
-        archive.archive_dir = Path("/tmp/fake-archive")
-        fetch.return_value = archive
+        non-bundled case still raises the existing ComposeError.
 
-        bundled_def = {
-            "name": "aa-core-skills",
-            "source": "bundled",
-            "default-ref": "bundled",
-            "active": [{"kind": "skill", "files": []}],
-        }
-        with unittest.mock.patch(
-            "compose_packs.schema.parse_manifest",
-            return_value={
-                "version": 2,
-                "packs": [{"name": "other-pack", "source": {"repo": "x", "ref": "v1"}}],
-            },
-        ):
-            # Bundled-default name with URL form: falls back to bundled.
-            pack_def, _arch = compose_packs._process_selection(
-                {
-                    "name": "aa-core-skills",
-                    "source": {"url": "https://github.com/y/aa-core-skills", "ref": "main"},
+        v0.7.0 Round 2 (H2 reopen): test must keep the present-pack.yaml
+        path semantically meaningful — real tmp dir + placeholder.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = Path(d)
+            (archive_dir / "pack.yaml").write_text("# stub\n", encoding="utf-8")
+            archive = MagicMock()
+            archive.archive_dir = archive_dir
+            fetch.return_value = archive
+
+            bundled_def = {
+                "name": "aa-core-skills",
+                "source": "bundled",
+                "default-ref": "bundled",
+                "active": [{"kind": "skill", "files": []}],
+            }
+            with unittest.mock.patch(
+                "compose_packs.schema.parse_manifest",
+                return_value={
+                    "version": 2,
+                    "packs": [{"name": "other-pack", "source": {"repo": "x", "ref": "v1"}}],
                 },
-                bundled_manifest={"version": 2, "packs": [bundled_def]},
-                cache_root=Path("/tmp"),
-                host="claude-code",
-            )
-            self.assertEqual(pack_def["name"], "aa-core-skills")
-            self.assertEqual(pack_def.get("active"), bundled_def["active"])
-
-            # Non-bundled name still raises (unchanged behavior).
-            with self.assertRaises(compose_packs.ComposeError) as cm:
-                compose_packs._process_selection(
+            ):
+                # Bundled-default name with URL form: falls back to bundled.
+                pack_def, _arch = compose_packs._process_selection(
                     {
-                        "name": "no-such-pack",
+                        "name": "aa-core-skills",
                         "source": {"url": "https://github.com/y/aa-core-skills", "ref": "main"},
                     },
                     bundled_manifest={"version": 2, "packs": [bundled_def]},
                     cache_root=Path("/tmp"),
                     host="claude-code",
                 )
-            self.assertIn("no-such-pack", str(cm.exception))
+                self.assertEqual(pack_def["name"], "aa-core-skills")
+                self.assertEqual(pack_def.get("active"), bundled_def["active"])
+
+                # Non-bundled name still raises (unchanged behavior). Inside
+                # the same mock block so the manifest parses to the "other-pack"
+                # dict instead of the on-disk stub.
+                with self.assertRaises(compose_packs.ComposeError) as cm:
+                    compose_packs._process_selection(
+                        {
+                            "name": "no-such-pack",
+                            "source": {"url": "https://github.com/y/aa-core-skills", "ref": "main"},
+                        },
+                        bundled_manifest={"version": 2, "packs": [bundled_def]},
+                        cache_root=Path("/tmp"),
+                        host="claude-code",
+                    )
+                self.assertIn("no-such-pack", str(cm.exception))
+
+    @patch("compose_packs.source_fetch.fetch_pack")
+    def test_inline_source_manifest_present_but_malformed_raises(self, fetch) -> None:
+        """v0.7.0 Round 2 (H2 reopen): a present-but-malformed pack.yaml
+        must NOT silently fall back to the bundled default. The pre-v0.7
+        code path ``except schema.ParseError: remote_manifest = None``
+        swallowed schema errors and let an invalid third-party manifest
+        of a default-name pack install the bundled content instead of
+        failing closed.
+
+        This regression test writes a pack.yaml with an invalid
+        ``reroute_hint`` (non-string) on a default-name pack
+        (agent-style). The new code path must raise ComposeError
+        instead of returning the bundled fallback.
+        """
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            archive_dir = pathlib.Path(d)
+            # Present but malformed pack.yaml — reroute_hint must be a string.
+            (archive_dir / "pack.yaml").write_text(
+                "version: 2\npacks:\n"
+                "  - name: agent-style\n"
+                "    source:\n"
+                "      repo: https://example.com/x\n"
+                "      ref: v0.3.5\n"
+                "    active:\n"
+                "      - kind: hook\n"
+                "        hosts: [claude-code]\n"
+                "        reroute_hint: true\n"  # non-string -> schema error
+                "        files:\n"
+                "          - from: x.py\n"
+                "            to: ~/.claude/hooks/x.py\n",
+                encoding="utf-8",
+            )
+            fetch.return_value = source_fetch.PackArchive(
+                url="https://github.com/yzhao062/agent-style",
+                ref="v0.3.5",
+                resolved_commit="ab" * 20, method="ssh",
+                archive_dir=archive_dir,
+                canonical_id="yzhao062/agent-style",
+                cache_key="abcd1234/ab12",
+            )
+            bundled_def = {
+                "name": "agent-style",
+                "source": {"repo": "https://github.com/yzhao062/agent-style", "ref": "v0.3.5"},
+                "passive": [{"files": [{"from": "docs/rule-pack.md", "to": "AGENTS.md"}]}],
+            }
+            selection = {
+                "name": "agent-style",
+                "source": {"url": "https://github.com/yzhao062/agent-style", "ref": "v0.3.5"},
+            }
+            with self.assertRaises(compose_packs.ComposeError) as cm:
+                compose_packs._process_selection(
+                    selection,
+                    bundled_manifest={"version": 2, "packs": [bundled_def]},
+                    cache_root=pathlib.Path(d),
+                    host="claude-code",
+                )
+            msg = str(cm.exception)
+            # Error must name the source (so the consumer knows which
+            # third-party pack is malformed) AND mention reroute_hint
+            # (so they know what to fix).
+            self.assertIn("reroute_hint", msg)
+            self.assertIn("schema validation", msg)
 
 
 # =====================================================================
@@ -1017,6 +1113,60 @@ class TestComposeSummary(unittest.TestCase):
         # Hint should mention how to apply (env var) AND the bootstrap
         # entry-point so the consumer can run it interactively.
         self.assertIn("ANYWHERE_AGENTS_UPDATE", out)
+
+    def test_summary_prints_noise_warnings_block_when_present(self) -> None:
+        # v0.7.0 noise-audit: when the composer flags a third-party hook
+        # with `decision: deny + false-positive-risk: high +
+        # impact-if-allowed: low|medium + missing reroute_hint`, the
+        # summary must surface the warning block at the end so the
+        # consumer sees why the pack tripped the gate. Round 1 review
+        # finding H1 caught that the wire was missing in the initial
+        # staging; this test guards the regression.
+        from packs.noise_budget import NoiseWarning  # local import: paths set up at module top
+        warnings = [
+            NoiseWarning(
+                pack_name="third-party-noisy",
+                entry_index=0,
+                files_to="~/.claude/hooks/x.py",
+                reason="missing reroute_hint",
+            )
+        ]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            compose_packs.print_compose_summary(
+                [{"name": "third-party-noisy"}],
+                {"third-party-noisy": "fetched (https)"},
+                [],
+                host="claude-code",
+                noise_warnings=warnings,
+            )
+        out = buf.getvalue()
+        self.assertIn("Noise-budget", out)
+        self.assertIn("third-party-noisy", out)
+        self.assertIn("noise-audit-override", out)
+
+    def test_summary_omits_noise_block_when_warnings_empty(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            compose_packs.print_compose_summary(
+                [{"name": "p"}],
+                {"p": "no change"},
+                [],
+                host="claude-code",
+                noise_warnings=[],
+            )
+        out = buf.getvalue()
+        self.assertNotIn("Noise-budget", out)
+        # Default (no arg) also omits.
+        buf2 = io.StringIO()
+        with redirect_stdout(buf2):
+            compose_packs.print_compose_summary(
+                [{"name": "p"}],
+                {"p": "no change"},
+                [],
+                host="claude-code",
+            )
+        self.assertNotIn("Noise-budget", buf2.getvalue())
 
 
 class TestPrintAdoptionSummary(unittest.TestCase):

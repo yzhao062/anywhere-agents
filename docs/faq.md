@@ -33,12 +33,36 @@
     `AGENTS.local.md` is your per-project override. Bootstrap never touches it. Use it for project-specific permissions, domain glossaries, or opt-outs from shared defaults.
 
 ??? question "How do I disable the guard hook?"
-    In a fork, remove the user-level section of `bootstrap/bootstrap.sh` and `bootstrap/bootstrap.ps1` that deploys `scripts/guard.py` to `~/.claude/hooks/`. Then repoint your consumers at your fork.
+    Three scopes (v0.7.0):
 
-    In a specific project only, remove the `hooks` entry from `~/.claude/settings.json` manually — but bootstrap will re-install it on the next run unless you have also removed it from the fork.
+    | Env var (set in `~/.claude/settings.json` under `"env"`) | Disables |
+    |---|---|
+    | `AGENT_STYLE_HOOK=off` | Writing-style guard only (banned AI-tell words on `.md` / `.tex` / `.rst` / `.txt` writes) |
+    | `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd guard only (`cd <path> && <cmd>` Bash chains) |
+    | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + session banner |
+
+    Per-guard envs are useful in meta-discussion contexts (a style guide that quotes banned words, a CHANGELOG citing one as an example) without turning off the whole suite.
+
+    **Destructive git / gh approval is NOT bypassable by any env.** No env var disables the `ask` prompt on `git commit`, `git push`, `git reset --hard`, `git merge`, `git rebase`, `gh pr merge`, `gh repo delete`, etc. Human approval is the contract; these guards have no agent-side reroute.
+
+    Full removal: in a fork, remove the user-level section of `bootstrap/bootstrap.sh` / `bootstrap.ps1` that deploys `scripts/guard.py`. In a specific project only, remove the `hooks` entry from `~/.claude/settings.json` manually (bootstrap re-installs it on the next run from upstream).
+
+??? question "Why does the deny message say `Suggested rewrite:`?"
+    v0.7.0 (Round 6 noise audit). When a guard denies a write (banned AI-tell word, compound-cd chain), it embeds a concrete `Suggested rewrite:` line inline so the agent can lift the reroute in one model turn instead of inferring it. Example:
+
+    ```text
+    Writing-style: banned AI-tell words detected in /tmp/notes.md: pivotal.
+    Suggested rewrite: `pivotal` -> key, central.
+    ```
+
+    ```text
+    Compound cd command blocked. Suggested rewrite: `git -C papers/foo status`.
+    ```
+
+    This is faster than `ask`-style prompts for autonomous flows (`/implement-review auto`, headless `claude -p` runs): the agent sees a hard NO plus a concrete alternative, course-corrects, and continues. Destructive operations (git commit / push / reset / merge, gh pr merge / repo delete) still surface as `ask` because they have no automatic reroute.
 
 ??? question "Why does `git push` always ask for confirmation?"
-    The `Git Safety` section of `AGENTS.md` says _"Never run `git commit` or `git push` without explicit user approval."_ This is a deliberate opinion. The guard hook enforces it: even if Claude Code has permissions set to auto-approve `git push`, the hook intercepts and requires explicit confirmation.
+    The `Git Safety` section of `AGENTS.md` says _"Never run `git commit` or `git push` without explicit user approval."_ This is a deliberate opinion. The guard hook enforces it: even if Claude Code has permissions set to auto-approve `git push`, the hook intercepts and requires explicit confirmation. No escape env disables this guard (v0.7.0 Round 6; destructive operations have no agent-side reroute).
 
     To disable, remove the Git Safety section from your fork's `AGENTS.md` and the corresponding rules from `scripts/guard.py`.
 

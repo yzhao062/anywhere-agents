@@ -27,9 +27,17 @@ Dispatches by tool_name. Shared checks:
 4. Destructive git subcommands (push, commit, merge, etc.) → ask  [Bash only]
 5. Destructive gh subcommands (pr create, pr merge, etc.) → ask  [Bash only]
 
-Escape hatch: set env var AGENT_CONFIG_GATES=off (or 0/disabled/false) to
-disable the new writing-style and banner gates only. Existing Bash-level
-checks (compound cd, destructive git/gh) remain active regardless.
+Escape hatches (v0.7.0):
+
+- AGENT_CONFIG_GATES=off (legacy blanket): disables writing-style + banner only.
+- AGENT_STYLE_HOOK=off (per-guard): disables writing-style only.
+- AGENT_COMPOUND_CD_HOOK=off (per-guard): disables compound cd only.
+
+Destructive git/gh `ask` checks have NO agent-side reroute (commit/push/reset/merge
+need human approval) and are NOT disabled by any escape env. Adding any future
+hook-escape env requires updating _ESCAPE_HATCH_ENV_NAMES; the static literal-scan
+test in test_guard.py enforces that no AGENT_*_HOOK string literal exists in this
+file outside that constant.
 """
 import json
 import os
@@ -260,10 +268,126 @@ BANNER_GATE_EXEMPT_TOOLS = frozenset([
 ])
 
 
+# --- v0.7.0 escape hatches (per-guard + legacy blanket) -------------------
+#
+# Round 6 reroute criterion: a guard with an agent-side reroute (rephrase a
+# banned word, use `git -C` instead of `cd && git`) stays as `deny` so the
+# agent course-corrects in one model turn. Per-guard escape envs let the
+# user disable a specific noise-audit guard in meta-discussion contexts
+# (e.g., editing a style-guide document that legitimately quotes banned
+# words) without turning off the whole suite.
+#
+# Adding a future hook-escape env requires extending this constant; the
+# static literal-scan test in test_guard.py asserts no AGENT_*_HOOK string
+# literal exists in this file outside this constant.
+_ESCAPE_HATCH_ENV_NAMES = (
+    "AGENT_CONFIG_GATES",
+    "AGENT_STYLE_HOOK",
+    "AGENT_COMPOUND_CD_HOOK",
+)
+
+
+def _env_disabled(name):
+    """Return True iff env var `name` is set to a disable-truthy value."""
+    val = (os.environ.get(name) or "").strip().lower()
+    return val in ("0", "off", "false", "disabled", "no")
+
+
 def gates_enabled():
-    """Return False if the escape-hatch env var disables the new gates."""
-    val = (os.environ.get("AGENT_CONFIG_GATES") or "").strip().lower()
-    return val not in ("0", "off", "false", "disabled", "no")
+    """Return False if the legacy AGENT_CONFIG_GATES env disables the
+    writing-style + banner gates. v0.7.0 retains this for BC; per-guard envs
+    layer on top via writing_style_enabled() / compound_cd_enabled()."""
+    return not _env_disabled("AGENT_CONFIG_GATES")
+
+
+def writing_style_enabled():
+    """Return False if writing-style gate is disabled by either the legacy
+    blanket env (AGENT_CONFIG_GATES) or the per-guard env (AGENT_STYLE_HOOK)."""
+    return gates_enabled() and not _env_disabled("AGENT_STYLE_HOOK")
+
+
+def compound_cd_enabled():
+    """Return False if compound-cd gate is disabled by the per-guard env
+    (AGENT_COMPOUND_CD_HOOK). NOTE: AGENT_CONFIG_GATES does NOT disable
+    compound-cd (legacy scope is writing-style + banner only)."""
+    return not _env_disabled("AGENT_COMPOUND_CD_HOOK")
+
+
+# --- Per-banned-word reroute hints ----------------------------------------
+#
+# Concrete alternative phrasing for each banned word so the agent can lift
+# the reroute directly from the deny message instead of inferring it. Keep
+# alternatives short (1-3 words) and contextually accurate — these surface
+# inline in the deny message and become the user-visible suggestion.
+#
+# Words without an explicit entry fall back to a generic "rephrase without
+# this term" hint; explicit entries are preferred to reduce model-side
+# inference latency.
+_BANNED_WORD_REROUTES = {
+    "encompass": "cover, include",
+    "burgeoning": "growing, emerging",
+    "pivotal": "key, central",
+    "realm": "area, field, domain",
+    "keen": "strong, active",
+    "adept": "skilled, capable",
+    "endeavor": "effort, attempt, work",
+    "uphold": "support, maintain",
+    "imperative": "essential, required",
+    "profound": "significant, deep",
+    "ponder": "consider, think about",
+    "cultivate": "build, develop",
+    "hone": "refine, sharpen",
+    "delve": "look at, examine, explore",
+    "embrace": "adopt, accept, use",
+    "pave": "lead to, enable",
+    "embark": "start, begin",
+    "monumental": "major, large",
+    "scrutinize": "examine, review",
+    "vast": "large, extensive",
+    "versatile": "flexible, adaptable",
+    "paramount": "primary, top",
+    "foster": "support, promote, encourage",
+    "necessitates": "requires, needs",
+    "provenance": "origin, source",
+    "multifaceted": "complex, varied",
+    "nuance": "detail, distinction",
+    "obliterate": "remove, erase",
+    "articulate": "express, describe, state",
+    "acquire": "get, obtain",
+    "underpin": "support, ground",
+    "underscore": "emphasize, highlight",
+    "harmonize": "align, reconcile",
+    "garner": "gather, get",
+    "undermine": "weaken, damage",
+    "gauge": "measure, assess",
+    "facet": "aspect, side, part",
+    "bolster": "strengthen, support",
+    "groundbreaking": "novel, new",
+    "game-changing": "significant, transformative",
+    "reimagine": "rethink, redesign",
+    "turnkey": "ready-to-use, complete",
+    "intricate": "complex, detailed",
+    "trailblazing": "pioneering, new",
+    "unprecedented": "rare, first-time, new",
+}
+
+
+def _suggest_rewrite(hits):
+    """Return a `Suggested rewrite:` line for a set of banned-word hits.
+
+    For each hit, look up the concrete alternative in _BANNED_WORD_REROUTES
+    (fallback: generic "rephrase without"). Returns a single line beginning
+    with the literal `Suggested rewrite:` token that the noise-budget gate
+    recognizes as a reroute hint.
+    """
+    rewrites = []
+    for word in sorted(set(hits)):
+        alts = _BANNED_WORD_REROUTES.get(word)
+        if alts:
+            rewrites.append(f"`{word}` -> {alts}")
+        else:
+            rewrites.append(f"`{word}` -> rephrase without it")
+    return "Suggested rewrite: " + "; ".join(rewrites) + "."
 
 
 def _content_for_write(tool_name, tool_input):
@@ -397,13 +521,15 @@ def check_writing_style(tool_name, tool_input):
 
     if found:
         hits = ", ".join(sorted(set(found)))
+        rewrite_line = _suggest_rewrite(found)
         return (
             f"Writing-style: banned AI-tell words detected in {file_path}: {hits}. "
+            f"{rewrite_line} "
             f"Per AGENTS.md Writing Defaults, revise without these terms "
             f"(close variants are caught too). Examples inside ``` code fences, "
             f"`inline code`, or LaTeX \\verb/\\texttt are ignored. If a real "
-            f"meta-use is still blocking you, set AGENT_CONFIG_GATES=off in "
-            f"~/.claude/settings.json env and retry."
+            f"meta-use is still blocking you, set AGENT_STYLE_HOOK=off (per-guard) "
+            f"or AGENT_CONFIG_GATES=off (legacy blanket) in ~/.claude/settings.json env."
         )
 
     return None
@@ -500,15 +626,212 @@ def check_banner_emission(tool_name, tool_input):
     return None
 
 
+def _quote_aware_split_on_operators(cmd):
+    """Split ``cmd`` on UNQUOTED shell control operators ``&&``, ``||``,
+    and ``;``. Returns ``[seg, op, seg, op, ..., seg]`` matching the
+    output shape of ``re.split(r"(...)")`` (operators at odd indices).
+
+    Honors POSIX-shell quoting:
+
+      - ``'...'`` single quotes: literal, no escaping inside.
+      - ``"..."`` double quotes: literal for our purposes (we do not
+        expand ``$()`` or ``$var``; we just preserve content as-is).
+      - Backslash escape outside quotes (``\\<char>``): next char is
+        literal (so ``\\&\\&`` is two literal ``&`` chars, not an operator).
+
+    Round 2 review M2-reopen fix: the old raw regex ``re.split(r"&&|;|\\|\\|")``
+    was quote-blind. It misclassified ``cd "a || b"`` (a single cd to a
+    directory literally named ``a || b``) as compound-cd. The walker below
+    correctly treats operators inside quotes as path content.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(cmd)
+    in_single = False
+    in_double = False
+    while i < n:
+        ch = cmd[i]
+        # Backslash escape (POSIX outside single quotes): the next char is
+        # literal. Inside single quotes, backslash has no special meaning.
+        if ch == "\\" and not in_single and i + 1 < n:
+            buf.append(ch)
+            buf.append(cmd[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            # Look for two-char operators first; ; is the only one-char.
+            if i + 1 < n and cmd[i:i + 2] == "&&":
+                parts.append("".join(buf))
+                parts.append("&&")
+                buf = []
+                i += 2
+                continue
+            if i + 1 < n and cmd[i:i + 2] == "||":
+                parts.append("".join(buf))
+                parts.append("||")
+                buf = []
+                i += 2
+                continue
+            if ch == ";":
+                parts.append("".join(buf))
+                parts.append(";")
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
 def check_cd_compound(cmd):
-    """Check if command contains a cd that chains into another command."""
-    # Split on shell operators, preserving order
-    segments = re.split(r"&&|;|\|\|", cmd)
-    for i, seg in enumerate(segments):
-        seg = seg.strip()
-        if seg.startswith("cd ") and i < len(segments) - 1:
+    """Check if command contains a cd that chains into another command.
+
+    Returns True/False for backward compatibility with callers that only
+    care about the boolean outcome (and existing tests). Callers that want
+    the contextual Suggested rewrite: hint should call
+    cd_compound_deny_message(cmd) instead, which returns the full deny
+    message string or None.
+
+    Quote-aware (Round 2 M2 fix): only UNQUOTED ``&&`` / ``||`` / ``;``
+    count as operators. ``cd "a && b"`` is a single cd to a directory
+    literally named ``a && b`` and is NOT a compound command.
+    """
+    parts = _quote_aware_split_on_operators(cmd)
+    # Walk segments (even indices). A segment that starts with ``cd `` and
+    # is followed by another segment (i.e. an operator chained a next
+    # command) is a compound-cd.
+    for i in range(0, len(parts), 2):
+        seg = parts[i].strip()
+        if seg.startswith("cd ") and i + 2 < len(parts):
             return True
     return False
+
+
+def _next_segment_after_cd(cmd):
+    """Return ``(cd_path, separator, follow)`` for the first compound-cd
+    match. ``separator`` is one of ``&&``, ``;``, ``||`` — the literal
+    operator chaining the cd into the next command. Returns
+    ``(None, None, None)`` when no compound-cd match exists.
+
+    Capturing the separator matters for the deny-message reroute suggestion:
+    ``&&`` and ``;`` chain a follow-up command that wants to run inside the
+    target directory (legitimate reroute target — `git -C` for git,
+    path-arg for the rest). ``||`` chains a failure handler that runs only
+    when ``cd`` itself fails, so the follow-up is NOT a command to run
+    inside the directory and the suggested rewrite must not pretend it is.
+
+    Quote-aware (Round 2 M2 fix): operators inside ``'...'`` / ``"..."`` /
+    escaped via ``\\<char>`` are treated as literal path content. See
+    ``_quote_aware_split_on_operators``.
+    """
+    parts = _quote_aware_split_on_operators(cmd)
+    for i in range(0, len(parts), 2):
+        seg_stripped = parts[i].strip()
+        if seg_stripped.startswith("cd ") and i + 2 < len(parts):
+            cd_tokens = seg_stripped.split(None, 1)
+            cd_path = cd_tokens[1].strip() if len(cd_tokens) > 1 else ""
+            separator = parts[i + 1]
+            # Find next non-empty segment after this cd; we may chain across
+            # several empty segments (e.g. ``cd /tmp ;; ls``).
+            for j in range(i + 2, len(parts), 2):
+                follow_stripped = parts[j].strip()
+                if follow_stripped:
+                    return cd_path, separator, follow_stripped
+            return cd_path, separator, ""
+    return None, None, None
+
+
+def _operators_after_cd(cmd):
+    """Return the set of operator strings (``"&&"`` / ``"||"`` / ``";"``)
+    that appear AFTER the first compound ``cd`` segment. Used to detect
+    mixed-operator chains where a single suggested-rewrite cannot capture
+    the user's full intent.
+    """
+    parts = _quote_aware_split_on_operators(cmd)
+    for i in range(0, len(parts), 2):
+        seg = parts[i].strip()
+        if seg.startswith("cd ") and i + 2 < len(parts):
+            return {parts[j] for j in range(i + 1, len(parts), 2)}
+    return set()
+
+
+def cd_compound_deny_message(cmd):
+    """Return the deny message for a compound-cd command, with an inline
+    Suggested rewrite: line that lifts the path and the chained command
+    so the agent can copy the reroute directly. Returns None if cmd is not
+    a compound-cd violation.
+
+    Separator-aware suggestions:
+      - ``cd <path> && <cmd>`` or ``cd <path>; <cmd>`` (sequencing): the
+        follow-up command is meant to run inside ``<path>``, so we lift it
+        to ``git -C <path> <rest>`` for git or to a path-as-argument hint
+        for other commands.
+      - ``cd <path> || <handler>`` (failure handler): the follow-up only
+        runs when ``cd`` fails, so it is not a command to run inside the
+        directory. Suggest splitting into two separate tool calls without
+        suggesting any rewrite that runs ``handler`` inside ``<path>``.
+      - Mixed ``||`` plus ``&&`` (Round 2 M2): the user wants both a
+        failure handler AND a success follow-up; no single one-liner
+        captures both. Suggest splitting into explicit steps.
+    """
+    if not check_cd_compound(cmd):
+        return None
+    cd_path, separator, follow = _next_segment_after_cd(cmd)
+    operators = _operators_after_cd(cmd)
+    has_mixed_modes = ("||" in operators) and ("&&" in operators or ";" in operators)
+    if has_mixed_modes:
+        # Mixed failure-and-success operators — a one-liner rewrite cannot
+        # preserve user intent. Fall back to a generic split-into-steps
+        # message that names the offending path for context.
+        suggestion = (
+            f"split into explicit steps (this chain mixes `||` failure "
+            f"and `&&`/`;` success operators after `cd {cd_path}`, which "
+            f"no single rewrite captures); use separate tool calls so "
+            f"each step's success/failure handling stays explicit"
+        )
+    elif separator == "||":
+        # Failure handler — do NOT suggest running the handler in cd_path;
+        # that would be incorrect (it runs only when cd fails). Suggest
+        # splitting the construct into two separate tool calls.
+        suggestion = (
+            f"split the construct into two tool calls — first attempt the "
+            f"directory change separately (e.g., `git -C {cd_path} <cmd>` for "
+            f"git, or check the path exists), then handle the failure path "
+            f"with a separate command"
+        )
+    elif follow and follow.split(None, 1)[0] == "git" and cd_path:
+        # git chained with `&&` / `;` — lift to git -C
+        git_rest = follow.split(None, 1)[1] if " " in follow else ""
+        suggestion = f"`git -C {cd_path} {git_rest}`".rstrip("` ").rstrip() + "`"
+    elif follow and cd_path:
+        suggestion = (
+            f"run `{follow}` from `{cd_path}` (pass path as an argument or "
+            f"use a separate tool call with cwd)"
+        )
+    else:
+        suggestion = (
+            "use `git -C <path> <cmd>` for git, or pass the path as an "
+            "argument instead of cd-ing first"
+        )
+    return (
+        "Compound cd command blocked (Claude Code flags `cd <path> && <cmd>` "
+        "for approval even when both halves are individually allowed). "
+        f"Suggested rewrite: {suggestion}. "
+        "To bypass this guard set AGENT_COMPOUND_CD_HOOK=off in "
+        "~/.claude/settings.json env."
+    )
 
 
 def strip_wrappers(parts):
@@ -652,10 +975,12 @@ def main():
     # whenever `tool_input.command` is populated.
     if tool_name and gates_enabled():
         # Check 1 (new): writing-style gate on Write/Edit/MultiEdit to prose files.
-        deny = check_writing_style(tool_name, tool_input)
-        if deny:
-            print(make_response("deny", deny))
-            return
+        # Honors the AGENT_STYLE_HOOK per-guard env in addition to AGENT_CONFIG_GATES.
+        if writing_style_enabled():
+            deny = check_writing_style(tool_name, tool_input)
+            if deny:
+                print(make_response("deny", deny))
+                return
 
         # Check 2 (new): banner gate on most tool calls until banner acknowledged.
         deny = check_banner_emission(tool_name, tool_input)
@@ -673,13 +998,14 @@ def main():
     if not cmd:
         return
 
-    # Check 3: compound cd (on raw string, before shlex parsing)
-    if check_cd_compound(cmd):
-        print(make_response(
-            "deny",
-            "Compound cd command blocked. Use separate tool calls or path arguments."
-        ))
-        return
+    # Check 3: compound cd (on raw string, before shlex parsing). Honors the
+    # AGENT_COMPOUND_CD_HOOK per-guard env. AGENT_CONFIG_GATES does NOT
+    # disable compound-cd (legacy scope: writing-style + banner only).
+    if compound_cd_enabled():
+        deny = cd_compound_deny_message(cmd)
+        if deny:
+            print(make_response("deny", deny))
+            return
 
     # Parse into tokens with proper quote handling
     try:

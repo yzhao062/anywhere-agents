@@ -351,6 +351,28 @@ def _validate_active(
                 f"{type(required).__name__})"
             )
 
+        # v0.7.0 (Round 6 noise-audit): reroute_hint declares the hook
+        # author's `Suggested rewrite:` line that the runtime deny message
+        # embeds. The composer's noise-budget gate counts hook entries with
+        # decision: deny + false-positive-risk: high + impact-if-allowed:
+        # low|medium + missing reroute_hint as "noisy". Optional; absent
+        # parses as None (= "no reroute"). Only meaningful on kind: hook
+        # entries; rejected on other kinds to keep the schema surface tight.
+        reroute_hint = entry.get("reroute_hint")
+        if reroute_hint is not None:
+            if kind != "hook":
+                raise ParseError(
+                    f"manifest {path}: packs[{idx}].active[{j}] "
+                    f"({pack_name}) 'reroute_hint' is only valid on "
+                    f"kind: hook entries (got kind: {kind!r})"
+                )
+            if not isinstance(reroute_hint, str):
+                raise ParseError(
+                    f"manifest {path}: packs[{idx}].active[{j}] "
+                    f"({pack_name}) 'reroute_hint' must be a string "
+                    f"(got {type(reroute_hint).__name__})"
+                )
+
         # v0.6.0: re-reject update_policy: auto on active entries. The
         # trust-model paragraph in pack-architecture.md (§ "Source resolution
         # and active-code trust") and the churn-semantics paragraph already

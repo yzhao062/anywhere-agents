@@ -56,6 +56,7 @@ from packs import config as config_mod  # noqa: E402
 from packs import dispatch  # noqa: E402
 from packs import handlers  # noqa: E402 — side-effect: registers handlers
 from packs import locks  # noqa: E402
+from packs import noise_budget  # noqa: E402
 from packs import passive as passive_mod  # noqa: E402
 from packs import reconciliation  # noqa: E402
 from packs import schema  # noqa: E402
@@ -553,14 +554,24 @@ def clear_pending_updates_json(project_root: Path) -> None:
         pass
 
 
-def print_compose_summary(selections, outcomes, pending_updates, host: str) -> None:
+def print_compose_summary(
+    selections,
+    outcomes,
+    pending_updates,
+    host: str,
+    noise_warnings=None,
+) -> None:
     """Print a concise per-pack outcome line, host, + pending-update hint.
 
     ``selections`` is the resolved selection list. ``outcomes`` is a
     name → label map (e.g., ``"fetched (ssh)"``, ``"no change"``,
     ``"deferred (drift)"``). ``pending_updates`` is the list passed
     to :func:`write_pending_updates_json`; non-empty triggers the
-    apply-instructions hint.
+    apply-instructions hint. ``noise_warnings`` (v0.7.0) is the optional
+    third-party hook noise-budget report from
+    :func:`packs.noise_budget.evaluate_noise_budget`; non-empty triggers
+    a multiline warnings block after the host line so consumers see why
+    a third-party pack tripped the gate.
     """
     # TODO(v0.6.0 Phase 4): emit stderr summary line on update_policy:auto
     # silent refresh (passive pack's resolved commit changed and was applied
@@ -585,6 +596,13 @@ def print_compose_summary(selections, outcomes, pending_updates, host: str) -> N
             f"interactively to apply, or set "
             f"ANYWHERE_AGENTS_UPDATE=apply for non-interactive auto-apply."
         )
+    # v0.7.0 noise-budget warnings (third-party hooks missing reroute_hint).
+    # Render after the pending-update hint so the warnings stay visible at
+    # the end of the summary block.
+    warnings_block = noise_budget.render_warnings_block(noise_warnings or [])
+    if warnings_block:
+        print()
+        print(warnings_block)
 
 
 def print_adoption_summary(
@@ -934,18 +952,33 @@ def _process_selection(
         # Read the third-party manifest from the fetched archive; build
         # a name → pack lookup so the consumer-supplied ``name`` resolves
         # to one of the packs declared by the upstream repo's pack.yaml.
-        # v0.5.4: when upstream pack.yaml is absent OR doesn't declare
-        # the requested name, fall back to the bundled pack-def for
-        # ``DEFAULT_V2_SELECTIONS`` names (e.g., agent-style v0.3.x
-        # predates the v0.4.0 manifest format — the bundled
-        # ``bootstrap/packs.yaml`` is the source of truth for what files
-        # to copy). The fetched archive_dir still provides the byte
-        # source for passive handlers via ``ctx.pack_source_dir``.
+        # v0.5.4: when upstream pack.yaml is absent (file does NOT exist),
+        # fall back to the bundled pack-def for ``DEFAULT_V2_SELECTIONS``
+        # names (e.g., agent-style v0.3.x predates the v0.4.0 manifest
+        # format — the bundled ``bootstrap/packs.yaml`` is the source of
+        # truth for what files to copy). The fetched archive_dir still
+        # provides the byte source for passive handlers via
+        # ``ctx.pack_source_dir``.
+        #
+        # v0.7.0 Round 2 (H2 reopen): a present-but-malformed pack.yaml
+        # must NOT silently fall back to the bundled default. The pre-v0.7
+        # ``except schema.ParseError: remote_manifest = None`` path
+        # swallowed parse errors (including the new ``reroute_hint``
+        # validation), so an invalid third-party manifest of a default-name
+        # pack would silently install the bundled content instead of
+        # failing validation. Distinguish missing (file does not exist —
+        # fallback) from malformed (file exists but schema rejects —
+        # fail closed).
         manifest_path = archive.archive_dir / "pack.yaml"
-        try:
-            remote_manifest = schema.parse_manifest(manifest_path)
-        except schema.ParseError:
-            remote_manifest = None
+        remote_manifest = None
+        if manifest_path.exists():
+            try:
+                remote_manifest = schema.parse_manifest(manifest_path)
+            except schema.ParseError as exc:
+                raise ComposeError(
+                    f"remote pack.yaml at {source_url}@{source_ref} "
+                    f"failed schema validation: {exc}"
+                ) from exc
         pack_def = None
         if remote_manifest is not None:
             packs_by_name = {p["name"]: p for p in remote_manifest.get("packs", [])}
@@ -1922,11 +1955,40 @@ def _do_compose_v2(
         ]
     else:
         deferred_for_summary = []
+
+    # v0.7.0 noise-budget evaluation. Inspect every third-party
+    # (inline-source / non-bundled) pack's resolved manifest for noisy
+    # hook entries (decision: deny + false-positive-risk: high +
+    # impact-if-allowed: low|medium + missing reroute_hint). Bundled
+    # first-party packs are skipped because they do not currently ship
+    # active hook entries through the pack manifest in v0.7.0 (per
+    # plan-review Round 3 finding 2; first-party invariant deferred to
+    # v1.0 alongside guard.py extraction). Consumer per-pack override
+    # ``noise-audit-override: accept-deny`` in agent-config.yaml
+    # silences the warning for that pack.
+    third_party_packs: list[tuple[str, dict[str, Any]]] = [
+        (selection["name"], pack)
+        for (selection, pack, archive, _recorded) in resolved
+        if archive is not None
+    ]
+    consumer_overrides: dict[str, str] = {
+        selection["name"]: selection["noise-audit-override"]
+        for (selection, _pack, archive, _recorded) in resolved
+        if archive is not None
+        and isinstance(selection.get("noise-audit-override"), str)
+    }
+    noise_warnings = noise_budget.evaluate_noise_budget(
+        third_party_packs,
+        consumer_overrides,
+        host,
+    )
+
     print_compose_summary(
         selections,
         outcomes,
         deferred_for_summary,
         host=host,
+        noise_warnings=noise_warnings,
     )
 
     return 0

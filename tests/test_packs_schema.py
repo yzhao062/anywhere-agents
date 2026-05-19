@@ -725,5 +725,75 @@ class StructuralTests(_TmpDirCase):
         self.assertEqual(parsed["packs"], [])
 
 
+class RerouteHintFieldTests(_TmpDirCase):
+    """v0.7.0 Round 6 noise-audit: optional reroute_hint on kind: hook only.
+
+    BC: legacy manifests without the field parse unchanged.
+    """
+
+    _BASE_HOOK = (
+        "version: 2\npacks:\n"
+        "  - name: p\n"
+        "    source:\n"
+        "      repo: https://example.com/x\n"
+        "      ref: v1\n"
+        "    active:\n"
+        "      - kind: hook\n"
+        "        hosts: [claude-code]\n"
+        "        trigger: PreToolUse\n"
+        "        files:\n"
+        "          - from: x.py\n"
+        "            to: ~/.claude/hooks/x.py\n"
+    )
+
+    def test_hook_with_string_reroute_hint_accepts(self) -> None:
+        path = _write_manifest(
+            self.root, self._BASE_HOOK + "        reroute_hint: 'use git -C'\n"
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(
+            parsed["packs"][0]["active"][0]["reroute_hint"], "use git -C"
+        )
+
+    def test_hook_without_reroute_hint_accepts(self) -> None:
+        # BC: legacy manifest without the field parses + composes unchanged.
+        path = _write_manifest(self.root, self._BASE_HOOK)
+        parsed = schema.parse_manifest(path)
+        self.assertNotIn("reroute_hint", parsed["packs"][0]["active"][0])
+
+    def test_non_hook_with_reroute_hint_rejects(self) -> None:
+        # reroute_hint on kind: skill is a manifest error — the field has no
+        # meaning outside hook entries (skills do not deny).
+        path = _write_manifest(
+            self.root,
+            "version: 2\npacks:\n"
+            "  - name: p\n"
+            "    source:\n"
+            "      repo: https://example.com/x\n"
+            "      ref: v1\n"
+            "    active:\n"
+            "      - kind: skill\n"
+            "        hosts: [claude-code]\n"
+            "        reroute_hint: 'use git -C'\n"
+            "        files:\n"
+            "          - from: x/\n"
+            "            to: .claude/skills/x/\n",
+        )
+        with self.assertRaisesRegex(
+            schema.ParseError, r"reroute_hint.*only valid on kind: hook"
+        ):
+            schema.parse_manifest(path)
+
+    def test_hook_with_non_string_reroute_hint_rejects(self) -> None:
+        # YAML parses `true` as bool; the field must be a string.
+        path = _write_manifest(
+            self.root, self._BASE_HOOK + "        reroute_hint: true\n"
+        )
+        with self.assertRaisesRegex(
+            schema.ParseError, r"reroute_hint.*must be a string"
+        ):
+            schema.parse_manifest(path)
+
+
 if __name__ == "__main__":
     unittest.main()

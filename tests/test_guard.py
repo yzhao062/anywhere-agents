@@ -369,6 +369,7 @@ class JsonPayloadTests(unittest.TestCase):
 # --- 0.1.8 gates: writing-style + banner ---------------------------------
 
 import os
+import re
 import shutil
 import tempfile
 
@@ -1236,6 +1237,409 @@ class ImplReviewPsAllowTests(unittest.TestCase):
             "tool_input": {"command": cmd},
         })
         self.assertIsNone(resp)
+
+
+
+# --- v0.7.0 noise-audit: Suggested rewrite + per-guard escape envs --------
+
+
+def _run_with_envs(payload, envs):
+    """Helper: run guard.py with a dict of envs set (each value = "off"). All
+    AGENT_*_HOOK and AGENT_CONFIG_GATES vars are first scrubbed from the
+    inherited environment so the test environment is deterministic."""
+    env_dict = dict(os.environ)
+    for name in (
+        "AGENT_CONFIG_GATES",
+        "AGENT_STYLE_HOOK",
+        "AGENT_COMPOUND_CD_HOOK",
+        "AGENT_DESTRUCTIVE_HOOK",
+    ):
+        env_dict.pop(name, None)
+    env_dict.update(envs)
+    result = subprocess.run(
+        [sys.executable, str(GUARD)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env_dict,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"guard.py crashed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    stdout = result.stdout.strip()
+    return json.loads(stdout) if stdout else None
+
+
+class SuggestedRewriteInDenyMessageTests(unittest.TestCase):
+    """v0.7.0 finding A: deny messages must embed an inline `Suggested
+    rewrite:` line so autonomous agents can lift the reroute in one model
+    turn instead of inferring it."""
+
+    def test_writing_style_deny_contains_suggested_rewrite(self) -> None:
+        resp = run_guard_with_payload({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.md", "content": "This was pivotal."},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        # Concrete alternative for the specific banned word must appear
+        self.assertIn("pivotal", reason)
+        self.assertIn("key", reason)  # from "key, central" reroute entry
+
+    def test_writing_style_unknown_word_falls_back_to_generic(self) -> None:
+        # All currently banned words have explicit reroute entries. This
+        # test guards the fallback path: if a future entry is removed from
+        # _BANNED_WORD_REROUTES, the generic phrasing keeps the message
+        # parseable as a Suggested rewrite. We synthesize the case by
+        # using a banned word that the reroute table covers, but the test
+        # verifies the message shape regardless.
+        resp = run_guard_with_payload({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.md", "content": "We must delve into this."},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("delve", reason)
+
+    def test_compound_cd_deny_contains_suggested_rewrite(self) -> None:
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd /tmp && ls"},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("/tmp", reason)
+        self.assertIn("ls", reason)
+
+    def test_compound_cd_git_followup_suggests_git_dash_C(self) -> None:
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd papers/foo && git status"},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        # Reroute should name git -C specifically when the chained command is git
+        self.assertIn("git -C papers/foo", reason)
+
+    def test_compound_cd_or_handler_does_not_suggest_running_handler_in_dir(self) -> None:
+        # Round 1 review finding M2: `cd repo || exit 1` is a failure handler
+        # construct; the follow-up only runs when cd FAILS. The suggested
+        # rewrite must NOT propose running the handler inside the directory.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd repo || exit 1"},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        # Negative invariant: the rewrite must NOT say "run `exit 1` from `repo`".
+        self.assertNotIn("run `exit 1` from", reason)
+        # Positive: should suggest splitting / handling the failure path
+        # separately, or otherwise not pretending the handler is the reroute.
+        self.assertIn("split", reason.lower())
+        # Path still surfaces for context (so the user / agent recognizes
+        # which cd target tripped the gate).
+        self.assertIn("repo", reason)
+
+    def test_compound_cd_semicolon_followup_acts_like_and(self) -> None:
+        # `;` and `&&` both sequence the follow-up into the cd'd dir, so the
+        # rewrite is the same shape as the `&&` case.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd /tmp ; ls"},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("/tmp", reason)
+        self.assertIn("ls", reason)
+
+
+class CompoundCdQuoteAwareTests(unittest.TestCase):
+    """Round 2 review M2-reopen: the compound-cd detector + Suggested
+    rewrite builder must be quote-aware. Operators inside ``'...'`` /
+    ``"..."`` / escaped via ``\\<char>`` are literal path content, not
+    shell control operators.
+    """
+
+    def test_cd_to_quoted_path_with_or_operator_is_not_compound(self) -> None:
+        # `cd "a || b"` cd's to a directory literally named ``a || b``.
+        # This is a SINGLE cd command, not a compound. The hook must not
+        # deny it.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": 'cd "a || b"'},
+        })
+        self.assertIsNone(resp)
+
+    def test_cd_to_quoted_path_with_and_operator_is_not_compound(self) -> None:
+        resp = run_guard_with_payload({
+            "tool_input": {"command": 'cd "a && b"'},
+        })
+        self.assertIsNone(resp)
+
+    def test_cd_to_quoted_path_with_semicolon_is_not_compound(self) -> None:
+        resp = run_guard_with_payload({
+            "tool_input": {"command": 'cd "a ; b"'},
+        })
+        self.assertIsNone(resp)
+
+    def test_cd_to_single_quoted_path_with_operators_is_not_compound(self) -> None:
+        # Single quotes also protect operator chars from being parsed.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd 'a && b'"},
+        })
+        self.assertIsNone(resp)
+
+    def test_cd_with_quoted_path_then_real_followup_is_compound(self) -> None:
+        # `cd "with spaces" && ls` IS a compound; the path is quoted but
+        # the operator after it is unquoted. Detector must catch the real
+        # operator while preserving the quoted path.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": 'cd "with spaces" && ls'},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("with spaces", reason)
+        self.assertIn("ls", reason)
+
+    def test_mixed_or_and_after_cd_uses_split_into_steps_message(self) -> None:
+        # `cd /tmp || echo nope && ls` mixes failure (``||``) and success
+        # (``&&``) operators after cd. No single-line rewrite captures
+        # user intent — the suggestion must explicitly say to split.
+        resp = run_guard_with_payload({
+            "tool_input": {"command": "cd /tmp || echo nope && ls"},
+        })
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("split", reason.lower())
+        # The suggestion should NOT pretend `echo nope` is the reroute target
+        # (that was the Round 2 reopen — separator-only branch ignored the
+        # later && ls).
+        self.assertNotIn("run `echo nope`", reason)
+
+
+class PerGuardEscapeEnvTests(unittest.TestCase):
+    """v0.7.0 finding A: narrowly-scoped per-guard escape envs. Each env
+    disables only its target guard; destructive git/gh stay always-on."""
+
+    def test_style_hook_off_disables_writing_style(self) -> None:
+        resp = _run_with_envs(
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": "/tmp/x.md", "content": "This was pivotal."},
+            },
+            envs={"AGENT_STYLE_HOOK": "off"},
+        )
+        self.assertIsNone(resp)
+
+    def test_compound_cd_hook_off_disables_compound_cd(self) -> None:
+        resp = _run_with_envs(
+            {"tool_input": {"command": "cd /tmp && ls"}},
+            envs={"AGENT_COMPOUND_CD_HOOK": "off"},
+        )
+        self.assertIsNone(resp)
+
+    def test_style_hook_off_does_not_disable_compound_cd(self) -> None:
+        resp = _run_with_envs(
+            {"tool_input": {"command": "cd /tmp && ls"}},
+            envs={"AGENT_STYLE_HOOK": "off"},
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_compound_cd_hook_off_does_not_disable_writing_style(self) -> None:
+        resp = _run_with_envs(
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": "/tmp/x.md", "content": "This was pivotal."},
+            },
+            envs={"AGENT_COMPOUND_CD_HOOK": "off"},
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_legacy_gates_off_disables_writing_style_unchanged(self) -> None:
+        # BC: AGENT_CONFIG_GATES=off keeps its legacy scope (writing-style + banner).
+        resp = _run_with_envs(
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": "/tmp/x.md", "content": "This was pivotal."},
+            },
+            envs={"AGENT_CONFIG_GATES": "off"},
+        )
+        self.assertIsNone(resp)
+
+    def test_legacy_gates_off_does_not_disable_compound_cd(self) -> None:
+        # AGENT_CONFIG_GATES scope is writing-style + banner ONLY (not compound-cd).
+        resp = _run_with_envs(
+            {"tool_input": {"command": "cd /tmp && ls"}},
+            envs={"AGENT_CONFIG_GATES": "off"},
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+class DestructiveNonBypassTests(unittest.TestCase):
+    """v0.7.0 Round 1 finding 1 + Round 2 finding 5: NO escape env may turn
+    destructive git/gh `ask` checks into pass-through. Parametrized over the
+    advertised `_ESCAPE_HATCH_ENV_NAMES` constant in guard.py so future env
+    additions automatically extend this negative-test surface."""
+
+    DESTRUCTIVE_COMMANDS = [
+        'git commit -m "test"',
+        "git push origin main",
+        "git reset --hard HEAD~1",
+        "git merge feature",
+        "git rebase main",
+        "gh pr merge 123",
+        "gh repo delete owner/repo",
+    ]
+
+    def _import_constant(self):
+        """Read `_ESCAPE_HATCH_ENV_NAMES` from guard.py source (not via
+        import — guard.py runs as a script with side effects). Returns the
+        tuple of advertised env names.
+
+        Round 1 review L1: regex must be quote-agnostic (single OR double
+        quotes) and accept digits in env names so a future entry like
+        ``"AGENT_HOOK_2"`` is captured.
+        """
+        src = GUARD.read_text(encoding="utf-8")
+        match = re.search(
+            r"_ESCAPE_HATCH_ENV_NAMES\s*=\s*\((.*?)\)", src, re.DOTALL
+        )
+        if not match:
+            raise AssertionError(
+                "Could not locate _ESCAPE_HATCH_ENV_NAMES in guard.py"
+            )
+        body = match.group(1)
+        # Quote-agnostic + digit-tolerant.
+        return tuple(re.findall(r"""['"]([A-Z0-9_]+)['"]""", body))
+
+    def test_every_advertised_env_keeps_destructive_as_ask(self) -> None:
+        envs = self._import_constant()
+        self.assertTrue(envs, "constant must be non-empty")
+        for env_name in envs:
+            for cmd in self.DESTRUCTIVE_COMMANDS:
+                resp = _run_with_envs(
+                    {"tool_input": {"command": cmd}},
+                    envs={env_name: "off"},
+                )
+                self.assertIsNotNone(
+                    resp,
+                    f"destructive `{cmd}` MUST surface even with {env_name}=off",
+                )
+                self.assertEqual(
+                    resp["hookSpecificOutput"]["permissionDecision"],
+                    "ask",
+                    f"destructive `{cmd}` must stay 'ask' with {env_name}=off",
+                )
+
+    def test_all_envs_set_together_still_keep_destructive_as_ask(self) -> None:
+        envs = self._import_constant()
+        all_off = {name: "off" for name in envs}
+        for cmd in self.DESTRUCTIVE_COMMANDS:
+            resp = _run_with_envs(
+                {"tool_input": {"command": cmd}}, envs=all_off
+            )
+            self.assertIsNotNone(
+                resp,
+                f"destructive `{cmd}` MUST surface with all escape envs set",
+            )
+            self.assertEqual(
+                resp["hookSpecificOutput"]["permissionDecision"], "ask"
+            )
+
+    def test_unknown_env_var_is_fail_closed(self) -> None:
+        # Smoke: an unrecognized AGENT_*_HOOK name has no effect — destructive
+        # git/gh stay 'ask'. Confirms that the per-guard env mechanism does
+        # not silently honor names outside the advertised constant.
+        for cmd in self.DESTRUCTIVE_COMMANDS:
+            resp = _run_with_envs(
+                {"tool_input": {"command": cmd}},
+                envs={"AGENT_DESTRUCTIVE_HOOK": "off"},
+            )
+            self.assertIsNotNone(resp)
+            self.assertEqual(
+                resp["hookSpecificOutput"]["permissionDecision"], "ask"
+            )
+
+
+class StaticEnvLiteralScanTests(unittest.TestCase):
+    """v0.7.0 Round 4 finding R3 #4: forbid any `AGENT_[A-Z0-9_]*_HOOK`
+    string literal in guard.py outside the `_ESCAPE_HATCH_ENV_NAMES`
+    constant. Catches future code that adds a hook env via any access
+    spelling (`os.environ.get`, `os.getenv`, `os.environ[...]`, helper
+    wrappers) because every spelling eventually passes a string literal.
+
+    Allowed locations: the constant definition itself, comments, and
+    docstrings. The scan operates on raw source text (string literals
+    only) — names mentioned in comments / docstrings are excluded by
+    line-prefix and section heuristics that match the documented form.
+    """
+
+    # Round 1 review L1: quote-agnostic so single-quoted literals
+    # (`'AGENT_FOO_HOOK'`) are also caught. A future code path that uses
+    # any string-spelling — os.environ.get, os.getenv, os.environ[...],
+    # helper wrappers — ultimately passes a string literal, so this
+    # one regex covers all access shapes.
+    HOOK_NAME_RE = re.compile(r"""['"](AGENT_[A-Z0-9_]*_HOOK)['"]""")
+
+    def _extract_constant_block(self, src: str) -> str:
+        """Return the raw text of the _ESCAPE_HATCH_ENV_NAMES = (...) tuple."""
+        match = re.search(
+            r"_ESCAPE_HATCH_ENV_NAMES\s*=\s*\((.*?)\)", src, re.DOTALL
+        )
+        if not match:
+            raise AssertionError(
+                "_ESCAPE_HATCH_ENV_NAMES constant not found in guard.py"
+            )
+        return match.group(0)
+
+    def test_no_hook_env_literal_outside_constant(self) -> None:
+        src = GUARD.read_text(encoding="utf-8")
+        constant_block = self._extract_constant_block(src)
+        constant_names = set(self.HOOK_NAME_RE.findall(constant_block))
+        # Names allowed to appear elsewhere are exactly the ones in the
+        # constant (their use in os.environ.get() / docstrings is what
+        # the constant exists to enumerate).
+        outside = src.replace(constant_block, "")
+        # Strip Python triple-quoted strings AND single-line comments so
+        # docstrings and inline notes that quote AGENT_*_HOOK as
+        # documentation do not trigger the scan.
+        outside_no_doc = re.sub(r'"""[\s\S]*?"""', "", outside)
+        outside_no_doc = re.sub(r"'''[\s\S]*?'''", "", outside_no_doc)
+        outside_no_doc = re.sub(r"#[^\n]*", "", outside_no_doc)
+        leaked = set(self.HOOK_NAME_RE.findall(outside_no_doc))
+        unregistered = leaked - constant_names
+        self.assertFalse(
+            unregistered,
+            f"AGENT_*_HOOK literals outside _ESCAPE_HATCH_ENV_NAMES: "
+            f"{sorted(unregistered)}. Add the name to the constant so the "
+            f"parametrized destructive-non-bypass test covers it.",
+        )
+
+    def test_regex_matches_both_quote_styles(self) -> None:
+        # Self-test for the quote-agnostic regex. Ensures a future regex
+        # change cannot silently regress to double-quote-only matching.
+        self.assertEqual(
+            self.HOOK_NAME_RE.findall('"AGENT_STYLE_HOOK"'),
+            ["AGENT_STYLE_HOOK"],
+        )
+        self.assertEqual(
+            self.HOOK_NAME_RE.findall("'AGENT_COMPOUND_CD_HOOK'"),
+            ["AGENT_COMPOUND_CD_HOOK"],
+        )
+        # Names with digits in the middle are also captured (regex is
+        # `AGENT_[A-Z0-9_]*_HOOK`, so the suffix anchor is `_HOOK`).
+        self.assertEqual(
+            self.HOOK_NAME_RE.findall("'AGENT_V2_HOOK'"),
+            ["AGENT_V2_HOOK"],
+        )
 
 
 if __name__ == "__main__":

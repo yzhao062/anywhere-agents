@@ -222,15 +222,25 @@ Bootstrap deploys `scripts/guard.py` to `~/.claude/hooks/guard.py` and wires it 
 
 | Gate | Tool scope | Trigger | Action |
 |---|---|---|---|
-| Writing-style | `Write`, `Edit`, `MultiEdit` on `.md` / `.tex` / `.rst` / `.txt` | Outgoing content contains a banned AI-tell word (see Writing Defaults list) | **deny** with hit list |
+| Writing-style | `Write`, `Edit`, `MultiEdit` on `.md` / `.tex` / `.rst` / `.txt` | Outgoing content contains a banned AI-tell word (see Writing Defaults list) | **deny** with hit list and inline `Suggested rewrite:` line naming concrete alternatives |
 | Banner emission | Any tool except `Read`, `Grep`, `Glob`, `Skill`, `Task`, `TodoWrite`, `BashOutput`, `WebFetch`, `WebSearch`, `ToolSearch`, `LS`, `NotebookRead`; plus `Write`/`Edit`/`MultiEdit` whose target path exactly equals `<project-root>/.agent-config/banner-emitted.json` after absolute-path normalization and Windows case folding | `<project-root>/.agent-config/session-event.json.ts > <project-root>/.agent-config/banner-emitted.json.ts`. `<project-root>` is found by walking up from `cwd` until `.agent-config/bootstrap.{sh,ps1}` is present. Source repos (no `.agent-config/`) and unrelated directories skip the gate entirely | **deny** with instruction to emit banner + write acknowledgment to the per-project ack file |
-| Compound `cd` | `Bash` | Command contains `cd <path> && <cmd>` or `cd <path>; <cmd>` | **deny** with suggestion to use `git -C` or path arguments |
+| Compound `cd` | `Bash` | Command contains `cd <path> && <cmd>` or `cd <path>; <cmd>` | **deny** with inline `Suggested rewrite:` line (e.g. `git -C <path> <cmd>` for git, or pass the path as an argument) |
 | Destructive git | `Bash` | `git push`, `git commit`, `git merge`, `git rebase`, `git reset --hard`, `git clean`, `git branch -d/-D`, `git tag -d`, `git stash drop/clear` | **ask** (user confirms) |
 | Destructive gh | `Bash` | `gh pr create`, `gh pr merge`, `gh pr close`, `gh repo delete` | **ask** (user confirms) |
 
-**Escape hatch:** set env var `AGENT_CONFIG_GATES=off` (or `0`/`disabled`/`false`) via the `env` block in `~/.claude/settings.json` to disable the two new gates (writing-style and banner). The compound-cd / destructive-git / destructive-gh checks remain active regardless, since they guard against muscle-memory mistakes that do not tolerate false positives.
+**Round 6 noise audit (v0.7.0):** Deny messages embed a concrete `Suggested rewrite:` line so an autonomous agent (`/implement-review auto`, headless `claude -p`, any unattended loop) can lift the reroute in one model turn instead of inferring it. Destructive operations stay `ask` because they have no agent-side reroute; human approval is the contract.
 
-Setting the escape hatch is the right move when a legitimate write has a banned word in *meta-discussion* context (for example, a style-guide document that quotes banned words as examples of what to avoid), or when a prompt-layer failure is blocking legitimate work. Fix the false positive, then remove the override.
+**Escape hatches:** set the corresponding env var in the `env` block of `~/.claude/settings.json`. Disable values: `off` / `0` / `disabled` / `false` / `no`.
+
+| Env var | Disables |
+|---|---|
+| `AGENT_STYLE_HOOK=off` | Writing-style gate only |
+| `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd gate only |
+| `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + banner only (BC-preserved) |
+
+**Destructive git / gh approval is NOT bypassable by ANY env var.** No escape hatch turns the `ask` prompt into pass-through. The guards have no automatic reroute; human approval is the contract. The advertised env-var set lives in `scripts/guard.py:_ESCAPE_HATCH_ENV_NAMES`; a static literal-scan test enforces that no future hook env var can be added without registering it there.
+
+Set a per-guard escape env when a legitimate write has a banned word in *meta-discussion* context (a style-guide document that quotes banned words as examples; a CHANGELOG entry that cites one). Prefer the narrowest env that unblocks (`AGENT_STYLE_HOOK=off` over `AGENT_CONFIG_GATES=off`) so the other gates stay live. Remove the override after the write.
 
 ## Shell Command Style
 

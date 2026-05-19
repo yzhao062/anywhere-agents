@@ -156,3 +156,22 @@ Bootstrap is idempotent and non-destructive — there is no system-wide install 
     ```powershell
     powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-config\bootstrap.ps1
     ```
+
+!!! note "Hook deny on writing-style or compound-cd guard (v0.7.0)"
+    The user-level `guard.py` hook denies banned AI-tell words on prose writes (writing-style guard) and `cd <path> && <cmd>` Bash chains (compound-cd guard). Each deny message embeds a `Suggested rewrite:` line so the agent can reroute in one model turn; that is the intended path. When the deny is itself in meta-discussion context (a style-guide document that legitimately quotes banned words, or a CHANGELOG entry citing a banned word as an example), set the per-guard escape env in `~/.claude/settings.json` under `"env"`:
+
+    | Env var | Disables |
+    |---|---|
+    | `AGENT_STYLE_HOOK=off` | Writing-style guard only |
+    | `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd guard only |
+    | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + session banner |
+
+    **Destructive git / gh approval is NOT bypassable.** No env var disables the `ask` prompt on `git commit`, `git push`, `git reset --hard`, `git merge`, `git rebase`, `gh pr merge`, `gh repo delete`, etc. Those guards have no agent-side reroute; human approval is the contract.
+
+    Example deny output:
+
+    ```text
+    Writing-style: banned AI-tell words detected in /tmp/notes.md: pivotal.
+    Suggested rewrite: `pivotal` -> key, central.
+    Per AGENTS.md Writing Defaults, revise without these terms ...
+    ```
