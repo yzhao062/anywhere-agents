@@ -87,6 +87,14 @@ your-project/
 
 `bootstrap` 还会把 `guard.py` 和 `session_bootstrap.py` 放到 `~/.claude/hooks/`、`statusline.py` 放到 `~/.claude/statusline.py`（Claude Max + Codex 5h / 周用量在 Claude Code 状态行常驻显示），以及把共享 key 合并到 `~/.claude/settings.json`。以上都是一次 `bootstrap` 的结果；再跑一遍，这些文件都跟上游同步。
 
+`bootstrap` 之后，每个 Claude Code session 都会在终端底部常驻显示 Claude Max + Codex 实时用量 —— 不用 API key、不用轮询、不用额外配置：
+
+```text
+🤖 Opus 4.7 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+```
+
+Claude 那段从 statusLine stdin 拿（Claude Code v2.1.80+ 为 Pro/Max 订阅注入 `rate_limits` 字段）。Codex 那段读最新的 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。已 reset 的窗口标 `(stale)`；没有数据时显示 `—`。
+
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
 `AGENTS.md` 里是共享规则 + 用注释包起来的 agent-specific 块。每次 `bootstrap` 都会跑 `scripts/generate_agent_configs.py`，从同一个源文件生成每个 agent 自己看的文件：

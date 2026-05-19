@@ -87,6 +87,14 @@ your-project/
 
 Bootstrap also drops `guard.py` and `session_bootstrap.py` into `~/.claude/hooks/`, `statusline.py` into `~/.claude/statusline.py` (Claude Max + Codex 5h / weekly quota readout in the Claude Code status row), and merges shared keys into `~/.claude/settings.json`. Everything above comes from one `bootstrap` run; re-running it keeps these files in sync with upstream.
 
+After bootstrap, every Claude Code session shows your live Claude Max + Codex quota at the bottom of the terminal — no API key, no polling, no extra setup:
+
+```text
+🤖 Opus 4.7 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+```
+
+The Claude side reads from the statusLine stdin (Claude Code v2.1.80+ injects `rate_limits` for Pro/Max subscribers). The Codex side tails the most recent `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Windows that already reset are flagged `(stale)`; missing data renders as `—`.
+
 ### One `AGENTS.md`, Rules for Every Agent
 
 Shared rules plus agent-specific blocks in one file; the generator emits one file per agent.
