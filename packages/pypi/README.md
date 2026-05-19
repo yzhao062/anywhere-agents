@@ -27,6 +27,12 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 - Deploys the safety guard hook to `~/.claude/hooks/guard.py` and the Claude Max + Codex quota statusLine to `~/.claude/statusline.py`, and merges user-level permissions
 - Adds `.agent-config/` to `.gitignore`
 
+After bootstrap, every Claude Code session shows your live Claude Max + Codex 5h / weekly quota at the bottom of the terminal:
+
+```text
+🤖 Opus 4.7 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+```
+
 Bootstrap logic lives in the shell bootstrap scripts at [`yzhao062/anywhere-agents/bootstrap/`](https://github.com/yzhao062/anywhere-agents/tree/main/bootstrap); the Python CLI invokes them so that agents and users in a Python-first workflow can run the same mechanism without reaching for `curl`. Pack management (`pack add | remove | verify | list | update`) and `uninstall` are implemented directly in the Python CLI.
 
 ## Options
