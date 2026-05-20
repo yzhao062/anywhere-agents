@@ -1,0 +1,64 @@
+name: Publish
+
+# Fires on the human gate (clicking "Publish release" in the UI or running
+# `gh release create v<X.Y.Z>`). The validate + docs workflows have already
+# run on the underlying commit by this point; publish.yml only handles
+# upload.
+#
+# PyPI: uses Trusted Publishing (OIDC) - no secret in the repo. Pending
+# publisher must be configured at https://pypi.org/manage/account/publishing/
+# before the first release fires the workflow.
+#
+# npm: uses NPM_TOKEN repo secret (Bypass-2FA Automation or Granular Access
+# Token), with --provenance for npm's provenance attestation. A future
+# migration to npm Trusted Publishing OIDC is tracked in
+# agent-config/docs/followups/2026-05-20-aa-publish-workflow-oidc.md.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      npm_only:
+        description: "Skip PyPI; publish npm only (use when PyPI is already at this version)"
+        type: boolean
+        default: false
+
+jobs:
+  pypi:
+    if: github.event_name == 'release' || inputs.npm_only != true
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build packages/pypi --outdir dist
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish to npm with provenance
+        working-directory: packages/npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
