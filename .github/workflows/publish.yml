@@ -9,10 +9,13 @@ name: Publish
 # publisher must be configured at https://pypi.org/manage/account/publishing/
 # before the first release fires the workflow.
 #
-# npm: uses NPM_TOKEN repo secret (Bypass-2FA Automation or Granular Access
-# Token), with --provenance for npm's provenance attestation. A future
-# migration to npm Trusted Publishing OIDC is tracked in
-# agent-config/docs/followups/2026-05-20-aa-publish-workflow-oidc.md.
+# npm: uses Trusted Publishing (OIDC) - no secret in the repo. A Trusted
+# Publisher (owner/repo/workflow) must be configured at
+# https://www.npmjs.com/package/anywhere-agents/access before the first
+# release fires. OIDC publishes are exempt from the package's 2FA-on-publish
+# policy that blocks plain automation tokens (E403). npm >= 11.5.1 is required
+# for OIDC, so the job upgrades npm before publishing. --provenance attaches a
+# signed build-provenance statement.
 
 on:
   release:
@@ -57,8 +60,12 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-      - name: Publish to npm with provenance
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; node 20 ships npm 10.x.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+      # No NODE_AUTH_TOKEN: with a configured Trusted Publisher on npm and
+      # id-token: write, npm authenticates via OIDC. --provenance is implied by
+      # trusted publishing but kept explicit for clarity.
+      - name: Publish to npm via OIDC trusted publishing
         working-directory: packages/npm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
