@@ -2,15 +2,26 @@
 
 This document captures the exact steps used to release a new version of `anywhere-agents`. The repo and both packages (PyPI + npm) share **one version number**, bumped together and tagged on the same commit so that checking out the tag reproduces exactly what is published.
 
+## Publishing model (since v0.7.0)
+
+**Publishing is automatic via `.github/workflows/publish.yml`, triggered when a GitHub release is published.** Both registries use OIDC Trusted Publishing, so there are no long-lived tokens in `~/.pypirc` / `~/.npmrc` / repo secrets on the happy path:
+
+- **PyPI**: Trusted Publishing (OIDC). Pending publisher configured at https://pypi.org/manage/account/publishing/ (project `anywhere-agents`, owner `yzhao062`, repo `anywhere-agents`, workflow `publish.yml`, environment blank).
+- **npm**: Trusted Publishing (OIDC) with `--provenance`. Trusted publisher configured at https://www.npmjs.com/package/anywhere-agents/access (same owner/repo/workflow). OIDC is required because the package's publishing-access policy enforces 2FA-on-publish, which rejects plain automation tokens with `E403`.
+
+The maintainer's job per release is: bump versions, commit, tag, wait for `Validate` green, then `gh release create`. The workflow does the uploads. The manual `twine upload` / `npm publish` flow is retained below as a **fallback** for when the workflow or OIDC is unavailable.
+
 ## Prerequisites (one-time)
 
 | Item | Needed for | Setup |
 |------|------------|-------|
-| Python 3.9+ with `build` and `twine` | PyPI publish | `pip install build twine` |
-| Node.js 14+ with `npm` | npm publish | Any recent install |
+| Python 3.9+ with `build` and `twine` | local build / verify (`twine check` runs in the pre-tag verify path) | `pip install build twine` |
+| Node.js 14+ with `npm` | local npm sanity check | Any recent install |
 | `git` | everything | — |
-| PyPI API token in `~/.pypirc` | `twine upload` | Generate at https://pypi.org/manage/account/token/; for CI/unattended use, prefer a project-scoped token |
-| npm token with **Bypass 2FA** enabled in `~/.npmrc` | `npm publish` without interactive OTP | Generate at https://www.npmjs.com/settings/<you>/tokens/new; check the "Bypass Two-Factor Authentication" box. Required because npm requires 2FA on publish by default and publishing with WebAuthn/Windows Hello cannot accept `--otp` |
+| PyPI Trusted Publisher | automatic PyPI publish (default) | One-time setup at https://pypi.org/manage/account/publishing/ (see Publishing model above) |
+| npm Trusted Publisher | automatic npm publish (default) | One-time setup at https://www.npmjs.com/package/anywhere-agents/access (see Publishing model above) |
+| `twine` + PyPI API token in `~/.pypirc` | **fallback** manual PyPI publish only | `pip install twine`; token at https://pypi.org/manage/account/token/ |
+| npm token with **Bypass 2FA** + loosened package policy in `~/.npmrc` | **fallback** manual npm publish only | Token at https://www.npmjs.com/settings/<you>/tokens/new; ALSO requires the package "Publishing access" be set to "Two-factor authentication or automation tokens" (otherwise even a Bypass-2FA token gets `E403`). OIDC avoids both. |
 | Chrome or Chromium headless | Regenerate `docs/hero.png` from `docs/hero.html` when hero content changes | — |
 
 ## Pre-release checks
@@ -171,7 +182,7 @@ On macOS / Linux, replace `Scripts/python.exe` with `bin/python` and `Scripts/an
 
 ## Commit, tag, push
 
-**MANDATORY**: do not push the tag (and therefore do not run `twine upload` or `npm publish`) until the `Validate` workflow on `main` is green for the release commit. PyPI and npm are immutable post-publish; if CI fails after upload, the only remediation is a fix-forward release. The agent-style v0.3.4 shipped a cosmetic dead-link bug because tag + publish ran before CI completed; this gate prevents the same class of failure here.
+**MANDATORY**: do not create the GitHub release (which now fires `publish.yml` and uploads to PyPI + npm) until the `Validate` workflow on `main` is green for the release commit. PyPI and npm are immutable post-publish; if CI fails after upload, the only remediation is a fix-forward release. The agent-style v0.3.4 shipped a cosmetic dead-link bug because tag + publish ran before CI completed; this gate prevents the same class of failure here. Tagging + pushing the tag alone is safe (it does not trigger publish); the `release: published` event is the point of no return.
 
 ```bash
 # Stage and review the entire release scope before committing. The
@@ -215,18 +226,48 @@ git push origin vX.Y.Z
 
 The tag must be on the same commit as the version bump. Later reviewers verify that checking out the tag and running `python -m build packages/pypi` produces the same artifact that is on PyPI.
 
-## Publish to PyPI
+## Publish (automatic, default)
 
-Two-step flow: upload to TestPyPI first to catch metadata or auth issues cheaply, then to real PyPI. Skip TestPyPI only for hotfixes with no packaging changes; it costs ~90 seconds and catches genuine regressions.
-
-### Step 1 — TestPyPI dry run
-
-Assumes a `pypitest` section in `~/.pypirc` pointing at `https://test.pypi.org/legacy/` with a TestPyPI-scoped token. TestPyPI's simple index can lag the JSON API by 30-60 seconds after upload; the `sleep 60` turns that into an executable wait rather than a flaky race.
+Creating the GitHub release fires `publish.yml`, which uploads to PyPI + npm via OIDC, AND fires `real-agent-smoke.yml` + `package-smoke.yml` (all three bind to `release: published`). One command does the whole publish + post-publish-validation chain.
 
 ```bash
-python -m twine upload --repository pypitest packages/pypi/dist/*
-sleep 60
+echo "v*-release-notes.md" >> .git/info/exclude   # one-time, repo-local ignore
+gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file vX.Y.Z-release-notes.md
+```
 
+Then watch the Actions tab (or `gh run list`):
+
+1. **Publish**: `pypi` job (Trusted Publishing) + `npm` job (Trusted Publishing + provenance). Both must go green. The `pypi` job uses `skip-existing: true`, so re-running on an already-published version is a clean no-op.
+2. **Package Smoke**: installs the just-published PyPI + npm artifacts across the OS / runtime matrix (12-attempt retry absorbs CDN lag).
+3. **Real-Agent Smoke**: `claude -p` skill-roster handshake.
+
+**Indexing race**: if you push `publish.yml` itself in the same window as the release, GitHub may not have indexed the new workflow when the `release: published` event fires, and Publish will not auto-run. Trigger it once manually: `gh workflow run publish.yml`. (For an already-published-to-PyPI version, use `gh workflow run publish.yml -f npm_only=true` to skip the PyPI job.)
+
+Verify the published artifacts:
+
+```bash
+# PyPI
+pip install --upgrade --force-reinstall --no-cache-dir anywhere-agents==X.Y.Z
+anywhere-agents --version   # should print X.Y.Z
+
+# npm (provenance attestation should be present)
+npm view anywhere-agents@X.Y.Z version
+npm view anywhere-agents@X.Y.Z --json | python -c "import json,sys; print('attestation:', json.load(sys.stdin)['dist'].get('attestations',{}).get('url','(none)'))"
+cd "$(mktemp -d)"; npx anywhere-agents@X.Y.Z --version
+```
+
+## Manual publish (fallback)
+
+Use only when the workflow or OIDC is unavailable (npm/PyPI outage, OIDC misconfiguration, or you must publish before creating the release). Requires the fallback tokens from the Prerequisites table.
+
+**PyPI** (TestPyPI dry run first, then real):
+
+```bash
+python -m build packages/pypi --outdir packages/pypi/dist
+
+# TestPyPI dry run (assumes a ~/.pypirc [pypitest] section -> https://test.pypi.org/legacy/).
+python -m twine upload --repository pypitest packages/pypi/dist/*
+sleep 60   # TestPyPI's simple index lags the JSON API by 30-60s after upload
 SCRATCH=$(python -c "import tempfile; print(tempfile.mkdtemp(prefix='aa-testpypi-'))")
 python -m venv "$SCRATCH/venv"
 cd "$SCRATCH"
@@ -234,58 +275,23 @@ cd "$SCRATCH"
     --index-url https://test.pypi.org/simple/ \
     --extra-index-url https://pypi.org/simple/ anywhere-agents==X.Y.Z
 "$SCRATCH/venv/Scripts/python.exe" -c "import anywhere_agents; assert anywhere_agents.__version__ == 'X.Y.Z'; print(anywhere_agents.__version__)"
-cd -
-```
+cd -   # on macOS / Linux replace Scripts/python.exe with bin/python
 
-On macOS / Linux, replace `Scripts/python.exe` with `bin/python`.
-
-### Step 2 — Real PyPI upload
-
-After the TestPyPI verify passes, upload to the real index:
-
-```bash
+# Real PyPI upload after the TestPyPI verify passes.
 python -m twine upload packages/pypi/dist/*
 ```
 
-The `~/.pypirc` token authenticates automatically (no interactive prompt).
-
-Verify the upload:
-
-```bash
-# Short delay may be needed if PyPI CDN is slow; add --no-cache-dir to bypass local pip cache
-pip install --upgrade --force-reinstall --no-cache-dir anywhere-agents==X.Y.Z
-anywhere-agents --version   # should print X.Y.Z
-```
-
-## Publish to npm
+**npm** (requires the package "Publishing access" loosened to allow automation tokens; OIDC avoids this):
 
 ```bash
 npm publish packages/npm --access public
 ```
 
-The bypass-2FA token in `~/.npmrc` authenticates automatically. Verify:
-
-```bash
-npm view anywhere-agents version   # should print X.Y.Z
-```
-
-Then sanity-check from a throwaway directory:
-
-```bash
-cd "$(mktemp -d)"
-npx anywhere-agents@X.Y.Z --version
-```
+If npm returns `E403` after signing provenance, the package still enforces 2FA-on-publish; either loosen the policy at https://www.npmjs.com/package/anywhere-agents/access or run `npm publish` interactively to supply the browser OTP. The durable fix is the OIDC trusted publisher (default flow above).
 
 ## Post-release
 
-- **Create the GitHub release.** Required to trigger `real-agent-smoke.yml` and `package-smoke.yml`; both workflows bind to `release: published`, not to tag push, so without a GitHub release the post-publish CI never fires and the release is not validated end-to-end. Draft the body in `vX.Y.Z-release-notes.md` and one-time-only add `v*-release-notes.md` to `.git/info/exclude` so drafts never land on `git add -A`:
-
-  ```bash
-  echo "v*-release-notes.md" >> .git/info/exclude   # one-time, repo-local ignore
-  gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file vX.Y.Z-release-notes.md
-  ```
-
-  Confirm both workflows go green on the Actions tab before announcing the release.
+- Confirm Publish + Package Smoke + Real-Agent Smoke are all green on the Actions tab before announcing.
 - Close any GitHub issues that were addressed by the release (reference the tag in the closing comment).
 - Update `[Unreleased]` section of `CHANGELOG.md` to start fresh (`_No unreleased changes queued._`).
 - Delete the local `vX.Y.Z-release-notes.md` scratch file.
@@ -300,6 +306,7 @@ Every workflow in `.github/workflows/` that calls a model API has a documented p
 |---|---|---|---|
 | `validate.yml` | push + PR | $0 (no API calls) | — |
 | `docs-strict-build.yml` | push + PR | $0 (no API calls) | — |
+| `publish.yml` | `release: published` + manual | $0 (OIDC upload, no API keys) | PyPI `skip-existing`; npm OIDC + provenance; `npm_only` dispatch input for PyPI-already-published reruns |
 | `real-agent-smoke.yml` | `release: published` + manual | ~$0.04 | Sonnet pin on `claude -p`; handshake-only (skill-roster enumeration) |
 | `package-smoke.yml` | `release: published` + weekly cron + manual | $0 (install/verify only, no API keys) | 12-attempt retry loop absorbs PyPI/npm CDN lag |
 
@@ -325,10 +332,10 @@ If a future workflow adds API-calling logic, update this table and the policy th
 
 ## Common gotchas
 
-- **PyPI CDN cache.** After `twine upload`, a fresh `pip install --upgrade` may still report the previous version for a minute or two. Use `--force-reinstall --no-cache-dir` with an explicit `==X.Y.Z` to verify.
-- **npm without bypass-2FA.** If the token does not have bypass 2FA enabled and you use Windows Hello for npm 2FA, publishing fails with a 403 and cannot be completed with `--otp=` (WebAuthn does not produce a 6-digit code). Regenerate the token with bypass 2FA or switch to a classic Automation token.
-- **Version drift.** If you change one of the three version files but forget another, the published package advertises one version in metadata and another via `--version`. The refactor (Python `__version__` import, Node `package.json` read-at-runtime) prevents this for the CLI output, but the package metadata is still authored separately in each ecosystem — keep them in sync by hand or script it.
-- **Tag-before-publish.** Always tag before publishing. If publishing fails or you need to amend the release, it is easier to adjust a local tag than to retract a published package (PyPI and npm consider release versions immutable).
+- **PyPI CDN cache.** After a PyPI publish (via `publish.yml` or manual `twine upload`), a fresh `pip install --upgrade` may still report the previous version for a minute or two. Use `--force-reinstall --no-cache-dir` with an explicit `==X.Y.Z` to verify.
+- **npm E403 on the manual path.** If manual `npm publish` returns `E403` (often after it has already signed the provenance statement), the package's "Publishing access" policy enforces 2FA-on-publish, which rejects automation tokens regardless of the "Bypass 2FA" flag. Regenerating the token does NOT fix this. The default fix is the OIDC trusted publisher (automatic flow); the manual fallback requires loosening the package policy at https://www.npmjs.com/package/anywhere-agents/access to "Two-factor authentication or automation tokens", or running `npm publish` interactively to satisfy the browser OTP.
+- **Version drift.** If you change one of the three version files but forget another, the published package advertises one version in metadata and another via `--version`. The refactor (Python `__version__` import, Node `package.json` read-at-runtime) prevents this for the CLI output, but the package metadata is still authored separately in each ecosystem; keep them in sync by hand or script it.
+- **Release-before-CI.** Tagging and pushing the tag alone is safe, but creating the GitHub release fires `publish.yml` and uploads to both registries. Wait for `Validate` to pass before `gh release create`; once a version reaches PyPI or npm it is immutable, so the only remediation is a fix-forward release.
 
 ## Reference
 
