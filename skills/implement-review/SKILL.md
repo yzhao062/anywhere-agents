@@ -7,7 +7,7 @@ description: Review loop for staged changes. Detects content type, prepares a re
 
 ## Overview
 
-A review loop for staged changes. Claude Code detects the content type, sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the primary reviewer via three channels: terminal relay (manual copy-paste, default on every platform), Auto-terminal (opt-in `codex exec` subprocess dispatch), or IDE plugin. Other reviewers (Copilot, Gemini, Claude Code, etc.) are driven ad-hoc by the user through their own UI and only need to honor the `Review-<AgentName>.md` save contract defined in Phase 1c.
+A review loop for staged changes. Claude Code detects the content type, sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the primary reviewer via three channels: terminal relay (manual copy-paste, default on every platform), Auto-terminal (opt-in `codex exec` subprocess dispatch), or IDE plugin. Other reviewers (Copilot, Gemini, Claude Code, etc.) are driven ad-hoc by the user through their own UI and only need to honor the `Review-<AgentName>.md` save contract defined in Phase 1c. **Cross-vendor exception**: when Claude Code is unavailable and Codex (or the user) is the primary implementer, the Auto-terminal channel can dispatch GitHub Copilot CLI as the reviewer through a parallel `dispatch-copilot` backend (opt-in; see Codex Channels > Auto-terminal Copilot backend). Bare `/implement-review auto` is unchanged and still selects Codex.
 
 ## When to plan-review first
 
@@ -101,6 +101,28 @@ The Auto-terminal path requires `codex` on PATH. Probe before dispatch; if absen
 
 **Script presence is also required**: if any of the `dispatch-codex` / `health-check` / `stall-watch` scripts for the current platform is missing (e.g., Phase B has not landed yet in a given checkout), this path is documented-only — Phase 1c automatically downgrades to Terminal-relay **without** setting sticky downgrade, because the absence is design state, not a runtime failure. See the "Auto-terminal path (opt-in)" subsection in Phase 1c for the script-presence probe specifics.
 
+### Auto-terminal Copilot backend (cross-vendor reviewer, opt-in)
+
+The Auto-terminal channel has a second dispatch backend that runs **GitHub Copilot CLI** as the reviewer instead of `codex exec`. It exists for the agent-fungibility case in `AGENTS.md` § "Agent Fungibility": when Claude Code is unavailable and Codex (or the user) is the primary implementer, Codex cannot review its own work and Claude is absent, so Copilot is the reviewer. It is **opt-in only** via the triggers in Path selection below; a bare `/implement-review auto` still selects Codex.
+
+The backend is a drop-in. Apply the entire **Auto-terminal path (opt-in)** mechanics below — script-presence probe, prompt assembly, dispatch invocation, `STATE-DIR` capture, Phase 1d auto-watch, the Phase 2.0 Health checks, Substance heuristics, and Phase 1d coordination — with two substitutions and one probe swap:
+
+- `dispatch-codex.{ps1,sh}` → `dispatch-copilot.{ps1,sh}`
+- expected review file `Review-Codex.md` → `Review-GitHub-Copilot.md`
+- the `codex` PATH probe → a `copilot` PATH probe (falling back to `gh copilot`)
+
+Everything else is reviewer-agnostic: the `STATE-DIR` contract, the flags passed to `health-check` (`--state-dir`, `--round`, `--review-file Review-GitHub-Copilot.md`), the silent-advance gating, and the downgrade / sticky-downgrade rules are identical. The save contract already normalizes `GitHub Copilot` → `Review-GitHub-Copilot.md` (Phase 1c), so Phase 2 intake needs no change.
+
+Copilot-specific dispatch details, all handled inside `dispatch-copilot` (no caller change):
+
+- **Prompt delivery**: the assembled prompt (byte-identical to the Terminal-relay block) is written to a temp file and passed as `-p "@<prompt-file>"`; Copilot reads the file as its prompt. A long literal `-p` argument fails, so the file reference is mandatory -- this replaces Codex's `exec -` stdin feed.
+- **Binary resolution**: prefer standalone `copilot`; fall back to `gh copilot` when `copilot` is not on PATH. Override with `COPILOT_BIN` / `GH_BIN`.
+- **Trust posture**: a narrow allow-list -- `--allow-tool=read`, `--allow-tool=write`, `--allow-tool='shell(git:*)'`, plus `--add-dir <repo>`, scoped to the repo. This is tighter than the Codex backend's `danger-full-access`: Copilot may read files, run git, and write its review, nothing more. Copilot writes `Review-GitHub-Copilot.md` itself per the prompt's save contract, exactly as Codex writes `Review-Codex.md`.
+- **Pager**: `GIT_PAGER=cat` is set so Copilot's own `git diff` does not stall on a pager.
+- **Non-interactive**: `--no-ask-user --silent --stream off --no-color` keep the run unattended and the tail script-friendly.
+
+With read + git access Copilot inspects the repo directly, so there is no embedded-diff retry unique to Copilot; the same Phase 2.0 checks apply with the review-file name swapped.
+
 ### Plugin path (IDE sidebar)
 
 Codex runs as an IDE plugin with direct access to the repo. The user tells Codex to review in the plugin sidebar (e.g., "review the staged changes"). Codex can see the working tree and run `git diff` itself, so no diff needs to be copy-pasted. The user relays Codex's feedback back to Claude Code.
@@ -115,6 +137,7 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
      When `.claude/commands/implement-review.md` forwards slash arguments through `Command arguments from the slash invocation: $ARGUMENTS`, evaluate that forwarded argument string the same way as the original slash invocation.
      Manual override tokens still win before Auto-terminal opt-in tokens.
    - Plain-phrase opt-in in the invoking message: case-insensitive substring match on any of `cli mode`, `use cli`, `auto codex`, `use codex exec`, AND no negation word (`do not`, `don't`, `no`, `not`, `avoid`, `manual`) within 4 words before the matched phrase.
+   - **Reviewer-backend selection (Copilot cross-vendor backend, opt-in)**: when an Auto-terminal opt-in ALSO names Copilot, the backend is GitHub Copilot instead of `codex exec`. Triggers: slash args `/implement-review auto copilot`, `/implement-review copilot auto`, or `/implement-review copilot` together with an `auto` / `cli` token; plain phrases `use copilot as reviewer`, `copilot as reviewer`, `auto copilot`, `review with copilot`, under the same negation guard; and role-reversal wording naming Codex as the implementer and Copilot as the reviewer. A bare `auto` / `cli` opt-in with no Copilot token selects Codex, unchanged. When Copilot is the backend, dispatch uses `dispatch-copilot.{ps1,sh}` and the expected review file is `Review-GitHub-Copilot.md` (see Auto-terminal Copilot backend above).
 3. **Plugin path** is available on every platform when the user initiates it (e.g., "use the plugin") but is never a default. The user can override at any time (e.g., "use the plugin", "use the terminal").
 4. **MCP forward-compat slot**: when an MCP-based Codex channel is later added (currently out of scope), it follows the same trigger pattern: `/implement-review mcp` slash arg + analogous plain phrases (`use mcp`, `mcp mode`) under the same negation guard. The trigger UX is a single extensible mechanism across all channels.
 

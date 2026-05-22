@@ -149,6 +149,7 @@ done
 printf '\n== strict shared-contract tests ==\n'
 strict_test_files=(
   tests/test_dispatch_codex.py
+  tests/test_dispatch_copilot.py
   tests/test_health_check.py
   tests/test_guard.py
   tests/test_prompt_byte_parity.py
