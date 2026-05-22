@@ -1642,5 +1642,501 @@ class StaticEnvLiteralScanTests(unittest.TestCase):
         )
 
 
+# --- Phase 1: tool-agnostic mandatory risk classification -----------------
+
+
+def _classify_payload(command, tool):
+    return run_guard_with_payload(
+        {"tool_name": tool, "tool_input": {"command": command}}
+    )
+
+
+class ToolAgnosticDestructiveTests(unittest.TestCase):
+    """Destructive git/gh now ask on the PowerShell tool too, not only Bash."""
+
+    def _decision(self, command, tool="PowerShell"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_ps_git_push_asks(self):
+        self.assertEqual(self._decision("git push origin main"), "ask")
+
+    def test_ps_git_commit_asks(self):
+        self.assertEqual(self._decision('git commit -m "x"'), "ask")
+
+    def test_ps_git_reset_hard_asks(self):
+        self.assertEqual(self._decision("git reset --hard HEAD~1"), "ask")
+
+    def test_ps_git_branch_D_asks(self):
+        self.assertEqual(self._decision("git branch -D feature"), "ask")
+
+    def test_ps_gh_pr_merge_asks(self):
+        self.assertEqual(self._decision("gh pr merge 42"), "ask")
+
+    def test_ps_git_status_passes(self):
+        self.assertIsNone(self._decision("git status"))
+
+    def test_ps_git_C_status_passes(self):
+        self.assertIsNone(self._decision("git -C repo status"))
+
+    def test_ps_get_date_passes(self):
+        self.assertIsNone(self._decision("Get-Date"))
+
+    def test_bash_tool_explicit_git_push_asks(self):
+        self.assertEqual(self._decision("git push", tool="Bash"), "ask")
+
+
+class PublishClassTests(unittest.TestCase):
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_npm_publish_asks(self):
+        self.assertEqual(self._decision("npm publish"), "ask")
+
+    def test_npm_unpublish_asks(self):
+        self.assertEqual(self._decision("npm unpublish pkg@1.0.0"), "ask")
+
+    def test_twine_upload_asks(self):
+        self.assertEqual(self._decision("twine upload dist/*"), "ask")
+
+    def test_python_m_twine_upload_asks(self):
+        self.assertEqual(self._decision("python -m twine upload dist/*"), "ask")
+
+    def test_gh_release_create_asks(self):
+        self.assertEqual(self._decision("gh release create v1.0.0"), "ask")
+
+    def test_gh_release_create_asks_ps(self):
+        self.assertEqual(self._decision("gh release create v1.0.0", tool="PowerShell"), "ask")
+
+    def test_npm_install_passes(self):
+        self.assertIsNone(self._decision("npm install"))
+
+    def test_npm_run_test_passes(self):
+        self.assertIsNone(self._decision("npm run test"))
+
+    def test_gh_release_list_passes(self):
+        self.assertIsNone(self._decision("gh release list"))
+
+
+class FsDestructiveTests(unittest.TestCase):
+    def _decision(self, command, tool):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_bash_rm_rf_asks(self):
+        self.assertEqual(self._decision("rm -rf /tmp/x", "Bash"), "ask")
+
+    def test_bash_rm_fr_asks(self):
+        self.assertEqual(self._decision("rm -fr /tmp/x", "Bash"), "ask")
+
+    def test_bash_rm_r_f_separate_asks(self):
+        self.assertEqual(self._decision("rm -r -f /tmp/x", "Bash"), "ask")
+
+    def test_bash_rm_recursive_no_force_passes(self):
+        # matches the existing native rule scope (rm -rf needs force too)
+        self.assertIsNone(self._decision("rm -r /tmp/x", "Bash"))
+
+    def test_bash_rm_single_file_passes(self):
+        self.assertIsNone(self._decision("rm /tmp/x", "Bash"))
+
+    def test_bash_dd_asks(self):
+        self.assertEqual(self._decision("dd if=/dev/zero of=/dev/sda", "Bash"), "ask")
+
+    def test_bash_mkfs_asks(self):
+        self.assertEqual(self._decision("mkfs.ext4 /dev/sdb1", "Bash"), "ask")
+
+    def test_bash_shred_asks(self):
+        self.assertEqual(self._decision("shred -u secret.key", "Bash"), "ask")
+
+    def test_ps_remove_item_recurse_asks(self):
+        self.assertEqual(
+            self._decision("Remove-Item -Recurse -Force C:\\tmp\\x", "PowerShell"), "ask"
+        )
+
+    def test_ps_rm_recurse_alias_asks(self):
+        self.assertEqual(self._decision("rm -Recurse C:\\tmp\\x", "PowerShell"), "ask")
+
+    def test_ps_remove_item_single_passes(self):
+        self.assertIsNone(self._decision("Remove-Item C:\\tmp\\file.txt", "PowerShell"))
+
+
+class WrapperRecursionTests(unittest.TestCase):
+    """Built-in command-carrying wrappers are pierced; payloads classified."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_ssh_rm_rf_asks(self):
+        self.assertEqual(self._decision('ssh host "rm -rf /tmp/x"'), "ask")
+
+    def test_ssh_echo_passes(self):
+        self.assertIsNone(self._decision('ssh host "echo ok"'))
+
+    def test_ssh_safe_unquoted_passes(self):
+        self.assertIsNone(self._decision("ssh host ls -la"))
+
+    def test_ssh_bash_c_git_push_asks(self):
+        self.assertEqual(self._decision('ssh host "bash -c \'git push\'"'), "ask")
+
+    def test_bash_c_git_push_asks(self):
+        self.assertEqual(self._decision('bash -c "git push origin main"'), "ask")
+
+    def test_bash_c_safe_passes(self):
+        self.assertIsNone(self._decision('bash -c "echo hi"'))
+
+    def test_docker_exec_rm_rf_asks(self):
+        self.assertEqual(self._decision('docker exec c bash -lc "rm -rf /tmp/x"'), "ask")
+
+    def test_docker_ps_passes(self):
+        self.assertIsNone(self._decision("docker ps -a"))
+
+    def test_ssh_with_port_flag_rm_rf_asks(self):
+        self.assertEqual(self._decision('ssh -p 2222 host "rm -rf /data"'), "ask")
+
+    def test_depth_within_limit_passes(self):
+        # 3 ssh hops to a safe command is within MAX_WRAPPER_DEPTH
+        self.assertIsNone(self._decision("ssh h1 ssh h2 ssh h3 echo ok"))
+
+    def test_depth_exceeded_asks(self):
+        # 4 ssh hops exceeds MAX_WRAPPER_DEPTH; the innermost payload cannot be
+        # verified, so the guard asks rather than passing it silently.
+        self.assertEqual(self._decision("ssh h1 ssh h2 ssh h3 ssh h4 echo ok"), "ask")
+
+
+class ClassifierFalsePositiveTests(unittest.TestCase):
+    """Leading-token classification must not flag dangerous strings that
+    appear as quoted arguments, nor opaque interpreters / custom wrappers."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_echo_rm_rf_string_passes(self):
+        self.assertIsNone(self._decision('echo "rm -rf is dangerous"'))
+
+    def test_grep_git_push_passes(self):
+        self.assertIsNone(self._decision('grep -r "git push" .'))
+
+    def test_ps_write_output_remove_item_passes(self):
+        self.assertIsNone(
+            self._decision('Write-Output "Remove-Item -Recurse -Force"', "PowerShell")
+        )
+
+    def test_git_commit_with_rm_rf_in_message_asks_for_commit(self):
+        # asks because of `git commit`, not because the message says rm -rf
+        self.assertEqual(self._decision('git commit -m "drop the rm -rf hack"'), "ask")
+
+    def test_python_dash_c_is_opaque(self):
+        # python -c carries Python source, not shell — treated as opaque
+        self.assertIsNone(
+            self._decision('python -c "import shutil; shutil.rmtree(\'/x\')"')
+        )
+
+    def test_custom_wrapper_is_opaque(self):
+        # a private runner is not a built-in wrapper; its payload is not pierced
+        self.assertIsNone(self._decision('myrunner.py run "rm -rf /tmp/x"'))
+
+
+class CodeReviewRegressionTests(unittest.TestCase):
+    """Round-1 execution-review (Codex) found these false negatives via live
+    probes; freeze them fixed."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    # H1: path-qualified git / gh must still ask
+    def test_path_qualified_git_push_asks(self):
+        self.assertEqual(self._decision("/usr/bin/git push origin main"), "ask")
+
+    def test_ps_full_path_git_exe_push_asks(self):
+        self.assertEqual(
+            self._decision('& "C:\\Program Files\\Git\\cmd\\git.exe" push origin main', "PowerShell"),
+            "ask",
+        )
+
+    def test_ps_full_path_gh_exe_pr_merge_asks(self):
+        self.assertEqual(
+            self._decision('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr merge 42', "PowerShell"),
+            "ask",
+        )
+
+    def test_git_status_full_path_passes(self):
+        self.assertIsNone(self._decision("/usr/bin/git status"))
+
+    # H2: recursive delete flag variants (uppercase R, PowerShell abbreviation)
+    def test_bash_rm_Rf_uppercase_asks(self):
+        self.assertEqual(self._decision("rm -Rf /tmp/x"), "ask")
+
+    def test_bash_rm_fR_asks(self):
+        self.assertEqual(self._decision("rm -fR /tmp/x"), "ask")
+
+    def test_ps_remove_item_rec_abbrev_asks(self):
+        self.assertEqual(self._decision("Remove-Item -Rec -Force C:\\tmp\\x", "PowerShell"), "ask")
+
+    # H3: wrapper option forms before the payload
+    def test_powershell_executionpolicy_command_git_push_asks(self):
+        self.assertEqual(
+            self._decision('powershell -ExecutionPolicy Bypass -Command "git push"'), "ask"
+        )
+
+    def test_powershell_executionpolicy_command_remove_item_asks(self):
+        self.assertEqual(
+            self._decision(
+                'powershell -ExecutionPolicy Bypass -Command "Remove-Item -Recurse -Force C:\\tmp\\x"'
+            ),
+            "ask",
+        )
+
+    def test_docker_global_context_exec_rm_rf_asks(self):
+        self.assertEqual(
+            self._decision('docker --context prod exec c bash -lc "rm -rf /tmp/x"'), "ask"
+        )
+
+    # M4: publish with global options before the verb
+    def test_npm_registry_publish_asks(self):
+        self.assertEqual(
+            self._decision("npm --registry https://registry.npmjs.org publish"), "ask"
+        )
+
+    def test_twine_repository_upload_asks(self):
+        self.assertEqual(self._decision("twine --repository pypi upload dist/*"), "ask")
+
+    # negatives: the option-skipping must not over-fire
+    def test_docker_global_context_safe_passes(self):
+        self.assertIsNone(self._decision("docker --context prod ps -a"))
+
+    def test_powershell_executionpolicy_safe_passes(self):
+        self.assertIsNone(
+            self._decision('powershell -ExecutionPolicy Bypass -Command "Get-Date"')
+        )
+
+    def test_npm_registry_install_passes(self):
+        self.assertIsNone(self._decision("npm --registry https://registry.npmjs.org install"))
+
+
+class CodeReviewRound2RegressionTests(unittest.TestCase):
+    """Round-2 execution-review (Codex live probes) found adjacent forms that
+    reopened H2/H3/M4 plus new sudo-prefix and python-twine over-fire cases."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    # H2: shorter PowerShell -Recurse prefixes
+    def test_ps_remove_item_re_abbrev_asks(self):
+        self.assertEqual(self._decision("Remove-Item -Re -Force C:\\tmp\\x", "PowerShell"), "ask")
+
+    def test_ps_rm_re_abbrev_asks(self):
+        self.assertEqual(self._decision("rm -Re C:\\tmp\\x", "PowerShell"), "ask")
+
+    # H3: bash value-options before -c
+    def test_bash_o_pipefail_c_git_push_asks(self):
+        self.assertEqual(self._decision('bash -o pipefail -c "git push"'), "ask")
+
+    def test_bash_O_extglob_c_git_push_asks(self):
+        self.assertEqual(self._decision('bash -O extglob -c "git push"'), "ask")
+
+    def test_bash_rcfile_c_git_push_asks(self):
+        self.assertEqual(self._decision('bash --rcfile /tmp/x -c "git push"'), "ask")
+
+    def test_bash_c_safe_with_options_passes(self):
+        self.assertIsNone(self._decision('bash -o pipefail -c "echo hi"'))
+
+    # H3: encoded PowerShell command -> fail closed
+    def test_powershell_encodedcommand_asks(self):
+        self.assertEqual(self._decision("powershell -EncodedCommand ZQBjAGgAbwA="), "ask")
+
+    def test_powershell_enc_abbrev_asks(self):
+        self.assertEqual(self._decision("powershell -enc ZQBjAGgAbwA="), "ask")
+
+    def test_powershell_executionpolicy_not_mistaken_for_encoded(self):
+        # -ExecutionPolicy must NOT trip the -EncodedCommand fail-closed path
+        self.assertIsNone(self._decision('powershell -ExecutionPolicy Bypass -Command "Get-Date"'))
+
+    # H3: docker TLS global options
+    def test_docker_tlscacert_exec_rm_rf_asks(self):
+        self.assertEqual(
+            self._decision('docker --tlscacert cert.pem exec c bash -lc "rm -rf /tmp/x"'), "ask"
+        )
+
+    # M4: npm --scope
+    def test_npm_scope_publish_asks(self):
+        self.assertEqual(self._decision("npm --scope @org publish"), "ask")
+
+    def test_npm_scope_install_passes(self):
+        self.assertIsNone(self._decision("npm --scope @org install"))
+
+    # N2: sudo / doas prefix wrappers
+    def test_sudo_git_push_asks(self):
+        self.assertEqual(self._decision("sudo git push"), "ask")
+
+    def test_sudo_rm_rf_asks(self):
+        self.assertEqual(self._decision("sudo rm -rf /tmp/x"), "ask")
+
+    def test_sudo_u_user_git_push_asks(self):
+        self.assertEqual(self._decision("sudo -u deploy git push"), "ask")
+
+    def test_doas_rm_rf_asks(self):
+        self.assertEqual(self._decision("doas rm -rf /tmp/x"), "ask")
+
+    def test_sudo_safe_passes(self):
+        self.assertIsNone(self._decision("sudo ls -la"))
+
+    # N3: python twine must be the `-m twine` module form (no over-fire)
+    def test_python_script_twine_upload_passes(self):
+        self.assertIsNone(self._decision("python script.py twine upload"))
+
+    def test_python_m_nottwine_passes(self):
+        self.assertIsNone(self._decision("python -m nottwine upload twine"))
+
+    def test_python_m_twine_upload_still_asks(self):
+        self.assertEqual(self._decision("python -m twine upload dist/*"), "ask")
+
+
+class CodeReviewRound3RegressionTests(unittest.TestCase):
+    """Round-3 execution-review (Codex live probes) found realistic wrapper and
+    interpreter forms that still passed: path-qualified env, the Windows `cmd /c`
+    wrapper, docker --mount/--env-file value flags, and versioned python launchers."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    # N4: path-qualified env prefix
+    def test_path_qualified_env_git_push_asks(self):
+        self.assertEqual(self._decision("/usr/bin/env git push"), "ask")
+
+    def test_path_qualified_env_rm_rf_asks(self):
+        self.assertEqual(self._decision("/usr/bin/env rm -rf /tmp/x"), "ask")
+
+    def test_path_qualified_env_safe_passes(self):
+        self.assertIsNone(self._decision("/usr/bin/env ls -la"))
+
+    # N4: Windows cmd /c | /k wrapper
+    def test_cmd_c_git_push_asks(self):
+        self.assertEqual(self._decision("cmd /c git push", "PowerShell"), "ask")
+
+    def test_cmd_k_git_push_asks(self):
+        self.assertEqual(self._decision("cmd /k git push", "PowerShell"), "ask")
+
+    def test_cmd_c_rmdir_s_asks(self):
+        self.assertEqual(self._decision("cmd /c rmdir /s C:\\tmp\\x", "PowerShell"), "ask")
+
+    def test_cmd_c_safe_passes(self):
+        self.assertIsNone(self._decision("cmd /c echo hi", "PowerShell"))
+
+    # N4: docker run value flags (--mount, --env-file) before the image
+    def test_docker_run_mount_rm_rf_asks(self):
+        self.assertEqual(
+            self._decision(
+                "docker run --mount type=bind,src=/,dst=/host ubuntu rm -rf /host/tmp"
+            ),
+            "ask",
+        )
+
+    def test_docker_run_env_file_rm_rf_asks(self):
+        self.assertEqual(
+            self._decision("docker run --env-file .env ubuntu rm -rf /tmp/x"), "ask"
+        )
+
+    def test_docker_run_mount_safe_passes(self):
+        self.assertIsNone(
+            self._decision(
+                "docker run --mount type=bind,src=/,dst=/host ubuntu echo hi"
+            )
+        )
+
+    # N5: versioned / path-qualified python interpreters publishing via twine
+    def test_python311_m_twine_upload_asks(self):
+        self.assertEqual(self._decision("python3.11 -m twine upload dist/*"), "ask")
+
+    def test_path_qualified_python311_m_twine_upload_asks(self):
+        self.assertEqual(
+            self._decision("/usr/bin/python3.11 -m twine upload dist/*"), "ask"
+        )
+
+    def test_python312_m_twine_upload_asks(self):
+        self.assertEqual(self._decision("python3.12 -m twine upload dist/*"), "ask")
+
+    def test_python311_script_twine_passes(self):
+        self.assertIsNone(self._decision("python3.11 script.py twine upload"))
+
+    def test_python311_m_pytest_passes(self):
+        self.assertIsNone(self._decision("python3.11 -m pytest"))
+
+
+class CodeReviewRound4RegressionTests(unittest.TestCase):
+    """Round-4 execution-review (Codex live probes) found a High false negative
+    in the PowerShell -Command extractor (only one trailing token kept) and a
+    Medium prefix-runner boundary gap (command / timeout / xargs)."""
+
+    def _decision(self, command, tool="Bash"):
+        resp = _classify_payload(command, tool)
+        return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
+
+    # N6: PowerShell -Command concatenates ALL trailing tokens (unquoted form)
+    def test_ps_command_unquoted_git_push_asks(self):
+        self.assertEqual(self._decision("powershell -Command git push", "PowerShell"), "ask")
+
+    def test_ps_command_unquoted_remove_item_asks(self):
+        self.assertEqual(
+            self._decision("powershell -Command Remove-Item -Recurse -Force C:\\tmp\\x", "PowerShell"),
+            "ask",
+        )
+
+    def test_pwsh_command_unquoted_gh_release_asks(self):
+        self.assertEqual(
+            self._decision("pwsh -Command gh release create v1.0.0", "PowerShell"), "ask"
+        )
+
+    def test_ps_command_quoted_git_push_still_asks(self):
+        self.assertEqual(self._decision('powershell -Command "git push"', "PowerShell"), "ask")
+
+    def test_ps_command_safe_passes(self):
+        self.assertIsNone(self._decision("powershell -Command Get-Date", "PowerShell"))
+
+    # N7: command / nohup / setsid transparent prefixes
+    def test_command_git_push_asks(self):
+        self.assertEqual(self._decision("command git push"), "ask")
+
+    def test_command_p_git_push_asks(self):
+        self.assertEqual(self._decision("command -p git push"), "ask")
+
+    def test_command_v_git_passes(self):
+        # `command -v git` resolves to the read-only path lookup, no subcommand
+        self.assertIsNone(self._decision("command -v git"))
+
+    def test_nohup_git_push_asks(self):
+        self.assertEqual(self._decision("nohup git push"), "ask")
+
+    def test_setsid_rm_rf_asks(self):
+        self.assertEqual(self._decision("setsid rm -rf /tmp/x"), "ask")
+
+    # N7: timeout DURATION COMMAND
+    def test_timeout_git_push_asks(self):
+        self.assertEqual(self._decision("timeout 30 git push"), "ask")
+
+    def test_timeout_signal_flag_rm_rf_asks(self):
+        self.assertEqual(self._decision("timeout -s KILL 30 rm -rf /tmp/x"), "ask")
+
+    def test_timeout_safe_passes(self):
+        self.assertIsNone(self._decision("timeout 30 ls -la"))
+
+    # N7: xargs (commonly behind a pipe)
+    def test_find_pipe_xargs_rm_rf_asks(self):
+        self.assertEqual(
+            self._decision("find . -type d -name __pycache__ | xargs rm -rf"), "ask"
+        )
+
+    def test_xargs_n_flag_rm_rf_asks(self):
+        self.assertEqual(self._decision("xargs -n 1 rm -rf"), "ask")
+
+    def test_xargs_safe_passes(self):
+        self.assertIsNone(self._decision("echo x | xargs echo hi"))
+
+
 if __name__ == "__main__":
     unittest.main()

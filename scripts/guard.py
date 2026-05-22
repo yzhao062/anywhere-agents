@@ -24,8 +24,17 @@ Dispatches by tool_name. Shared checks:
    with .agent-config/bootstrap.{sh,ps1} is located. Source repos (no
    .agent-config/) and unrelated directories are not gated.
 3. Compound cd commands (cd path && cmd, cd path; cmd) → deny  [Bash only]
-4. Destructive git subcommands (push, commit, merge, etc.) → ask  [Bash only]
-5. Destructive gh subcommands (pr create, pr merge, etc.) → ask  [Bash only]
+4. Mandatory risk classification → ask  [Bash + PowerShell]
+   - destructive git (push, commit, merge, reset --hard, branch -D, etc.)
+   - destructive / publish gh (pr create|merge|close, repo delete, release ...)
+   - outward publishes (npm publish, twine upload, python -m twine upload)
+   - irreversible file/device deletes (rm -rf, dd, mkfs, shred; PowerShell
+     Remove-Item and recursive aliases when -Recurse / -r / /s is present)
+   Classification is tool-agnostic and sees through built-in command-carrying
+   wrappers (ssh, bash -c, sh -c, zsh -c, docker exec/run, pwsh/powershell
+   -Command) up to MAX_WRAPPER_DEPTH. `python -c` and custom/private wrappers
+   are treated as opaque (not inferable from the command text). This set is
+   NOT disabled by any escape env: human approval is the contract.
 
 Escape hatches (v0.7.0):
 
@@ -835,12 +844,21 @@ def cd_compound_deny_message(cmd):
 
 
 def strip_wrappers(parts):
-    """Skip env, inline VAR=VALUE, and other wrapper prefixes."""
+    """Skip env, inline VAR=VALUE, and standard command-prefix wrappers
+    (sudo / doas) so a dangerous command behind a transparent prefix is still
+    classified. `_basename` is used for env/sudo/doas so a path-qualified prefix
+    (e.g. /usr/bin/env, /usr/bin/sudo) is also stripped."""
     # env flags that consume the next token
     _env_value_flags = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+    # sudo / doas flags that consume the next token
+    _sudo_value_flags = {
+        "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+        "-C", "--close-from", "-T", "--command-timeout", "-R", "--chroot",
+        "-D", "--chdir",
+    }
     i = 0
     while i < len(parts):
-        if parts[i] == "env":
+        if _basename(parts[i]) == "env":
             i += 1
             # Skip env flags and their values
             while i < len(parts) and parts[i].startswith("-"):
@@ -850,6 +868,21 @@ def strip_wrappers(parts):
                     i += 1
             # Skip VAR=VALUE pairs
             while i < len(parts) and "=" in parts[i] and not parts[i].startswith("-"):
+                i += 1
+        elif _basename(parts[i]) in ("sudo", "doas"):
+            i += 1
+            # Skip sudo/doas flags and their values
+            while i < len(parts) and parts[i].startswith("-"):
+                flag = parts[i].split("=", 1)[0]
+                if flag in _sudo_value_flags and "=" not in parts[i] and i + 1 < len(parts):
+                    i += 2
+                else:
+                    i += 1
+        elif _basename(parts[i]) in ("command", "nohup", "setsid"):
+            # Transparent prefix runners that carry only boolean flags
+            # (command -p/-v/-V, setsid -f/-c/-w, nohup none).
+            i += 1
+            while i < len(parts) and parts[i].startswith("-"):
                 i += 1
         elif (
             "=" in parts[i]
@@ -941,13 +974,457 @@ def check_git_destructive(parts):
 
 
 def check_gh_destructive(parts):
-    """Check if a gh command is destructive."""
+    """Check if a gh command is destructive or outward-facing (publish)."""
     group, action = extract_gh_subcommand(parts)
     destructive = {
         ("pr", "create"), ("pr", "merge"),
         ("pr", "close"), ("repo", "delete"),
+        ("release", "create"), ("release", "delete"),
+        ("release", "upload"), ("release", "edit"),
     }
     return (group, action) in destructive
+
+
+# --- Mandatory risk classification (Check 4, tool-agnostic) ----------------
+#
+# The mandatory ask set is: destructive git, destructive/publish gh, outward
+# package publishes, and irreversible file/device deletes. Classification is
+# tool-agnostic (Bash + PowerShell), keys on the EXACT leading token of each
+# sub-command (never a substring scan, which would false-positive on
+# `echo "rm -rf"` / `grep "git push"`), and recurses through built-in
+# command-carrying wrappers so a dangerous payload inside `ssh host "..."`,
+# `bash -c "..."`, or `docker exec c bash -lc "..."` is still caught.
+#
+# `python -c` and custom/private wrappers (e.g. a personal job-runner) are NOT
+# pierced: their argument semantics are not inferable from the command text,
+# and treating them as opaque (like a script file) is the documented limit.
+
+MAX_WRAPPER_DEPTH = 3
+
+# Built-in wrappers whose payload semantics are universally known.
+_BASH_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ash"})
+_PS_C_WRAPPERS = frozenset({"pwsh", "powershell"})
+
+# ssh / docker option flags that consume the following token as a value, so the
+# host / container token is identified correctly when finding the payload.
+_SSH_VALUE_FLAGS = frozenset({
+    "-p", "-i", "-o", "-l", "-F", "-b", "-c", "-D", "-e", "-E", "-I", "-J",
+    "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w",
+})
+_DOCKER_VALUE_FLAGS = frozenset({
+    "-u", "--user", "-e", "--env", "--env-file", "-w", "--workdir", "--name",
+    "-v", "--volume", "--mount", "--entrypoint", "-l", "--label", "--label-file",
+    "--network", "--net", "-p", "--publish", "--device", "--add-host",
+    "--cidfile", "--volumes-from", "--gpus", "-m", "--memory", "--restart",
+    "--log-driver", "--log-opt", "--tmpfs", "-h", "--hostname", "--ulimit",
+    "--sysctl", "--security-opt", "--cap-add", "--cap-drop", "--dns", "--link",
+    "--expose", "--shm-size", "--stop-signal", "--pid", "--ipc", "--runtime",
+})
+# bash/sh/zsh options that consume a value, skipped when scanning for `-c`
+# (so `bash -o pipefail -c "..."` / `bash --rcfile f -c "..."` is pierced).
+_BASH_VALUE_FLAGS = frozenset({"-o", "-O", "--rcfile", "--init-file"})
+# PowerShell parameters that consume a value, skipped when scanning for
+# `-Command` (so `powershell -ExecutionPolicy Bypass -Command "..."` is pierced).
+_PS_VALUE_FLAGS = frozenset({
+    "-executionpolicy", "-ex", "-ep", "-inputformat", "-outputformat",
+    "-configurationname", "-args", "-file", "-windowstyle",
+})
+# docker GLOBAL options (before exec/run) that consume a value.
+_DOCKER_GLOBAL_VALUE_FLAGS = frozenset({
+    "-H", "--host", "--context", "--config", "--log-level",
+    "--tlscacert", "--tlscert", "--tlskey",
+})
+# npm / twine global options that consume a value, skipped before resolving the
+# publish subcommand (so `npm --registry <url> publish` is still classified).
+_NPM_VALUE_FLAGS = frozenset({
+    "--registry", "--userconfig", "--prefix", "-w", "--workspace",
+    "--scope", "--otp", "--tag", "--access", "--cache", "--loglevel",
+})
+_TWINE_VALUE_FLAGS = frozenset({
+    "--repository", "--repository-url", "-r", "-u", "--username",
+    "-p", "--password", "--config-file", "--sign-with", "--cert",
+    "--client-cert",
+})
+# timeout DURATION COMMAND ...: flags that consume the next token before DURATION.
+_TIMEOUT_VALUE_FLAGS = frozenset({"-k", "--kill-after", "-s", "--signal"})
+# xargs [opts] COMMAND ...: option flags that consume the next token. -i/-l are
+# deprecated optional-arg flags and are intentionally treated as boolean.
+_XARGS_VALUE_FLAGS = frozenset({
+    "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "--replace",
+    "-L", "--max-lines", "-n", "--max-args", "-P", "--max-procs",
+    "-s", "--max-chars",
+})
+
+
+def _basename(path):
+    """Lowercased final path component with a common executable suffix
+    stripped, so `C:\\...\\bash.exe`, `/usr/bin/bash`, and `bash` all compare
+    equal to `bash`."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for ext in (".exe", ".cmd", ".bat", ".ps1"):
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _tokenize_shell(s):
+    """Quote-aware whitespace tokenizer that does NOT treat backslash as an
+    escape (so Windows paths survive) and strips surrounding matched quotes.
+    Used for PowerShell-shaped text and for re-tokenizing wrapper payloads."""
+    tokens = []
+    buf = []
+    in_single = in_double = False
+    for ch in s:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if ch in " \t\r\n" and not in_single and not in_double:
+            if buf:
+                tokens.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        tokens.append("".join(buf))
+    return tokens
+
+
+def _tok(subcmd, shell):
+    """Tokenize one sub-command for classification. Bash/legacy uses shlex
+    (preserving the existing git/gh detection behavior exactly); PowerShell
+    uses the backslash-preserving tokenizer and strips a leading call
+    operator `&`."""
+    if shell == "powershell":
+        toks = _tokenize_shell(subcmd)
+        if toks and toks[0] == "&":
+            toks = toks[1:]
+        return toks
+    try:
+        return shlex.split(subcmd)
+    except ValueError:
+        return subcmd.split()
+
+
+def _split_subcommands(cmd):
+    """Split into sub-commands at UNQUOTED ``;`` ``&&`` ``||`` ``|`` and
+    newlines. Quote-aware: operators inside ``'...'`` / ``"..."`` are literal.
+    Operators inside a quoted wrapper payload are NOT split here — they are
+    handled when the payload is re-classified one recursion level down."""
+    segs = []
+    buf = []
+    i = 0
+    n = len(cmd)
+    in_single = in_double = False
+    while i < n:
+        ch = cmd[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if cmd[i:i + 2] in ("&&", "||"):
+                segs.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if ch in ";|\n":
+                segs.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _first_positional(tokens, value_flags):
+    """First non-option token, skipping option flags and the value after any
+    flag in `value_flags` (unless given as `--flag=value`)."""
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if not t.startswith("-"):
+            return t
+        if t.split("=", 1)[0] in value_flags and "=" not in t and i + 1 < len(tokens):
+            i += 2
+        else:
+            i += 1
+    return None
+
+
+def check_publish(parts):
+    """Outward-facing package publish. Returns a label or None. Global options
+    before the subcommand are skipped (e.g. `npm --registry <url> publish`,
+    `twine --repository pypi upload`)."""
+    if not parts:
+        return None
+    head = _basename(parts[0])
+    rest = parts[1:]
+    if head in ("npm", "pnpm", "yarn"):
+        sub = _first_positional(rest, _NPM_VALUE_FLAGS)
+        return f"{head} {sub}" if sub in ("publish", "unpublish") else None
+    if head == "twine":
+        sub = _first_positional(rest, _TWINE_VALUE_FLAGS)
+        return "twine upload" if sub == "upload" else None
+    if (head == "py" or re.fullmatch(r"python\d*(?:\.\d+)*", head)) and "-m" in rest:
+        mi = rest.index("-m")
+        if mi + 1 < len(rest) and rest[mi + 1] == "twine" and "upload" in rest[mi + 2:]:
+            return "python -m twine upload"
+    return None
+
+
+def check_fs_destructive(parts, shell):
+    """Irreversible file/device destruction. Returns a label or None.
+
+    Bash: `rm` with BOTH recursive and force flags (mirrors the existing
+    `rm -rf` / `rm -fr` / `rm -r -f` native ask rules), plus `dd`, `mkfs*`,
+    `shred`. PowerShell: `Remove-Item` and its delete aliases when a recursive
+    flag (`-Recurse` / `-r` / `/s`) is present."""
+    if not parts:
+        return None
+    head = parts[0]
+    name = _basename(head)
+    if shell == "powershell":
+        if name in ("remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"):
+            for t in parts[1:]:
+                tl = t.lower()
+                # PowerShell accepts unambiguous parameter prefixes; -Recurse
+                # is the only Remove-Item parameter starting "Re", so -Re / -Rec
+                # / -Recu / -Recurse all mean recursive. /s is the cmd-style form.
+                if tl == "/s" or tl == "-r" or tl.startswith("-re"):
+                    return f"{head} (recursive delete)"
+        return None
+    if name == "rm":
+        flags = [f for f in parts[1:] if f.startswith("-")]
+        has_r = any(
+            f in ("-r", "-R", "--recursive")
+            or (not f.startswith("--") and ("r" in f or "R" in f))
+            for f in flags
+        )
+        has_f = any(
+            f in ("-f", "--force")
+            or (not f.startswith("--") and "f" in f)
+            for f in flags
+        )
+        return "rm -rf" if (has_r and has_f) else None
+    if name == "dd" or name.startswith("mkfs") or name == "shred":
+        return name
+    return None
+
+
+def _payload_str(tokens):
+    """Reconstruct a payload command string from token(s). A single token IS
+    the inner command (it was a quoted shell string); multiple tokens are
+    re-joined, re-quoting any token that contains whitespace so the inner
+    re-tokenization preserves word boundaries."""
+    if len(tokens) == 1:
+        return tokens[0]
+    out = []
+    for t in tokens:
+        if t == "" or any(c in t for c in " \t\r\n"):
+            out.append('"' + t + '"')
+        else:
+            out.append(t)
+    return " ".join(out)
+
+
+def _find_c_flag(parts):
+    """Index of the bash/sh/zsh command-string flag (`-c`, `-lc`, `-xc`, ...),
+    skipping value options like `-o pipefail` / `--rcfile f` / `-O extglob`, or
+    None if the first non-flag token (a script file, opaque) is reached first."""
+    i = 1
+    while i < len(parts):
+        t = parts[i]
+        flag = t.split("=", 1)[0]
+        if t == "-c" or (
+            t.startswith("-")
+            and not t.startswith("--")
+            and not t.startswith(("-o", "-O"))
+            and "c" in t
+        ):
+            return i
+        if flag in _BASH_VALUE_FLAGS and "=" not in t and i + 1 < len(parts):
+            i += 2
+            continue
+        if t.startswith(("-o", "-O")) and len(t) > 2:
+            i += 1
+            continue
+        if not t.startswith("-"):
+            return None
+        i += 1
+    return None
+
+
+def _find_ps_command_flag(parts):
+    """Index of the PowerShell `-Command` / `-c` flag, or None. Skips value-
+    taking parameters (e.g. `-ExecutionPolicy Bypass`) so the flag is found
+    even when options precede it."""
+    i = 1
+    while i < len(parts):
+        tl = parts[i].lower()
+        if tl == "-c" or tl == "-command" or tl.startswith("-command"):
+            return i
+        if tl in _PS_VALUE_FLAGS and i + 1 < len(parts):
+            i += 2
+            continue
+        if not tl.startswith("-"):
+            return None
+        i += 1
+    return None
+
+
+def _trailing_command(parts, start, value_flags):
+    """Skip option flags (and their values for `value_flags`) starting at
+    `start`, then skip one positional token (the ssh host or docker
+    container/image), and return the remaining tokens (the command payload)."""
+    i = start
+    while i < len(parts) and parts[i].startswith("-"):
+        if parts[i] in value_flags and i + 1 < len(parts):
+            i += 2
+        else:
+            i += 1
+    i += 1  # skip the host / container / image positional
+    return parts[i:] if i < len(parts) else []
+
+
+def _command_after_flags(parts, start, value_flags):
+    """Skip option flags (and their values for `value_flags`) starting at
+    `start`, then return the remaining tokens. Unlike `_trailing_command` this
+    skips NO positional — used for xargs, where the command follows the options
+    directly with no host/image token in between."""
+    i = start
+    while i < len(parts) and parts[i].startswith("-"):
+        if parts[i] in value_flags and i + 1 < len(parts):
+            i += 2
+        else:
+            i += 1
+    return parts[i:] if i < len(parts) else []
+
+
+def _wrapper_payload(parts, shell):
+    """If `parts` is a built-in command-carrying wrapper, return
+    (payload_str, payload_shell); otherwise (None, None). Custom/private
+    wrappers are intentionally absent — they are opaque."""
+    if not parts:
+        return None, None
+    name = _basename(parts[0])
+    if name in _BASH_C_WRAPPERS:
+        idx = _find_c_flag(parts)
+        if idx is not None and idx + 1 < len(parts):
+            return parts[idx + 1], "bash"
+        return None, None
+    if name in _PS_C_WRAPPERS:
+        idx = _find_ps_command_flag(parts)
+        if idx is not None and idx + 1 < len(parts):
+            # PowerShell -Command concatenates ALL trailing args into one command
+            # string, so unquoted `powershell -Command git push` is `git push`.
+            # (bash -c, by contrast, takes a single command-string token.)
+            return _payload_str(parts[idx + 1:]), "powershell"
+        return None, None
+    if name == "ssh":
+        rest = _trailing_command(parts, 1, _SSH_VALUE_FLAGS)
+        return (_payload_str(rest), "bash") if rest else (None, None)
+    if name == "docker":
+        i = 1
+        while i < len(parts) and parts[i].startswith("-"):
+            flag = parts[i].split("=", 1)[0]
+            if flag in _DOCKER_GLOBAL_VALUE_FLAGS and "=" not in parts[i] and i + 1 < len(parts):
+                i += 2
+            else:
+                i += 1
+        if i < len(parts) and parts[i] in ("exec", "run"):
+            rest = _trailing_command(parts, i + 1, _DOCKER_VALUE_FLAGS)
+            return (_payload_str(rest), "bash") if rest else (None, None)
+    if name == "cmd":
+        # cmd /c <command> or cmd /k <command>. The payload uses Windows verbs
+        # (rmdir/del + /s) and shell-agnostic git, so classify it as powershell.
+        for j in range(1, len(parts)):
+            if parts[j].lower() in ("/c", "/k"):
+                rest = parts[j + 1:]
+                return (_payload_str(rest), "powershell") if rest else (None, None)
+        return None, None
+    if name == "timeout":
+        # timeout [opts] DURATION COMMAND ...: skip flags, then the DURATION
+        # positional, leaving the wrapped command.
+        rest = _trailing_command(parts, 1, _TIMEOUT_VALUE_FLAGS)
+        return (_payload_str(rest), "bash") if rest else (None, None)
+    if name == "xargs":
+        # find ... | xargs rm -rf: the command follows xargs's options directly.
+        rest = _command_after_flags(parts, 1, _XARGS_VALUE_FLAGS)
+        return (_payload_str(rest), "bash") if rest else (None, None)
+    return None, None
+
+
+def _cowboy(label):
+    """Attention-grabbing ask message for destructive git/gh (unchanged tone)."""
+    return random.choice([
+        f"WHOA THERE COWBOY! {label} wants to run. Are you SURE about this?!",
+        f"STOP! HAMMER TIME! A wild {label} appeared! Think before you click!",
+        f"RED ALERT! {label} is trying to sneak past you. Eyes on the screen!",
+        f"HEY! WAKE UP! {label} needs your blessing. Do not sleepwalk through this!",
+        f"A {label} walks into a bar. The bartender says: 'Are you authorized?'",
+    ])
+
+
+def classify_command(cmd, shell, depth=0):
+    """Return (decision, reason) where decision is 'ask' or None. Splits cmd
+    into sub-commands, classifies each by exact leading token, and recurses
+    through built-in command wrappers up to MAX_WRAPPER_DEPTH. Returns the
+    first ask hit. NOT gated by any escape env (callers invoke it
+    unconditionally) — human approval is the contract for the mandatory set."""
+    for sub in _split_subcommands(cmd):
+        parts = strip_wrappers(_tok(sub, shell))
+        if not parts:
+            continue
+        # Encoded PowerShell command: payload is base64 and cannot be inspected,
+        # so fail closed with ASK. Match -e / -en* (abbreviations of
+        # -EncodedCommand); -ex* is -ExecutionPolicy and is deliberately excluded.
+        if _basename(parts[0]) in _PS_C_WRAPPERS and any(
+            t.lower() == "-e" or t.lower().startswith("-en") for t in parts[1:]
+        ):
+            return "ask", (
+                "Approval needed: encoded PowerShell command "
+                "(-EncodedCommand); the payload cannot be inspected."
+            )
+        payload, payload_shell = _wrapper_payload(parts, shell)
+        if payload is not None:
+            if depth + 1 > MAX_WRAPPER_DEPTH:
+                return "ask", (
+                    f"Approval needed: command nesting exceeds depth "
+                    f"{MAX_WRAPPER_DEPTH} inside a `{parts[0]}` wrapper; the "
+                    f"guard cannot verify the innermost payload is safe."
+                )
+            decision, reason = classify_command(payload, payload_shell, depth + 1)
+            if decision:
+                return decision, reason
+            continue
+        head = _basename(parts[0])
+        if head == "git" and check_git_destructive(parts):
+            _, sub_g = extract_git_subcommand(parts)
+            return "ask", _cowboy(f"git {sub_g}")
+        if head == "gh" and check_gh_destructive(parts):
+            group, action = extract_gh_subcommand(parts)
+            return "ask", _cowboy(f"gh {group} {action}")
+        pub = check_publish(parts)
+        if pub:
+            return "ask", (
+                f"Approval needed: `{pub}` publishes to a shared registry or "
+                f"remote (outward-facing, hard to reverse)."
+            )
+        fs = check_fs_destructive(parts, shell)
+        if fs:
+            return "ask", f"Approval needed: `{fs}` is an irreversible delete."
+    return None, None
 
 
 def main():
@@ -988,63 +1465,33 @@ def main():
             print(make_response("deny", deny))
             return
 
-    # Remaining checks are Bash-only. When tool_name is set, only Bash applies;
-    # when tool_name is missing (legacy payload), the presence of `command` in
-    # tool_input is the signal this is a Bash invocation.
-    if tool_name and tool_name != "Bash":
+    # Shell-tool checks below apply to Bash AND PowerShell. Legacy payloads
+    # (no tool_name) are treated as Bash. Non-shell tools have no command.
+    if tool_name and tool_name not in ("Bash", "PowerShell"):
         return
 
     cmd = tool_input.get("command", "").strip()
     if not cmd:
         return
 
-    # Check 3: compound cd (on raw string, before shlex parsing). Honors the
-    # AGENT_COMPOUND_CD_HOOK per-guard env. AGENT_CONFIG_GATES does NOT
-    # disable compound-cd (legacy scope: writing-style + banner only).
-    if compound_cd_enabled():
+    shell = "powershell" if tool_name == "PowerShell" else "bash"
+
+    # Check 3: compound cd (Bash + legacy only; PowerShell statement chaining
+    # differs and Claude Code's compound-cd approval is a Bash construct).
+    # Honors AGENT_COMPOUND_CD_HOOK. AGENT_CONFIG_GATES does NOT disable it.
+    if shell != "powershell" and compound_cd_enabled():
         deny = cd_compound_deny_message(cmd)
         if deny:
             print(make_response("deny", deny))
             return
 
-    # Parse into tokens with proper quote handling
-    try:
-        parts = shlex.split(cmd)
-    except ValueError:
-        parts = cmd.split()  # fallback for malformed quoting
-
-    if not parts:
-        return
-
-    # Strip wrapper prefixes (env, VAR=VALUE)
-    parts = strip_wrappers(parts)
-    if not parts:
-        return
-
-    # Check 4: destructive git — ask with attention-grabbing message
-    if parts[0] == "git" and check_git_destructive(parts):
-        _, sub = extract_git_subcommand(parts)
-        warnings = [
-            f"WHOA THERE COWBOY! git {sub} wants to run. Are you SURE about this?!",
-            f"STOP! HAMMER TIME! A wild git {sub} appeared! Think before you click!",
-            f"RED ALERT! git {sub} is trying to sneak past you. Eyes on the screen!",
-            f"HEY! WAKE UP! git {sub} needs your blessing. Do not sleepwalk through this!",
-            f"A git {sub} walks into a bar. The bartender says: 'Are you authorized?'",
-        ]
-        print(make_response("ask", random.choice(warnings)))
-        return
-
-    # Check 5: destructive gh — ask with attention-grabbing message
-    if parts[0] == "gh" and check_gh_destructive(parts):
-        group, action = extract_gh_subcommand(parts)
-        warnings = [
-            f"WHOA THERE COWBOY! gh {group} {action} wants to run. Are you SURE about this?!",
-            f"STOP! HAMMER TIME! A wild gh {group} {action} appeared! Think before you click!",
-            f"RED ALERT! gh {group} {action} is trying to sneak past you. Eyes on the screen!",
-            f"HEY! WAKE UP! gh {group} {action} needs your blessing. Do not sleepwalk through this!",
-            f"A gh {group} {action} walks into a bar. The bartender says: 'Are you authorized?'",
-        ]
-        print(make_response("ask", random.choice(warnings)))
+    # Check 4: mandatory risk classification — destructive git/gh, outward
+    # publishes, irreversible file/device deletes. Tool-agnostic, sees through
+    # built-in command wrappers (ssh / bash -c / docker exec / pwsh -Command).
+    # NOT gated by any escape env: human approval is the contract.
+    decision, reason = classify_command(cmd, shell)
+    if decision == "ask":
+        print(make_response("ask", reason))
         return
 
 
