@@ -165,6 +165,47 @@ function Merge-Json($base, $over) {
     }
   }
 }
+
+function Test-DisabledValue([string]$Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+  $normalized = $Value.Trim().ToLowerInvariant()
+  return @('off', '0', 'disabled', 'false', 'no').Contains($normalized)
+}
+
+function Invoke-CodexAutoUpdate {
+  if (Test-DisabledValue $env:ANYWHERE_AGENTS_CODEX_AUTO_UPDATE) { return }
+  $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+  if (-not $npmCmd) { return }
+  try {
+    $npm = $npmCmd.Source
+    $globalPrefix = (& $npm prefix -g 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($globalPrefix)) { return }
+    $pkgJson = Join-Path (Join-Path (Join-Path $globalPrefix 'node_modules') '@openai') 'codex'
+    $pkgJson = Join-Path $pkgJson 'package.json'
+    if (-not (Test-Path $pkgJson)) { return }
+
+    $outdatedRaw = (& $npm outdated -g '@openai/codex' --json 2>$null | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($outdatedRaw) -or $outdatedRaw -eq '{}') { return }
+    try {
+      $outdated = $outdatedRaw | ConvertFrom-Json
+    } catch {
+      return
+    }
+    $entry = $outdated.PSObject.Properties['@openai/codex']
+    if (-not $entry) { return }
+    $current = [string]$entry.Value.current
+    $latest = [string]$entry.Value.latest
+    if ([string]::IsNullOrWhiteSpace($latest) -or $latest -eq $current) { return }
+
+    [Console]::Error.WriteLine("[anywhere-agents] updating Codex CLI @openai/codex $current -> $latest")
+    & $npm install -g '@openai/codex@latest' --silent
+    if ($LASTEXITCODE -ne 0) {
+      [Console]::Error.WriteLine("[anywhere-agents] Codex CLI auto-update failed; run ``npm install -g @openai/codex@latest``")
+    }
+  } catch {
+    # Do not let a local npm or registry problem block project bootstrap.
+  }
+}
 New-Item -ItemType Directory -Force -Path .agent-config, .claude, .claude/commands | Out-Null
 Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$Upstream/main/AGENTS.md" -OutFile .agent-config/AGENTS.md
 
@@ -359,6 +400,11 @@ if (Test-Path $claudeJson) {
     if ($tmp -and (Test-Path $tmp)) { Remove-Item -Force $tmp }
   }
 }
+
+# Codex CLI has no native updater like Claude Code. If Codex is installed as
+# the global npm package that this config recommends, keep it current during
+# bootstrap. Set ANYWHERE_AGENTS_CODEX_AUTO_UPDATE=off to disable.
+Invoke-CodexAutoUpdate
 
 if (-not (Test-Path .gitignore) -or -not (Select-String -Quiet -Pattern '^\/?\.agent-config/' .gitignore)) {
   Add-Content -Path .gitignore -Value "`n.agent-config/"

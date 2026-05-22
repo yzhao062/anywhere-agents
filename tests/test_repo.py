@@ -510,6 +510,17 @@ class RepoValidationTests(unittest.TestCase):
         self.assertIn("session_bootstrap.py", both,
                       "bootstrap scripts must deploy session_bootstrap.py")
 
+    def test_bootstrap_scripts_auto_update_codex_npm_cli(self) -> None:
+        both = self.bootstrap_bash_text + "\n" + self.bootstrap_powershell_text
+        required_fragments = [
+            "ANYWHERE_AGENTS_CODEX_AUTO_UPDATE",
+            "npm outdated -g @openai/codex --json",
+            "npm install -g @openai/codex@latest",
+            "Do not let a local npm or registry problem block project bootstrap.",
+        ]
+        for fragment in required_fragments:
+            self.assertIn(fragment, both)
+
     def test_user_settings_wires_session_start_hook(self) -> None:
         user_settings = json.loads(read_text(ROOT / "user" / "settings.json"))
         session_hooks = (

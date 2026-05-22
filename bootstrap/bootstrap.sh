@@ -166,6 +166,31 @@ check_git_preflight() {
 check_git_preflight
 [ -n "${AGENT_CONFIG_PREFLIGHT_TEST:-}" ] && exit 0
 
+_codex_auto_update_disabled() {
+  _v=$(printf '%s' "${ANYWHERE_AGENTS_CODEX_AUTO_UPDATE:-}" | tr '[:upper:]' '[:lower:]')
+  case "$_v" in
+    off|0|disabled|false|no) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+maybe_update_codex_cli() {
+  _codex_auto_update_disabled && return 0
+  command -v npm >/dev/null 2>&1 || return 0
+  _prefix=$(npm prefix -g 2>/dev/null || true)
+  [ -n "$_prefix" ] || return 0
+  [ -f "$_prefix/node_modules/@openai/codex/package.json" ] || return 0
+  _outdated=$(npm outdated -g @openai/codex --json 2>/dev/null || true)
+  [ -n "$_outdated" ] && [ "$_outdated" != "{}" ] || return 0
+  _current=$(printf '%s' "$_outdated" | sed -n 's/.*"current"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  _latest=$(printf '%s' "$_outdated" | sed -n 's/.*"latest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$_latest" ] && [ "$_latest" != "$_current" ] || return 0
+  printf '[anywhere-agents] updating Codex CLI @openai/codex %s -> %s\n' "${_current:-?}" "$_latest" >&2
+  if ! npm install -g @openai/codex@latest --silent; then
+    printf '%s\n' '[anywhere-agents] Codex CLI auto-update failed; run `npm install -g @openai/codex@latest`' >&2
+  fi
+}
+
 # Legacy AC -> AA migration for direct shell-bootstrap runs. If the
 # persisted upstream or cached repo origin still points at agent-config
 # and the caller did not pass an explicit upstream, delete the old cache
@@ -393,6 +418,11 @@ except Exception:
 "
   fi
 fi
+
+# Codex CLI has no native updater like Claude Code. If Codex is installed as
+# the global npm package that this config recommends, keep it current during
+# bootstrap. Set ANYWHERE_AGENTS_CODEX_AUTO_UPDATE=off to disable.
+maybe_update_codex_cli
 
 if [ ! -f .gitignore ] || ! grep -qE '^\/?\.agent-config/' .gitignore; then
   echo '.agent-config/' >> .gitignore
