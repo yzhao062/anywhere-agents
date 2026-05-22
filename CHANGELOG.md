@@ -11,6 +11,25 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.1] — 2026-05-21
+
+A **tool-agnostic approval guard**. The PreToolUse `guard.py` now classifies risk for both the `Bash` and `PowerShell` tools, so the approval prompt fires only for the dangerous set (destructive git, gh publish/release, package publish, file/device destruction) and routine PowerShell no longer prompts once `PowerShell(*)` is allowed. This patch also ships the OIDC auto-publish workflow that landed on `main` after the v0.7.0 tag.
+
+### Added
+
+- **`PowerShell(*)` in the user allow-list** (`user/settings.json`): pairs with the existing `Bash(*)` so the native permission layer is allow-by-default on both shells and `guard.py` becomes the sole risk arbiter. Ships together with the PowerShell file-destruction classifier below, never before it, so no silent-delete window opens.
+- **Tool-agnostic risk classifier** (`scripts/guard.py`): one classifier runs for `Bash` and `PowerShell`. It keys on the exact leading token of each sub-command (split on `;` / `&&` / `||` / `|`), never a substring scan, so quoted strings like `echo "rm -rf"` stay safe. It strips transparent prefix runners (`sudo`, `doas`, `env`, `command`, `nohup`, `setsid`, inline `VAR=VALUE`) and sees through command-carrying wrappers (`ssh`, `bash`/`sh`/`zsh -c`, `docker exec`/`run`, `pwsh`/`powershell -Command`, Windows `cmd /c`/`/k`, `timeout`, `xargs`) up to `MAX_WRAPPER_DEPTH`, asking when nesting exceeds it.
+- **New mandatory ask classes**: package publish (`npm`/`pnpm`/`yarn publish`, `twine upload`, `python -m twine upload` including versioned interpreters), `gh release create/delete/upload/edit`, and PowerShell `Remove-Item` (+ aliases `rm`/`del`/`rd`/`rmdir`) recursive deletes. `git checkout --` joins the destructive-git set.
+
+### Changed
+
+- **Mandatory ask set is non-bypassable by any env var**: destructive git, destructive/publish gh, package publishes, and file/device destruction have no agent-side reroute, so the `ask` prompt stays the contract. Encoded PowerShell (`-EncodedCommand`) fails closed to ask. `python -c`, the low-frequency prefixes `nice`/`ionice`/`stdbuf`/`time`, and custom/private wrappers stay opaque documented non-goals.
+
+### Internal
+
+- **OIDC auto-publish workflow** (`be6ce22`, `fd07356`, `777da77`, first shipped in this release): `.github/workflows/publish.yml` uploads to PyPI and npm via OIDC Trusted Publishing on `release: published`, dropping long-lived tokens from the happy path. `RELEASING.md` documents the flow.
+- **STRICT byte-identical mirrors** (cross-repo `agent-config` and `anywhere-agents`): `scripts/guard.py` + `tests/test_guard.py` (+549 / +496 net over five code-review rounds). The classifier passed 290 guard tests on Windows and ARM64 Linux.
+
 ## [0.7.0] — 2026-05-19
 
 The visible v0.7.0 theme is **Noise audit (Round 6 reroute criterion)**, bundled with **agent-fungibility Phase 0.5** and a **bootstrap git preflight**. Three slices in one release: keep `deny` decisions on writing-style and compound-cd guards (instead of demoting to `ask`) and add inline `Suggested rewrite:` reroutes that let autonomous flows lift the block in one model turn; promote the cross-vendor resilience principle from `agent-config/CLAUDE.local.md` (maintainer-local) into shared `AGENTS.md`; reject pre-2.25 git up front in `bootstrap.{sh,ps1}` so a real consumer's cryptic `unknown option 'sparse'` failure becomes a one-line actionable error.
@@ -764,8 +783,11 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.3...v0.5.4
