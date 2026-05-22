@@ -72,10 +72,11 @@ jobs:
             SPEC="anywhere-agents"
           fi
           echo "installing $SPEC"
-          # PyPI's simple index can lag a release upload by 30-90 seconds.
-          # Retry with backoff so this workflow does not require a manual
-          # re-run after every release. Bounded to ~3 minutes.
-          attempts=12
+          # PyPI's simple index can lag a release upload, occasionally past
+          # the first few minutes on a release event. Retry so this workflow
+          # does not require a manual re-run. Bounded to ~6 minutes (happy
+          # path hits attempt 1, so the wider budget only costs on real lag).
+          attempts=24
           for i in $(seq 1 $attempts); do
             if python -m pip install --upgrade --force-reinstall --no-cache-dir "$SPEC"; then
               echo "installed on attempt $i"
@@ -150,9 +151,12 @@ jobs:
             SPEC="anywhere-agents"
           fi
           echo "installing $SPEC"
-          # npm's tarball CDN can lag the registry JSON by 30-90 seconds on
-          # release events. Retry with backoff; bounded to ~3 minutes.
-          attempts=12
+          # npm's registry metadata can lag on a release event: the version
+          # is published but the runner's edge still returns ETARGET
+          # ("no matching version") for several minutes. v0.7.1 exceeded the
+          # old 3-minute budget and needed a manual re-run, so the budget is
+          # widened. Retry; bounded to ~6 minutes (happy path hits attempt 1).
+          attempts=24
           for i in $(seq 1 $attempts); do
             if npm install -g "$SPEC"; then
               echo "installed on attempt $i"
