@@ -166,6 +166,12 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
   - Docs that name one agent in step instructions should call out the cross-vendor equivalent at least once near the top, so a session reading the doc under role reversal can still proceed.
   - When the deferred half ships later, the principle is satisfied; do not block the primary half on simultaneous parity.
 
+## Memory and Persistence
+
+- This configuration targets multi-agent use (Claude Code, Codex, and others). A single agent's private memory is therefore not a reliable home for durable context: one agent's per-account memory is not readable by the other agents, and it does not travel across accounts or machines.
+- Prefer version-controlled local files for anything that must persist across agents, sessions, accounts, or machines: the project `README`, a `docs/` note, a `PLAN-*.md` or notes file, a `CHANGELOG`, or `AGENTS.local.md`. Version control is the portable, agent-independent memory.
+- Use an agent's built-in memory only for short, agent-local convenience, and treat the version-controlled copy as authoritative. Do not record project state, decisions, or records solely in agent memory.
+
 ## Task Routing
 
 - Before starting a task, read the router skill to determine which domain skill to use. Look for it in this order: `skills/my-router/SKILL.md` (repo-local), then `.agent-config/repo/skills/my-router/SKILL.md` (bootstrapped from shared config).
@@ -219,6 +225,7 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
 - Avoid heavy dash use. Do not use em dashes (`—`) or en dashes (`–`) as casual sentence punctuation. Prefer commas, semicolons, colons, or parentheses instead. En dashes in numeric ranges (e.g., `1–3`, `2020–2025`), paired names, or citations are fine. Normal hyphenation in compound words and technical terms (e.g., `command-line`, `co-PI`, `zero-shot`) is fine and should not be avoided.
 - Break extremely long or complex sentences into shorter, more readable ones. If a sentence has multiple clauses or nested qualifications, split it.
 - Vary sentence length and structure. Prefer not to start several consecutive sentences with the same word or phrase. Avoid overusing transition words like "Additionally" or "Furthermore." Not every paragraph needs a tidy summary sentence at the end. Mix short, direct sentences with longer ones to keep the writing natural.
+- When showing the user text whose purpose is to be copied into an external destination (an email reply, a chat message, a spreadsheet or table cell, a document), present that text in a fenced code block so it copies cleanly with line breaks and formatting intact. This applies to copy-paste-destined drafts, not to ordinary explanatory answers.
 
 ## Git Safety
 
@@ -265,6 +272,11 @@ Set a per-guard escape env when a legitimate write has a banned word in *meta-di
 - Examples of invocations that always require explicit approval: `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, `git merge`, `git branch -d`, `git remote add/remove`, `git tag <name>` (creating/deleting), `git stash drop`.
 - Filesystem commands like `cp` and `mv` are fine for scratch and temporary files. Moves or renames that affect git-tracked files should be reviewed before executing.
 - **Avoid inline Python with `#` comments in quoted arguments.** Claude Code flags "newline followed by `#` inside a quoted argument" as a path-hiding risk and prompts for approval. Instead, write the code to a `.py` file and run `python <script>.py`.
+
+## Tool-Use Reliability
+
+- Treat a tool's "cannot open / encrypted / unreadable / unsupported" report on a file as a possible false positive, not a final verdict. PDFs are the common case: a read may report a PDF as encrypted when it actually opens fine. Before telling the user a file cannot be read, retry once and try an alternate read path (re-read with a page range, `pdftotext`, render to an image, or a different tool). Report failure only after an alternate path also fails, and say which paths were tried.
+- The same caution applies to other transient-looking tool failures: a single failed attempt is weak evidence. Prefer one retry or an alternate route over reporting a blocked result, unless the failure is clearly deterministic.
 
 ## GitHub Actions Standards
 
