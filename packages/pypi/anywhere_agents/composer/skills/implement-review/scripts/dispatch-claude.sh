@@ -177,6 +177,12 @@ fi
 # disabled when --bare is set. Defaulting to --bare would break the typical
 # subscription user. Set CLAUDE_DISPATCH_BARE=1 only in environments that
 # provide ANTHROPIC_API_KEY or an explicit apiKeyHelper.
+#
+# Array expansion uses the `${arr[@]+"${arr[@]}"}` idiom so the empty-array
+# default does not trip `set -u` on bash 3.2 (macOS system bash). bash 4.4+
+# (Linux, Git Bash on Windows) tolerates empty `${arr[@]}` under nounset, but
+# bash 3.2 treats it as unbound. The `+` operator expands the inner array only
+# when at least one element is set; otherwise it expands to nothing.
 CLAUDE_BARE_ARGS=()
 if [ "${CLAUDE_DISPATCH_BARE:-}" = "1" ]; then
     CLAUDE_BARE_ARGS=(--bare)
@@ -187,7 +193,7 @@ GIT_PAGER=cat "$CLAUDE_CMD" -p \
     --permission-mode dontAsk \
     --allowedTools "Read,Write(/Review-Claude-Code.md),Edit(/Review-Claude-Code.md)" \
     --add-dir "$REPO" \
-    "${CLAUDE_BARE_ARGS[@]}" \
+    ${CLAUDE_BARE_ARGS[@]+"${CLAUDE_BARE_ARGS[@]}"} \
     --output-format text \
     < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
 CLAUDE_EXIT=$?
