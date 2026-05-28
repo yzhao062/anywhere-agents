@@ -1,4 +1,4 @@
 interface:
   display_name: "Readme Polish"
   short_description: "Audit a GitHub README and rewrite it with modern 2025-2026 patterns"
-  default_prompt: "Use $readme-polish to audit and rewrite a GitHub README with modern patterns (centered header, badges, hero image, GitHub alert callouts, emoji feature bullets, collapsibles, Mermaid diagrams, tables). Look for the skill at skills/readme-polish/SKILL.md first, then .agent-config/repo/skills/readme-polish/SKILL.md. Read the supporting patterns and checklist files under references/ as needed."
+  default_prompt: "Use $readme-polish to audit and rewrite a GitHub README with modern patterns (centered header, badges, hero image, GitHub alert callouts, emoji feature bullets, collapsibles, Mermaid diagrams, tables). Look for the skill at skills/readme-polish/SKILL.md first, then .claude/skills/readme-polish/SKILL.md, then .agent-config/repo/skills/readme-polish/SKILL.md. Read the supporting patterns and checklist files under references/ as needed."

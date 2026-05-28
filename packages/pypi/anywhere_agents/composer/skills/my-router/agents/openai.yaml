@@ -1,4 +1,4 @@
 interface:
   display_name: "My Router"
   short_description: "Auto-detect context and dispatch to the right skill"
-  default_prompt: "Use $my-router to detect the current context and dispatch to the right domain skill. Look for the skill at skills/my-router/SKILL.md first, then .agent-config/repo/skills/my-router/SKILL.md. Read the routing table from references/routing-table.md at the same path."
+  default_prompt: "Use $my-router to detect the current context and dispatch to the right domain skill. Look for the skill at skills/my-router/SKILL.md first, then .claude/skills/my-router/SKILL.md, then .agent-config/repo/skills/my-router/SKILL.md. Read the routing table from references/routing-table.md at the same path."

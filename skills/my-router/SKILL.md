@@ -50,7 +50,7 @@ Some projects declare their type in `AGENTS.local.md` or via directory naming co
 
 ## Dispatch Rules
 
-1. **Local-first override** — before dispatching, scan `skills/` (project-local) for any skill that is a more specific variant of the matched skill. If a local variant exists, use it instead of the bootstrapped shared copy.
+1. **Local-first override**: before dispatching, scan `skills/` (project-local) for any skill that is a more specific variant of the matched skill. If a local variant exists, use it instead of any pack-deployed or bootstrapped copy.
 2. **If a prompt keyword matches** → invoke that skill.
 3. **If file context matches but prompt is vague** (e.g., "help me with this") → state the detected context and proposed skill, ask the user to confirm before proceeding.
 4. **If multiple skills could apply** → state the candidates and ask the user to choose.
@@ -58,13 +58,14 @@ Some projects declare their type in `AGENTS.local.md` or via directory naming co
 
 ## Skill Lookup Order
 
-In consuming project repos, shared skills are bootstrapped into `.agent-config/repo/skills/`, not the project's own `skills/`. When dispatching, look for each skill in this order:
+In consuming project repos, skills can be project-local, pack-deployed, or bootstrapped from shared config. When dispatching, look for each skill in this order:
 
-1. `skills/<name>/SKILL.md` — project-local (highest priority). Projects can add their own skills here.
-2. `.agent-config/repo/skills/<name>/SKILL.md` — bootstrapped from the shared config repo.
-3. **Installed plugins** — agent-specific plugin skills (e.g., Claude Code plugins) — check `/skills` output.
+1. `skills/<name>/SKILL.md`: project-local (highest priority). Projects can add their own skills here.
+2. `.claude/skills/<name>/SKILL.md`: pack-deployed by `anywhere-agents pack install`. The `.claude/` prefix is a historical Claude Code convention; the SKILL.md contents are agent-agnostic.
+3. `.agent-config/repo/skills/<name>/SKILL.md`: bootstrapped from the shared config repo.
+4. **Installed plugins**: agent-specific plugin skills (e.g., Claude Code plugins), check `/skills` output.
 
-If a project-local skill matches the task better than a shared skill, prefer the local one. The router itself follows this same lookup order.
+If a project-local skill matches the task better than a pack-deployed or bootstrapped skill, prefer the project-local one. The router itself follows this same lookup order.
 
 ## Extending the Router
 
