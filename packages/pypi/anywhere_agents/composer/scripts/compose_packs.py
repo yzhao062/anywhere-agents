@@ -187,8 +187,20 @@ def _build_prior_pack_outputs(
         for file_entry in pack_entry.get("files") or []:
             if not isinstance(file_entry, dict):
                 continue
-            current_sha = file_entry.get("input_sha256")
-            ring: list[str] = file_entry.get("historical_input_sha256") or []
+            # Generated-command pointer entries (auto-emitted by skill.py)
+            # carry input_sha256=None because they are not copied from a
+            # source file; the prior pointer bytes live in output_sha256.
+            # Seed known_shas from output_sha256 in that case so an existing
+            # v1 pointer is classified as PRESTATE_PACK_OUTPUT and the v2
+            # template bump can rewrite it (issue anywhere-agents#6
+            # Phase 3 review Round 4 High). Other roles continue to use
+            # the input_sha256 + historical_input_sha256 ring.
+            if file_entry.get("role") == "generated-command":
+                current_sha = file_entry.get("output_sha256")
+                ring: list[str] = []
+            else:
+                current_sha = file_entry.get("input_sha256")
+                ring = file_entry.get("historical_input_sha256") or []
             known_shas: set[str] = {s for s in ([current_sha] + list(ring)) if s}
             for out_path in file_entry.get("output_paths") or []:
                 if not isinstance(out_path, str) or not out_path:

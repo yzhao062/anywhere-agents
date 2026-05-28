@@ -86,7 +86,7 @@ Table of minimum Node.js 24 versions for common GitHub-maintained actions (`chec
 
 ## Local Skills Precedence
 
-Repo-local `skills/<name>/SKILL.md` always wins over the bootstrapped shared copy. Do not modify global skills when a local override exists.
+Repo-local `skills/<name>/SKILL.md` always wins over pack-deployed `.claude/skills/<name>/SKILL.md` and bootstrapped `.agent-config/repo/skills/<name>/SKILL.md` copies. Do not modify global skills when a local override exists.
 
 ## Cross-Tool Skill Sharing
 

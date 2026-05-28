@@ -381,6 +381,132 @@ class PriorPackOutputsDirWalkTests(unittest.TestCase):
 
 
 # =====================================================================
+# Regression: Phase 3 review Round 4 High. Generated-command pointer
+# entries have input_sha256=None; the prior pointer bytes are recorded
+# in output_sha256. _build_prior_pack_outputs must seed known_shas from
+# output_sha256 for that role, otherwise an existing v1 pointer would
+# be classified as PRESTATE_UNMANAGED and the v2 template-bump compose
+# would abort with "unmanaged file already exists at target path"
+# (issue anywhere-agents#6).
+# =====================================================================
+
+
+class GeneratedCommandPointerPriorOutputsTests(unittest.TestCase):
+    """The composer auto-emits a .claude/commands/<name>.md pointer for
+    every directory-only kind:skill entry. The lock records that pointer
+    as role=generated-command with input_sha256=None and the pointer
+    bytes hashed into output_sha256. When the template version bumps
+    (v1 → v2), the next compose must classify the existing v1 pointer
+    on disk as PRESTATE_PACK_OUTPUT so it can be rewritten in place.
+
+    Before the fix, _build_prior_pack_outputs only seeded known_shas
+    from input_sha256 + historical_input_sha256, so the generated-command
+    entry's None input_sha256 left known_shas empty; the pointer fell
+    through to PRESTATE_UNMANAGED and the v2 compose aborted with
+    DriftAbort("unmanaged file already exists at target path").
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.root = Path(self.tmp).resolve()
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_generated_command_pointer_uses_output_sha_for_known_shas(self) -> None:
+        """A v1 generated-command pointer on disk must appear in
+        prior_pack_outputs with its v1 sha, so the v2 compose can
+        classify it as PRESTATE_PACK_OUTPUT and rewrite the pointer."""
+        # Old v1 pointer text on disk (2-path lookup, pre-issue-#6).
+        v1_pointer_text = (
+            "Read and follow the skill definition. Look for it at "
+            "`skills/third-party/SKILL.md` first, then "
+            "`.agent-config/repo/skills/third-party/SKILL.md`.\n"
+            "\n"
+            "Apply it to the user's current task. Also read the supporting "
+            "files under the skill's references/ directory as needed.\n"
+        )
+        v1_bytes = v1_pointer_text.encode("utf-8")
+        v1_sha = _sha256(v1_bytes)
+
+        pointer_rel = ".claude/commands/third-party.md"
+        pointer_abs = self.root / pointer_rel
+        _write(pointer_abs, v1_bytes)
+
+        # Construct a previous pack-lock entry shaped like the one
+        # skill.py:_emit_pointer writes for a directory-only skill.
+        lock_entry = {
+            "role": "generated-command",
+            "host": "claude-code",
+            "source_path": None,
+            "input_sha256": None,
+            "output_paths": [pointer_rel],
+            "output_scope": "project-local",
+            "effective_update_policy": "auto",
+            "generated_from": "active-skill:third-party",
+            "source_input_sha256": v1_sha,
+            "template_sha256": f"aa-composer-skill-pointer-v1:{v1_sha}",
+            "output_sha256": v1_sha,
+        }
+        previous_lock = _pack_lock_with_file(lock_entry)
+
+        prior_outputs = compose_packs._build_prior_pack_outputs(
+            root=self.root,
+            previous_pack_lock=previous_lock,
+        )
+
+        abs_path = str(pointer_abs.resolve())
+        self.assertIn(
+            abs_path, prior_outputs,
+            "generated-command pointer must appear in prior_pack_outputs "
+            "via output_sha256 seeding (review Round 4 High fix)",
+        )
+        self.assertEqual(prior_outputs[abs_path], v1_sha)
+
+    def test_non_generated_role_still_uses_input_sha(self) -> None:
+        """Regression guard: the output_sha256 fallback is gated on
+        role == 'generated-command'. Other roles must continue to read
+        from input_sha256 only, otherwise tampered files with arbitrary
+        on-disk content would adopt themselves as PRESTATE_PACK_OUTPUT
+        through the output_sha256 backdoor."""
+        file_content = b"explicit pointer body\n"
+        sha = _sha256(file_content)
+        file_path = self.root / ".claude" / "commands" / "explicit.md"
+        _write(file_path, file_content)
+
+        # A verbatim pointer entry (NOT generated-command). The
+        # output_sha256 here would equal the on-disk sha, but the fix
+        # must NOT seed known_shas from it for non-generated roles.
+        lock_entry = {
+            "role": "active-skill",
+            "host": "claude-code",
+            "source_path": "skills/explicit.md",
+            "input_sha256": "deadbeef" * 8,  # does NOT match on-disk
+            "output_paths": [".claude/commands/explicit.md"],
+            "output_scope": "project-local",
+            "effective_update_policy": "auto",
+            "output_sha256": sha,  # matches on-disk, but should not be seeded
+        }
+        previous_lock = _pack_lock_with_file(lock_entry)
+
+        prior_outputs = compose_packs._build_prior_pack_outputs(
+            root=self.root,
+            previous_pack_lock=previous_lock,
+        )
+
+        abs_path = str(file_path.resolve())
+        # The on-disk sha is NOT in known_shas (because input_sha256
+        # mismatch and the role is not generated-command), so the file
+        # should NOT appear in prior_pack_outputs.
+        self.assertNotIn(
+            abs_path, prior_outputs,
+            "non-generated-command roles must not adopt files via "
+            "output_sha256 (only input_sha256 + historical ring)",
+        )
+
+
+# =====================================================================
 # Test 4: historical ring update in pack-lock on successful compose.
 # =====================================================================
 

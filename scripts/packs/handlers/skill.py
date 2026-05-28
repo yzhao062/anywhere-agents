@@ -41,6 +41,7 @@ def _match_key(rel: str) -> str:
 _POINTER_TEMPLATE = (
     "Read and follow the skill definition. Look for it at "
     "`skills/{name}/SKILL.md` first, then "
+    "`.claude/skills/{name}/SKILL.md`, then "
     "`.agent-config/repo/skills/{name}/SKILL.md`.\n"
     "\n"
     "Apply it to the user's current task. Also read the supporting files "
@@ -172,7 +173,7 @@ def _maybe_auto_emit_pointer(
             # so generated-command drift detection (Phase 4+) can tell a
             # template change from an on-disk tamper.
             "source_input_sha256": pointer_sha,
-            "template_sha256": f"aa-composer-skill-pointer-v1:{pointer_sha}",
+            "template_sha256": f"aa-composer-skill-pointer-v2:{pointer_sha}",
             "output_sha256": pointer_sha,
         }
     )

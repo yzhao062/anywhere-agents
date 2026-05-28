@@ -81,8 +81,9 @@
     Check `my-router`'s lookup order:
 
     1. `skills/<name>/SKILL.md` in the project (project-local override).
-    2. `.agent-config/repo/skills/<name>/SKILL.md` (bootstrapped copy).
-    3. Installed agent-platform plugins (e.g., Claude Code plugin skills).
+    2. `.claude/skills/<name>/SKILL.md` (pack-deployed copy).
+    3. `.agent-config/repo/skills/<name>/SKILL.md` (bootstrapped copy).
+    4. Installed agent-platform plugins (e.g., Claude Code plugin skills).
 
     If the skill exists but is not dispatching, verify the routing rules in `skills/my-router/references/routing-table.md`. The router prefers keyword matches over file-type matches; a too-generic keyword can accidentally match the wrong skill.
 

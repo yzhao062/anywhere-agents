@@ -3,7 +3,7 @@ description: Run the implement-review staged-change review loop
 argument-hint: "[auto|cli|auto-terminal|manual|plugin] [focus...]"
 ---
 
-Read and follow the skill definition. Look for it at `skills/implement-review/SKILL.md` first, then `.agent-config/repo/skills/implement-review/SKILL.md`.
+Read and follow the skill definition. Look for it at `skills/implement-review/SKILL.md` first, then `.claude/skills/implement-review/SKILL.md`, then `.agent-config/repo/skills/implement-review/SKILL.md`.
 
 Command arguments from the slash invocation: `$ARGUMENTS`
 

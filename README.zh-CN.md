@@ -39,7 +39,7 @@
 
 **你在好几个 repo 之间跳。** 每开一个新项目都得重复同一套仪式：写作规则、权限策略、自定义 skill。手动复制粘贴以后看着它们一点一点走样，累积起来很烦人。`bootstrap` 把共享默认拉下来，再在上面叠你这个项目自己的改动。
 
-**你想在 push 之前先有人看一眼。** `anywhere-agents` 自带 `/implement-review` 这个 skill：把 staged diff 递给第二个 reviewer（Codex / Copilot / 你配的任何一个），收反馈、改、再来一轮，直到没意见。不用它的话，你每个项目单独接 reviewer API；用了，第一次 bootstrap 就有了。
+**你想在 push 之前先有人看一眼。** `anywhere-agents` 自带 `/implement-review` 这个 skill：把 staged diff 递给第二个 reviewer（Codex / GitHub Copilot / 无头 Claude Code / 你配的任何一个），收反馈、改、再来一轮，直到没意见。不用它的话，你每个项目单独接 reviewer API；用了，第一次 bootstrap 就有了。
 
 **你想 agent 写东西自动不带 AI 味儿。** 默认的 `agent-style` rule pack 禁了 ~45 个典型 AI-tell 词和格式（em-dash 当随手用、散文被切成 bullet 之类），再加一个 PreToolUse `guard`，任何 `.md` / `.tex` / `.rst` 的 tool 调用只要 outgoing 里撞上这些词，`guard` 直接 deny。没它，那些词就进你文件了；有它，写入在落盘前就被拦下来。
 
@@ -67,7 +67,7 @@ anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
 
 ![session-start banner：Claude Code 和 Codex 的当前 + 最新版本、auto-update 状态、已装 skill、PreToolUse + SessionStart hooks、session check 发现的 drift](docs/session-banner.png)
 
-Claude Code 和 Codex 的当前版本 + 最新版本（只在不一致时才画箭头）、auto-update 状态、已装 skill（local + shared）、hook（`guard.py` PreToolUse、`session_bootstrap.py` SessionStart）、以及 session 启动检查发现的 drift。哪里该动，最后一行给出具体动作（比如 `⚠ actions/checkout@v4 in .github/workflows/validate.yml:17 — bump to v5`）。
+Claude Code 和 Codex 的当前版本 + 最新版本（只在不一致时才画箭头）、auto-update 状态、已装 skill（local + pack + shared）、hook（`guard.py` PreToolUse、`session_bootstrap.py` SessionStart）、以及 session 启动检查发现的 drift。哪里该动，最后一行给出具体动作（比如 `⚠ actions/checkout@v4 in .github/workflows/validate.yml:17 — bump to v5`）。
 
 ### bootstrap 之后你的 repo 长这样
 

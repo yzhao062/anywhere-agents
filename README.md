@@ -39,7 +39,7 @@ Four problems this fixes:
 
 **You work across many repos.** Every new project repeats the same setup ritual: writing-style rules, permission policies, custom skills. Without `anywhere-agents`, you copy-paste between repos and watch them drift. With it, `bootstrap` pulls shared defaults and layers repo-local overrides on top.
 
-**You want a review loop before you push.** `anywhere-agents` ships `/implement-review`, a skill that hands your staged diff to a second reviewer (Codex, Copilot, or whichever you configure), converges on feedback, and revises. Without it, you wire reviewer APIs per project. With it, the skill is present the first time you bootstrap.
+**You want a review loop before you push.** `anywhere-agents` ships `/implement-review`, a skill that hands your staged diff to a second reviewer (Codex, GitHub Copilot, headless Claude Code, or whichever you configure), converges on feedback, and revises. Without it, you wire reviewer APIs per project. With it, the skill is present the first time you bootstrap.
 
 **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one. Without `anywhere-agents`, the banned words land in your files. With it, the guard blocks the write.
 
@@ -67,7 +67,7 @@ As of v0.6.0, the bundled-default policy table is `agent-style` (passive) → `a
 
 ![session-start banner: current + latest versions of Claude Code and Codex, auto-update state, active skills, PreToolUse + SessionStart hooks, and any drift the session check found](docs/session-banner.png)
 
-Current and latest versions of Claude Code and Codex (arrows appear only when they differ); auto-update state; active skills (local + shared); hooks (`guard.py` PreToolUse, `session_bootstrap.py` SessionStart); any drift flagged by the session check. If anything needs attention, the last line names it with a concrete action (for example, `⚠ actions/checkout@v4 in .github/workflows/validate.yml:17 — bump to v5`).
+Current and latest versions of Claude Code and Codex (arrows appear only when they differ); auto-update state; active skills (local + pack + shared); hooks (`guard.py` PreToolUse, `session_bootstrap.py` SessionStart); any drift flagged by the session check. If anything needs attention, the last line names it with a concrete action (for example, `⚠ actions/checkout@v4 in .github/workflows/validate.yml:17 — bump to v5`).
 
 ### What Appears in Your Repo After Bootstrap
 

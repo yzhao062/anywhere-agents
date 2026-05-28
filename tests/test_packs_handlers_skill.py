@@ -241,8 +241,26 @@ class SkillDirectoryCopyTests(_TmpDirCase):
         pointer_text = pointer_path.read_text(encoding="utf-8")
         self.assertIn("skills/third-party-skill/SKILL.md", pointer_text)
         self.assertIn(
+            ".claude/skills/third-party-skill/SKILL.md",
+            pointer_text,
+        )
+        self.assertIn(
             ".agent-config/repo/skills/third-party-skill/SKILL.md",
             pointer_text,
+        )
+        # Path order check: skills/ before .claude/skills/ before .agent-config/repo/skills/
+        local_idx = pointer_text.index("skills/third-party-skill/SKILL.md")
+        claude_idx = pointer_text.index(".claude/skills/third-party-skill/SKILL.md")
+        bootstrap_idx = pointer_text.index(
+            ".agent-config/repo/skills/third-party-skill/SKILL.md"
+        )
+        self.assertLess(
+            local_idx, claude_idx,
+            "Project-local skills/ must precede .claude/skills/ in lookup order",
+        )
+        self.assertLess(
+            claude_idx, bootstrap_idx,
+            ".claude/skills/ must precede .agent-config/repo/skills/ in lookup order",
         )
         # pack-lock records the auto-emitted pointer as role=generated-command.
         files = ctx.pack_lock["packs"]["third-party"]["files"]
