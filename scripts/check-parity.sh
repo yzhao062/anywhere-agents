@@ -24,12 +24,13 @@
 #               curls from ac but the file served is now byte-identical
 #               to aa and includes the AC->AA migration block),
 #               skills/{implement-review,ci-mockup-figure,readme-polish}
-#               as recursive trees, and the four shared-contract test
-#               files tests/test_{dispatch_codex,health_check,guard,
-#               prompt_byte_parity}.py (added 2026-05-16 to close the
-#               drift gap that broke aa CI on every shared-skill change;
-#               see the comment block above the strict_test_files loop
-#               for the rationale).
+#               as recursive trees, and the shared-contract test files
+#               tests/test_{dispatch_codex,dispatch_copilot,dispatch_claude,
+#               health_check,guard,session_bootstrap,pointer_files,
+#               prompt_byte_parity,bootstrap_preflight}.py (added
+#               incrementally since 2026-05-16 to close the drift gap that
+#               broke aa CI on every shared-skill change; see the comment
+#               block above the strict_test_files loop for the rationale).
 #
 #               (v0.4.0 dropped the four shipped .claude/commands/*.md
 #               pointers from cross-repo STRICT; see the block-comment
@@ -137,21 +138,26 @@ done
 
 # ---- STRICT: shared-contract test files (pin runtime behavior of shared scripts) ----
 # These tests assert the public contract of shared scripts that are themselves
-# in STRICT (dispatch-codex, health-check, guard, prompt body byte preservation).
-# Before this block landed, tests/ was aa-local and drifted: aa CI ran stale
-# assertions against fresh shared code, and every substantive shared-skill
-# change broke aa CI until a manual cp re-aligned the tests (e.g. aa 1295c60).
-# Gating these 4 files restores the property that a shared-contract change
-# proposed in either repo must mirror tests in the same commit. Each repo
-# may still have its own non-shared tests (aa: test_compose_packs.py,
-# test_pack_*.py; ac: test_repo.py, test_check_parity.py); those stay
-# aa-local and ac-local respectively.
+# in STRICT (dispatch-codex, dispatch-copilot, health-check, guard, session
+# bootstrap event/banner state, on-disk shape of every committed
+# .claude/commands/*.md pointer, prompt body byte preservation, bootstrap
+# preflight). Before this block landed, tests/ was aa-local and drifted: aa
+# CI ran stale assertions against fresh shared code, and every substantive
+# shared-skill change broke aa CI until a manual cp re-aligned the tests
+# (e.g. aa 1295c60). Gating these files restores the property that a
+# shared-contract change proposed in either repo must mirror tests in the
+# same commit. Each repo may still have its own non-shared tests (aa:
+# test_compose_packs.py, test_pack_*.py; ac: test_repo.py,
+# test_check_parity.py); those stay aa-local and ac-local respectively.
 printf '\n== strict shared-contract tests ==\n'
 strict_test_files=(
   tests/test_dispatch_codex.py
   tests/test_dispatch_copilot.py
+  tests/test_dispatch_claude.py
   tests/test_health_check.py
   tests/test_guard.py
+  tests/test_session_bootstrap.py
+  tests/test_pointer_files.py
   tests/test_prompt_byte_parity.py
   tests/test_bootstrap_preflight.py
 )
