@@ -70,6 +70,7 @@ def make_state_dir(
     *,
     with_tail: bool = True,
     tail_content: str = "mock codex stdout\nmock codex stderr\n",
+    tail_stderr_content: str | None = None,
     with_stall: bool = False,
     stall_content: str = "STALL 2026-05-15T12:00:00Z tail-no-growth-for-300s\n",
     pre_mtime: int = 0,
@@ -92,6 +93,10 @@ def make_state_dir(
         (state_dir / "timestamp").write_text(f"{dispatch_time}\n", encoding="utf-8")
     if with_tail:
         (state_dir / "tail").write_text(tail_content, encoding="utf-8")
+    if tail_stderr_content is not None:
+        (state_dir / "tail.stderr-tmp").write_text(
+            tail_stderr_content, encoding="utf-8"
+        )
     if with_stall:
         (state_dir / "stall-warning").write_text(stall_content, encoding="utf-8")
     return state_dir
@@ -209,6 +214,34 @@ class HealthCheckPython(unittest.TestCase):
             parsed = parse_output(result.stdout)
             self.assertEqual(parsed["check-5"][0], "FAIL")
 
+    def test_check5_accepts_bold_sentence_verification_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Codex.md"
+            make_review(
+                review,
+                include_verification_notes=False,
+                extra_body="**Verification notes.** none.\n",
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(parsed["check-5"][0], "PASS")
+
+    def test_check5_accepts_heading_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Codex.md"
+            make_review(
+                review,
+                include_verification_notes=False,
+                extra_body="### Verification notes\nnone.\n",
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(parsed["check-5"][0], "PASS")
+
     # ----- Check 6: scope correspondence -----
     def test_check6_prompt_files_not_mentioned_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -320,6 +353,21 @@ class HealthCheckPython(unittest.TestCase):
                     "ERROR: HTTP/1.1 429 too many requests\n"
                     "ERROR: tool github_api failed\n"
                 ),
+            )
+            result = run_health_py(state, review)
+            self.assertEqual(result.returncode, 0)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(parsed["check-8"][0], "WARN")
+
+    def test_check8_warns_on_stderr_side_tail_tool_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Codex.md"
+            make_review(review)
+            state = make_state_dir(
+                td_path,
+                tail_content="clean stdout\n",
+                tail_stderr_content="ERROR: tool file_write failed\n",
             )
             result = run_health_py(state, review)
             self.assertEqual(result.returncode, 0)

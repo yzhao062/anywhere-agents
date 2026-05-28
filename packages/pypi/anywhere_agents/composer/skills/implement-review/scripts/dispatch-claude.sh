@@ -166,11 +166,48 @@ else
     CLAUDE_CMD="$CLAUDE_BIN"
 fi
 
-# Run claude -p with prompt fed via stdin (mirrors Codex's `< prompt-file` shape,
-# avoiding ARG_MAX traps on long prompts). The narrow allow-list is path-scoped
-# to Review-Claude-Code.md so the unattended subprocess cannot write any other
-# file. GIT_PAGER=cat keeps claude's own `git diff` from stalling on a pager.
-# No `--sandbox` flag (that is Codex-only).
+# Build a Claude-specific relay prompt. Claude only reads context and returns
+# the complete review on stdout; this wrapper writes stdout to the expected
+# review file after Claude exits. That avoids unattended Write/Edit permission
+# prompts and keeps the auto-terminal path non-interactive.
+RELAY_PROMPT_FILE="$STATE_DIR/prompt-relay"
+DIFF_FILE="$STATE_DIR/staged-diff"
+GIT_DIFF_STDERR="$STATE_DIR/git-diff.stderr"
+VALIDATION_DIR="$(pwd)"
+STAGED_SNAPSHOT_DIR="$STATE_DIR/staged-snapshot"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git diff --cached --no-ext-diff > "$DIFF_FILE" 2> "$GIT_DIFF_STDERR"; then
+        printf '%s\n' "dispatch-claude: git diff --cached failed; see state-dir/git-diff.stderr" > "$DIFF_FILE"
+    fi
+    mkdir -p "$STAGED_SNAPSHOT_DIR"
+    if git checkout-index -a --prefix="$STAGED_SNAPSHOT_DIR/" >> "$GIT_DIFF_STDERR" 2>&1; then
+        VALIDATION_DIR="$STAGED_SNAPSHOT_DIR"
+    else
+        printf '%s\n' "dispatch-claude: staged snapshot export failed; validation commands run in the original repo" >> "$GIT_DIFF_STDERR"
+    fi
+else
+    printf '%s\n' "(not a git worktree)" > "$DIFF_FILE"
+fi
+
+{
+    printf '%s\n' "Backend note for Auto-terminal Claude reviewer:"
+    printf '%s\n' "- Do not use Write or Edit tools. The dispatch wrapper saves your final answer to ${EXPECTED_REVIEW_FILE}."
+    printf '%s\n' "- You may run Bash verification commands, tests, grep/rg, and other read/validation tools in the current working directory."
+    printf '%s\n' "- The current working directory is a disposable staged snapshot when git export succeeds: ${VALIDATION_DIR}"
+    printf '%s\n' "- Do not run mutating, publishing, network, package-install, cleanup, or destructive commands."
+    printf '%s\n' "- Return the complete review as your final answer, starting with the required Round marker."
+    printf '\n%s\n\n' "Original review prompt:"
+    cat "$PROMPT_FILE"
+    printf '\n\n%s\n\n' "Dispatcher-provided staged diff:"
+    cat "$DIFF_FILE"
+} > "$RELAY_PROMPT_FILE"
+
+# Run claude -p with the relay prompt fed via stdin (mirrors Codex's
+# `< prompt-file` shape, avoiding ARG_MAX traps on long prompts). Claude gets
+# Read+Bash only; the wrapper handles the single review-file write. Claude runs
+# in a disposable staged snapshot when git export succeeds, so verification
+# tools can execute without touching the source checkout. No `--sandbox` flag
+# (that is Codex-only).
 #
 # `--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153 documents
 # bare mode as API-key/apiKeyHelper auth only: OAuth and keychain auth are
@@ -188,18 +225,41 @@ if [ "${CLAUDE_DISPATCH_BARE:-}" = "1" ]; then
     CLAUDE_BARE_ARGS=(--bare)
 fi
 
-REPO="$(pwd)"
-GIT_PAGER=cat "$CLAUDE_CMD" -p \
-    --permission-mode dontAsk \
-    --allowedTools "Read,Write(/Review-Claude-Code.md),Edit(/Review-Claude-Code.md)" \
-    --add-dir "$REPO" \
-    ${CLAUDE_BARE_ARGS[@]+"${CLAUDE_BARE_ARGS[@]}"} \
-    --output-format text \
-    < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
+(
+    cd "$VALIDATION_DIR" || exit 2
+    GIT_PAGER=cat "$CLAUDE_CMD" -p \
+        --permission-mode bypassPermissions \
+        --tools "Read,Bash" \
+        --add-dir "$VALIDATION_DIR" \
+        ${CLAUDE_BARE_ARGS[@]+"${CLAUDE_BARE_ARGS[@]}"} \
+        --output-format text \
+        < "$RELAY_PROMPT_FILE" > "$STATE_DIR/tail" 2> "$STATE_DIR/tail.stderr-tmp"
+)
 CLAUDE_EXIT=$?
 
-# Pipe last 80 lines of tail to stderr for caller visibility
+# Save Claude's final answer to the expected review file. Stderr stays in the
+# state-dir for diagnostics and is not copied into the review body.
+if [ "$CLAUDE_EXIT" -eq 0 ] && [ -s "$STATE_DIR/tail" ]; then
+    MARKER="<!-- Round ${ROUND} -->"
+    NORMALIZED_REVIEW="$STATE_DIR/review-normalized"
+    if grep -Fq "$MARKER" "$STATE_DIR/tail"; then
+        awk -v marker="$MARKER" 'found || $0 == marker { found = 1; print }' \
+            "$STATE_DIR/tail" > "$NORMALIZED_REVIEW"
+    else
+        {
+            printf '%s\n\n' "$MARKER"
+            cat "$STATE_DIR/tail"
+        } > "$NORMALIZED_REVIEW"
+    fi
+    if ! cp "$NORMALIZED_REVIEW" "$EXPECTED_REVIEW_FILE"; then
+        echo "dispatch-claude: failed to write expected review file: $EXPECTED_REVIEW_FILE" >&2
+        CLAUDE_EXIT=2
+    fi
+fi
+
+# Pipe last 80 lines of stdout/stderr tails to stderr for caller visibility
 tail -n 80 "$STATE_DIR/tail" >&2 2>/dev/null || true
+tail -n 80 "$STATE_DIR/tail.stderr-tmp" >&2 2>/dev/null || true
 
 # Do NOT force-kill stall-watch. It polls our PID via `kill -0` and exits
 # silently on its next interval after we die.

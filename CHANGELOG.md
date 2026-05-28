@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Fixed
+
+- **`implement-review` Claude reviewer backend**: Claude now reviews the staged snapshot with `Read,Bash` tool access and writes the final review through the dispatcher, avoiding the unattended Windows hangs seen with path-scoped `Write(...)` / `Edit(...)` and `--allowedTools` preapproval patterns. Health checks now scan Claude stderr-side tails and accept the shorter `**Verification notes.**` form.
 
 ## [0.7.1] — 2026-05-21
 

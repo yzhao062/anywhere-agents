@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     pre_mtime_file = state_dir / "pre-mtime"
     timestamp_file = state_dir / "timestamp"
     tail_file = state_dir / "tail"
+    tail_stderr_file = state_dir / "tail.stderr-tmp"
     stall_warning_file = state_dir / "stall-warning"
 
     pre_mtime = read_int_file(pre_mtime_file)
@@ -197,9 +198,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # ----- Check 5: Verification notes -----
     vn_patterns = [
-        r"^##\s+Verification notes",
-        r"^\*\*Verification notes\*\*",
-        r"Verification notes:",
+        r"^#{1,6}\s+Verification notes\b",
+        r"^\*\*Verification notes[.:]?\*\*",
+        r"Verification notes[.:]",
     ]
     if any(re.search(p, review_text, re.MULTILINE | re.IGNORECASE) for p in vn_patterns):
         emit("PASS", "check-5", "verification-notes-present")
@@ -248,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
         emit("WARN", "check-8", "1", "missing-dispatch-tail")
     else:
         tail_text = tail_file.read_text(encoding="utf-8", errors="replace")
+        if tail_stderr_file.exists():
+            tail_text += "\n" + tail_stderr_file.read_text(
+                encoding="utf-8", errors="replace"
+            )
         tail_no_code = strip_code_spans(tail_text)
         per_pattern_compiled = [
             (p, re.compile(p, re.IGNORECASE)) for p in TOOL_FAILURE_PATTERNS

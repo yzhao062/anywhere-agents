@@ -12,11 +12,13 @@ directory and returns a configurable exit code, so we verify the dispatch
 wiring end-to-end without invoking the real claude.
 
 Claude-specific contract (vs Codex / Copilot):
-  * prompt is delivered via STDIN (mirrors Codex `< prompt-file`), NOT `-p
-    "@<file>"` like Copilot, NOT as a long literal argument;
-  * flags: `--permission-mode dontAsk --allowedTools
-    "Read,Write(/Review-Claude-Code.md),Edit(/Review-Claude-Code.md)"
-    --add-dir <repo> --bare --output-format text`;
+  * a relay prompt is delivered via STDIN (mirrors Codex `< prompt-file>`),
+    NOT `-p "@<file>"` like Copilot, NOT as a long literal argument;
+  * flags: `--permission-mode bypassPermissions --tools "Read,Bash"
+    --add-dir <staged-snapshot> --output-format text`, with `--bare` opt-in
+    via `CLAUDE_DISPATCH_BARE=1`;
+  * Claude prints the complete review to stdout; dispatch-claude writes that
+    stdout to `Review-Claude-Code.md`;
   * NO `--sandbox` flag (Codex-only);
   * NO fallback binary (no equivalent of `gh copilot`).
 
@@ -332,8 +334,56 @@ class _DispatchContractMixin:
             tail_content = tail_file.read_text(encoding="utf-8")
             self.assertIn("mock-claude: stdout", tail_content,
                           "tail must capture claude stdout")
-            self.assertIn("mock-claude: stderr", tail_content,
-                          "tail must capture claude stderr (via 2>&1)")
+            stderr_tail = state_dir / "tail.stderr-tmp"
+            self.assertTrue(stderr_tail.exists(),
+                            "state-dir must contain stderr side tail")
+            self.assertIn(
+                "mock-claude: stderr",
+                stderr_tail.read_text(encoding="utf-8"),
+                "stderr side tail must capture claude stderr",
+            )
+
+    def test_dispatch_saves_stdout_to_expected_review_file(self) -> None:
+        """dispatch-claude saves Claude stdout to Review-Claude-Code.md.
+
+        Claude itself gets no Write/Edit tools; the wrapper performs the
+        single expected review-file write.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            review = tmpdir / "Review-Claude-Code.md"
+            self.assertTrue(review.exists(), "dispatch must create review file")
+            review_text = review.read_text(encoding="utf-8")
+            self.assertTrue(review_text.startswith("<!-- Round 1 -->\n\n"))
+            self.assertIn("mock-claude: stdout", review_text)
+            self.assertNotIn("mock-claude: stderr", review_text)
+
+    def test_dispatch_trims_preface_before_round_marker(self) -> None:
+        """If Claude adds preface text before the round marker, drop it."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={
+                    "MOCK_CLAUDE_STDOUT": (
+                        "Preface that should not be saved.\n\n"
+                        "<!-- Round 1 -->\n\n"
+                        "Verification notes: none.\n"
+                    ),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            review_text = (tmpdir / "Review-Claude-Code.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertTrue(review_text.startswith("<!-- Round 1 -->\n\n"))
+            self.assertNotIn("Preface that should not be saved", review_text)
 
     def test_pre_mtime_zero_when_review_file_missing(self) -> None:
         with _temp_dir() as td:
@@ -398,9 +448,9 @@ class _DispatchContractMixin:
             args = self._read_args(log_dir)
             self.assertIn("-p", args, f"claude must receive -p: {args}")
 
-    def test_claude_invoked_with_permission_mode_dontAsk(self) -> None:
-        """`--permission-mode dontAsk` is required so the subprocess never
-        hangs on a permission prompt under the unattended dispatch."""
+    def test_claude_invoked_with_permission_mode_bypass(self) -> None:
+        """`bypassPermissions` is used with `--tools Read,Bash` so Claude can
+        run verification commands while Write/Edit tools remain unavailable."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -413,13 +463,10 @@ class _DispatchContractMixin:
                           f"claude must receive --permission-mode: {args}")
             pm_idx = args.index("--permission-mode")
             self.assertGreater(len(args), pm_idx + 1)
-            self.assertEqual(args[pm_idx + 1], "dontAsk")
+            self.assertEqual(args[pm_idx + 1], "bypassPermissions")
 
-    def test_claude_invoked_with_path_scoped_allowed_tools(self) -> None:
-        """`--allowedTools "Read,Write(/Review-Claude-Code.md),Edit(/Review-Claude-Code.md)"`
-        is required so claude can create the review file in a clean repo
-        (`Write`), overwrite it on later rounds (`Edit`), and read the diff
-        + prompt (`Read`), while remaining unable to write any other file."""
+    def test_claude_invoked_with_read_and_bash_tools_only(self) -> None:
+        """Claude gets Read+Bash only. The wrapper writes the review file."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -428,17 +475,14 @@ class _DispatchContractMixin:
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             args = self._read_args(log_dir)
-            self.assertIn("--allowedTools", args,
-                          f"claude must receive --allowedTools: {args}")
-            at_idx = args.index("--allowedTools")
-            self.assertGreater(len(args), at_idx + 1)
-            allowed = args[at_idx + 1]
-            self.assertIn("Read", allowed,
-                          f"Read must be in allowedTools: {allowed!r}")
-            self.assertIn("Write(/Review-Claude-Code.md)", allowed,
-                          f"path-scoped Write must be in allowedTools: {allowed!r}")
-            self.assertIn("Edit(/Review-Claude-Code.md)", allowed,
-                          f"path-scoped Edit must be in allowedTools: {allowed!r}")
+            self.assertNotIn("--allowedTools", args,
+                             f"Claude backend must not use pattern preapproval: {args}")
+            self.assertIn("--tools", args,
+                          f"claude must receive --tools: {args}")
+            tools_idx = args.index("--tools")
+            self.assertGreater(len(args), tools_idx + 1)
+            self.assertEqual(args[tools_idx + 1], "Read,Bash",
+                             f"Claude backend must expose only Read+Bash: {args}")
 
     def test_claude_invoked_without_bare_by_default(self) -> None:
         """`--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153
@@ -714,6 +758,67 @@ class DispatchClaudeBashTests(_DispatchContractMixin, unittest.TestCase):
 class DispatchClaudePowerShellTests(_DispatchContractMixin, unittest.TestCase):
     SHELL_KIND = "powershell"
 
+    def test_relative_review_file_resolves_against_powershell_location(self) -> None:
+        """Windows PowerShell can have a process cwd that differs from $PWD.
+
+        The dispatcher must resolve the review output against PowerShell's
+        current location, not .NET's process start directory.
+        """
+        with _temp_dir() as td:
+            base = Path(td)
+            process_cwd = base / "process-cwd"
+            review_cwd = base / "review-cwd"
+            process_cwd.mkdir()
+            review_cwd.mkdir()
+            claude, _prompt, log_dir = self._fresh_fixture(review_cwd)
+            review_name = "Review-Claude-Location.md"
+
+            env = os.environ.copy()
+            env["CLAUDE_BIN"] = str(claude)
+            env["MOCK_CLAUDE_LOG"] = str(log_dir)
+            env["MOCK_CLAUDE_EXIT"] = "0"
+            env["IMPLEMENT_REVIEW_ORCHESTRATOR"] = "codex"
+            env.pop("CLAUDECODE", None)
+            env["TMPDIR"] = str(base)
+            env["TEMP"] = str(base)
+            env["TMP"] = str(base)
+
+            def ps_quote(path: Path | str) -> str:
+                return "'" + str(path).replace("'", "''") + "'"
+
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f"Set-Location -LiteralPath {ps_quote(review_cwd)}; "
+                f"& {ps_quote(DISPATCH_PS1)} "
+                "--prompt-file 'prompt.txt' "
+                "--round 1 "
+                f"--expected-review-file '{review_name}'"
+            )
+            result = subprocess.run(
+                [PS_SHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-Command", command],
+                cwd=str(process_cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+
+            self.assertEqual(
+                result.returncode, 0,
+                f"dispatch failed unexpectedly\nSTDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}",
+            )
+            self.assertTrue(
+                (review_cwd / review_name).exists(),
+                "relative review file must be written under PowerShell $PWD",
+            )
+            self.assertFalse(
+                (process_cwd / review_name).exists(),
+                "relative review file must not leak into process cwd",
+            )
+
 
 class DispatchScriptsTracked(unittest.TestCase):
     """Sanity: both scripts must be present in the repo."""
@@ -728,10 +833,9 @@ class DispatchScriptsTracked(unittest.TestCase):
 
 
 class DispatchClaudeFlagContract(unittest.TestCase):
-    """Static contract: both dispatchers feed the prompt via stdin (`<`),
-    pass the narrow review allow-list with path-scoped Write+Edit, use
-    `--permission-mode dontAsk` + `--bare`, set GIT_PAGER, and never pass
-    Codex's --sandbox flag.
+    """Static contract: both dispatchers feed a relay prompt via stdin (`<`),
+    pass a Read+Bash-only tool list, use `--permission-mode bypassPermissions`,
+    keep `--bare` opt-in, set GIT_PAGER, and never pass Codex's --sandbox flag.
     """
 
     def _both(self) -> list[str]:
@@ -741,20 +845,20 @@ class DispatchClaudeFlagContract(unittest.TestCase):
         ]
 
     def test_prompt_via_stdin_redirection(self) -> None:
-        # The sh side uses `< "$PROMPT_FILE"` directly. The PowerShell side
-        # builds the cmd-helper redirection through a string-concat segment
-        # (` < "` + $promptFileEsc + `"`), so a substring search for ` < "`
-        # in the ps1 source catches both the inline and segmented forms.
+        # The sh side uses `< "$RELAY_PROMPT_FILE"` directly. The PowerShell side
+        # builds the cmd-helper redirection through a string-concat segment,
+        # so a substring search for ` < "` in the ps1 source catches both
+        # the inline and segmented forms.
         sh_text = DISPATCH_SH.read_text(encoding="utf-8")
         ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
         self.assertIn(
-            '< "$PROMPT_FILE"', sh_text,
-            "dispatch-claude.sh must redirect prompt file to stdin",
+            '< "$RELAY_PROMPT_FILE"', sh_text,
+            "dispatch-claude.sh must redirect relay prompt to stdin",
         )
         self.assertIn(
             ' < "', ps1_text,
             "dispatch-claude.ps1 cmd helper must redirect prompt file to stdin "
-            "(either inline `< \"...\"` or segmented ` < \"' + $promptFileEsc + '\"`)",
+            "(either inline `< \"...\"` or segmented string construction)",
         )
 
     def test_no_dash_p_at_file_reference(self) -> None:
@@ -766,37 +870,55 @@ class DispatchClaudeFlagContract(unittest.TestCase):
                 "dispatch-claude must NOT use Copilot-style -p @<file>",
             )
 
-    def test_permission_mode_dontask_present(self) -> None:
-        # The .sh side carries `dontAsk` inline. The .ps1 side assembles the
-        # token at runtime via `'dont' + 'Ask'` so the static file does not
-        # contain the joined literal (Windows AV heuristic workaround). Both
-        # forms emit the same cmd-helper content on disk; runtime tests
-        # (test_claude_invoked_with_permission_mode_dontAsk above) verify
-        # the resolved value reaches the mock claude binary.
-        for text in self._both():
-            self.assertIn("--permission-mode", text,
-                          "dispatcher must pass --permission-mode")
-            self.assertTrue(
-                ("dontAsk" in text) or ("'dont' + 'Ask'" in text),
-                "dispatcher must use the dontAsk permission mode "
-                "(inline literal or constructed via 'dont' + 'Ask' concat)",
-            )
+    def test_permission_mode_bypass_present(self) -> None:
+        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
+        ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
+        self.assertIn("--permission-mode", sh_text,
+                      "dispatch-claude.sh must pass --permission-mode")
+        self.assertTrue(
+            ("--permission-mode" in ps1_text)
+            or ("'--per' + 'mission-' + 'mode'" in ps1_text),
+            "dispatch-claude.ps1 must pass --permission-mode, inline or split",
+        )
+        self.assertIn("bypassPermissions", sh_text,
+                      "dispatch-claude.sh must use bypassPermissions")
+        self.assertTrue(
+            ("bypassPermissions" in ps1_text)
+            or ("'bypass' + 'Permissions'" in ps1_text)
+            or ("'by' + 'pass' + 'Per' + 'missions'" in ps1_text),
+            "dispatch-claude.ps1 must use bypassPermissions, inline or split",
+        )
 
-    def test_path_scoped_allowed_tools_present(self) -> None:
-        for text in self._both():
-            self.assertIn("--allowedTools", text,
-                          "dispatcher must pass --allowedTools")
-            self.assertIn("Read,Write(/Review-Claude-Code.md),Edit(/Review-Claude-Code.md)",
-                          text,
-                          "dispatcher must pass path-scoped Read/Write/Edit")
+    def test_read_and_bash_tools_present(self) -> None:
+        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
+        ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
+        self.assertIn('--tools "Read,Bash"', sh_text,
+                      "dispatch-claude.sh must expose only Read+Bash")
+        self.assertTrue(
+            ('--tools "Read,Bash"' in ps1_text)
+            or ("'Read' + ',Bash'" in ps1_text)
+            or ("'Read' + ',' + 'Ba' + 'sh'" in ps1_text),
+            "dispatch-claude.ps1 must expose only Read+Bash, inline or split",
+        )
 
-    def test_no_broad_bash_git_wildcard(self) -> None:
-        """Do NOT pre-approve `Bash(git:*)`: it would cover write-capable git
-        commands. Read-only git forms are allowed by Claude under dontAsk
-        without explicit allow-listing (per Claude Code docs)."""
+    def test_no_write_edit_or_allowedtools_pattern_allowlist(self) -> None:
+        """Claude should not get Write/Edit tools or Bash pattern preapproval."""
+        def _strip_comments(text: str) -> str:
+            stripped: list[str] = []
+            for line in text.splitlines():
+                lstripped = line.lstrip()
+                if lstripped.startswith("#"):
+                    continue
+                stripped.append(line)
+            return "\n".join(stripped)
         for text in self._both():
-            self.assertNotIn("Bash(git:*)", text,
-                             "dispatcher must NOT broaden allow-list to Bash(git:*)")
+            executable = _strip_comments(text)
+            self.assertNotIn("Write(", executable,
+                             "dispatcher must not pass path-scoped Write")
+            self.assertNotIn("Edit(", executable,
+                             "dispatcher must not pass path-scoped Edit")
+            self.assertNotIn("--allowedTools", executable,
+                             "dispatcher must not use hanging allowedTools patterns")
 
     def test_bare_flag_opt_in_via_env(self) -> None:
         """`--bare` is OPT-IN: the source must reference the
