@@ -51,6 +51,32 @@ def run_session_bootstrap(cwd: str, env_overrides: dict | None = None, timeout: 
     return result.returncode, result.stdout, result.stderr
 
 
+def run_session_bootstrap_with_stdin(
+    cwd: str,
+    stdin_input: str = "",
+    env_overrides: dict | None = None,
+    timeout: int = 60,
+):
+    """Like ``run_session_bootstrap`` but feeds ``stdin_input`` to the hook.
+
+    Exercises the SessionStart payload ``source`` branch added for issue
+    anywhere-agents#7. Mirrors the production hook's stdin shape.
+    """
+    env = dict(os.environ)
+    if env_overrides:
+        env.update(env_overrides)
+    result = subprocess.run(
+        [sys.executable, str(SESSION_BOOTSTRAP)],
+        input=stdin_input,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+        timeout=timeout,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
 def _make_consumer(tmp: Path) -> Path:
     agent_dir = tmp / ".agent-config"
     agent_dir.mkdir(parents=True)
@@ -130,6 +156,142 @@ class ConsumerRootEventWriteTests(unittest.TestCase):
             (nested / ".agent-config").exists(),
             msg="session_bootstrap.py created .agent-config/ in the nested cwd",
         )
+
+    def test_skips_event_write_on_source_compact(self):
+        """SessionStart with source=compact must not advance session-event.ts.
+        Prevents the banner gate from re-arming during auto-compaction and
+        blocking in-flight skill tool calls (issue anywhere-agents#7)."""
+        rc, out, err = run_session_bootstrap_with_stdin(
+            self.tmp_project,
+            stdin_input=json.dumps({"source": "compact"}),
+            env_overrides=self.env,
+        )
+        self.assertEqual(rc, 0, msg=err)
+        self.assertFalse(
+            (self.agent_dir / "session-event.json").exists(),
+            "session-event.json must not be written on source=compact",
+        )
+
+    def test_writes_event_on_source_startup(self):
+        """SessionStart with source=startup writes the event normally."""
+        rc, out, err = run_session_bootstrap_with_stdin(
+            self.tmp_project,
+            stdin_input=json.dumps({"source": "startup"}),
+            env_overrides=self.env,
+        )
+        self.assertEqual(rc, 0, msg=err)
+        self.assertTrue(
+            (self.agent_dir / "session-event.json").exists(),
+            "session-event.json must be written on source=startup",
+        )
+
+    def test_writes_event_when_payload_absent(self):
+        """Missing/empty stdin (legacy callers, older CC versions, manual
+        tests) falls through to writing the event (BC preserved)."""
+        rc, out, err = run_session_bootstrap_with_stdin(
+            self.tmp_project,
+            stdin_input="",
+            env_overrides=self.env,
+        )
+        self.assertEqual(rc, 0, msg=err)
+        self.assertTrue(
+            (self.agent_dir / "session-event.json").exists(),
+            "missing payload must fall through to write (BC)",
+        )
+
+    def test_debounce_skips_rewrite_within_window(self):
+        """A fresh write_session_event call within the debounce window must
+        NOT advance the existing ts. Collapses compaction bursts that leak
+        past the source-skip (issue anywhere-agents#7)."""
+        event_path = self.agent_dir / "session-event.json"
+        # Pre-write an event ts that is 2 seconds old (within the 10s default
+        # debounce window).
+        recent = time.time() - 2.0
+        event_path.write_text(json.dumps({"ts": recent}), encoding="utf-8")
+
+        # Invoke write_session_event directly (bypasses main()'s stdin read).
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from session_bootstrap import write_session_event
+            write_session_event(self.tmp_project)
+        finally:
+            sys.path.pop(0)
+
+        after_ts = json.loads(event_path.read_text(encoding="utf-8"))["ts"]
+        self.assertEqual(
+            after_ts,
+            recent,
+            "ts must not advance when prior event is within the debounce window",
+        )
+
+    def test_different_source_advances_ts_within_window(self):
+        """A SessionStart with a different source within the debounce window
+        must still advance the ts so the banner re-emits. Otherwise a fast
+        startup-then-clear sequence would silently drop the clear banner
+        (review Round 1 High finding)."""
+        event_path = self.agent_dir / "session-event.json"
+        recent = time.time() - 2.0
+        event_path.write_text(
+            json.dumps({"ts": recent, "source": "startup"}), encoding="utf-8"
+        )
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from session_bootstrap import write_session_event
+            write_session_event(self.tmp_project, source="clear")
+        finally:
+            sys.path.pop(0)
+
+        after = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertGreater(
+            after["ts"],
+            recent,
+            "ts must advance when source differs, even within debounce window",
+        )
+        self.assertEqual(after.get("source"), "clear")
+
+    def test_same_source_debounces_within_window(self):
+        """A duplicate same-source SessionStart within the debounce window
+        must NOT advance the ts. Suppresses double-fire noise when the hook
+        fires twice for the same lifecycle event."""
+        event_path = self.agent_dir / "session-event.json"
+        recent = time.time() - 2.0
+        event_path.write_text(
+            json.dumps({"ts": recent, "source": "startup"}), encoding="utf-8"
+        )
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from session_bootstrap import write_session_event
+            write_session_event(self.tmp_project, source="startup")
+        finally:
+            sys.path.pop(0)
+
+        after_ts = json.loads(event_path.read_text(encoding="utf-8"))["ts"]
+        self.assertEqual(
+            after_ts,
+            recent,
+            "ts must not advance for duplicate same-source within debounce",
+        )
+
+    def test_malformed_existing_event_is_overwritten(self):
+        """A corrupt session-event.json must not lock out future writes;
+        treat it as no reusable event and overwrite with a fresh payload
+        (review Round 1 High finding, follow-on observation)."""
+        event_path = self.agent_dir / "session-event.json"
+        event_path.write_text("not valid json {{{", encoding="utf-8")
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from session_bootstrap import write_session_event
+            write_session_event(self.tmp_project, source="clear")
+        finally:
+            sys.path.pop(0)
+
+        after = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertIn("ts", after)
+        self.assertIsInstance(after["ts"], (int, float))
+        self.assertEqual(after.get("source"), "clear")
 
 
 class UnrelatedDirectoryTests(unittest.TestCase):

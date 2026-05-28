@@ -372,6 +372,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 
 
 def run_guard_with_payload(payload, env=None, cwd=None):
@@ -405,6 +406,33 @@ def run_guard_with_payload(payload, env=None, cwd=None):
         )
     stdout = result.stdout.strip()
     return json.loads(stdout) if stdout else None
+
+
+def run_guard_with_payload_capture(payload, env=None, cwd=None):
+    """Same as run_guard_with_payload but returns ``(response, stderr_text)``
+    so tests can assert on observability lines emitted by the hook (e.g., the
+    re-arm advisory notice). Stdout still encodes the deny/ask/allow decision;
+    stderr is human-facing diagnostic output that does not affect the gate."""
+    env_dict = dict(os.environ)
+    env_dict.pop("AGENT_CONFIG_GATES", None)
+    if env:
+        env_dict.update(env)
+    result = subprocess.run(
+        [sys.executable, str(GUARD)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env_dict,
+        cwd=cwd,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"guard.py crashed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    stdout = result.stdout.strip()
+    response = json.loads(stdout) if stdout else None
+    return response, result.stderr
 
 
 class WritingStyleGateTests(unittest.TestCase):
@@ -590,6 +618,19 @@ class BannerGateTests(unittest.TestCase):
             payload, env=env, cwd=cwd or self.tmp_project
         )
 
+    def _run_capture(self, payload, extra_env=None, cwd=None):
+        """Same as ``_run`` but returns ``(response, stderr_text)`` so a test
+        can assert on the re-arm advisory line (``[banner-gate]
+        SessionStart re-fire detected ...``) emitted by ``guard.py`` on the
+        re-arm path. Without this, stderr is discarded and a future edit
+        that silently removes the advisory notice would still pass."""
+        env = dict(self.env)
+        if extra_env:
+            env.update(extra_env)
+        return run_guard_with_payload_capture(
+            payload, env=env, cwd=cwd or self.tmp_project
+        )
+
     def _write_event(self, ts):
         (self.agent_dir / "session-event.json").write_text(json.dumps({"ts": ts}))
 
@@ -741,6 +782,86 @@ class BannerGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(resp)
         self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_first_arm_denies_when_no_ack_file_exists(self):
+        """No banner-emitted.json yet (first-time install / first session) -> deny.
+        First arm is the only condition under which the banner gate denies; later
+        SessionStart re-fires become advisory (issue anywhere-agents#7)."""
+        self._write_event(time.time())
+        # Do NOT create banner-emitted.json.
+        resp = self._run({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        self.assertIsNotNone(resp)
+        output = resp["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("Session banner not yet emitted", output["permissionDecisionReason"])
+
+    def test_rearm_is_advisory_when_ack_file_exists_with_older_ts(self):
+        """A subsequent SessionStart re-fire (banner-emitted.json exists with prior
+        ts) must NOT deny the next gated call. First emission already happened in
+        this consumer-root; further re-arms degrade to advisory and emit a
+        stderr notice so an observer can still tell the gate fired."""
+        older = time.time() - 60.0
+        self._write_event(time.time())   # fresh event_ts
+        self._write_emitted(older)        # ack file exists, just stale
+        resp, stderr = self._run_capture(
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        )
+        self.assertIsNone(resp, "re-arm must pass through; only first-arm denies")
+        self.assertIn(
+            "[banner-gate] SessionStart re-fire detected",
+            stderr,
+            "advisory notice must be emitted on stderr so removing it cannot regress silently",
+        )
+
+    def test_rearm_is_advisory_for_in_flight_skill_tool_call(self):
+        """Realistic shape of the reported failure (issue anywhere-agents#7):
+        after ``auto-watch`` fires DONE, the agent's next tool call (e.g.,
+        reading the produced review file) lands while a SessionStart re-fire
+        has just advanced event_ts above the ack ts. The gate must pass
+        through, not deny.
+
+        Note: the implement-review trusted PS helpers (``auto-watch.ps1``,
+        ``health-check.ps1``, ``dispatch-codex.ps1``) are already auto-allowed
+        by Check 0 regardless of banner state since v0.7.0; this test covers
+        the broader case where the next tool call is NOT one of those
+        trusted scripts, so the banner gate would otherwise apply.
+        """
+        older = time.time() - 5.0
+        self._write_event(time.time())
+        self._write_emitted(older)
+        # The agent's continuation after auto-watch DONE: read the produced
+        # Review-Codex.md to begin Phase 2 intake. A normal gated Bash call,
+        # not in the implement-review trusted PS set.
+        resp, stderr = self._run_capture({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat Review-Codex.md"},
+        })
+        self.assertIsNone(resp, "in-flight skill tool call must not be blocked by a re-arm")
+        self.assertIn(
+            "[banner-gate] SessionStart re-fire detected",
+            stderr,
+            "in-flight re-arm must still emit the advisory notice for visibility",
+        )
+
+    def test_corrupted_ack_file_is_advisory_when_file_exists(self):
+        """Malformed banner-emitted.json parses as emitted_ts=0, but the ack
+        file exists, so this is treated as a re-arm and passes through. This
+        pins the current fail-open behavior explicitly; changing it to fail
+        closed later should be a conscious contract change."""
+        self._write_event(time.time())
+        emitted_path = self.agent_dir / "banner-emitted.json"
+        emitted_path.write_text("{not valid json", encoding="utf-8")
+        resp, stderr = self._run_capture(
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        )
+        # The file exists, so the os.path.exists branch keeps it on the
+        # advisory path.
+        self.assertIsNone(resp, "corrupted ack file with the file present is advisory (fail-open)")
+        self.assertIn(
+            "[banner-gate] SessionStart re-fire detected",
+            stderr,
+            "corrupted-ack re-arm must still emit the advisory notice",
+        )
 
 
 class ImplReviewPsAllowTests(unittest.TestCase):

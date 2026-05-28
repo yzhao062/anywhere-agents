@@ -623,14 +623,29 @@ def check_banner_emission(tool_name, tool_input):
     emitted_ts = _read_ts(emitted_path)
 
     if event_ts > emitted_ts:
-        return (
-            "Session banner not yet emitted for this SessionStart event. "
-            "Per AGENTS.md Session Start Check, emit the banner as the first "
-            "content of your response, then Write to "
-            f"{emitted_path} with content '{{\"ts\": {event_ts}}}' "
-            "to acknowledge. Only then retry this tool call. To bypass, set "
-            "AGENT_CONFIG_GATES=off in ~/.claude/settings.json env."
+        # First-arm semantics: if no ack file has ever been written for
+        # this consumer-root (emitted_ts == 0 from a missing file), enforce
+        # by denying so the banner is emitted on turn 1.
+        if emitted_ts == 0 and not os.path.exists(emitted_path):
+            return (
+                "Session banner not yet emitted for this SessionStart event. "
+                "Per AGENTS.md Session Start Check, emit the banner as the first "
+                "content of your response, then Write to "
+                f"{emitted_path} with content '{{\"ts\": {event_ts}}}' "
+                "to acknowledge. Only then retry this tool call. To bypass, set "
+                "AGENT_CONFIG_GATES=off in ~/.claude/settings.json env."
+            )
+        # Re-arm semantics: ack file already exists, so the banner was
+        # emitted at least once this consumer-root. A later SessionStart
+        # (resume / clear / leaked compact) must not block in-flight skill
+        # tool calls. Re-emit advisory: pass through; the agent re-emits
+        # the banner on its next textual response if it chooses
+        # (issue anywhere-agents#7).
+        sys.stderr.write(
+            f"[banner-gate] SessionStart re-fire detected (event_ts={event_ts}, "
+            f"emitted_ts={emitted_ts}). Re-emit advisory; tool call allowed.\n"
         )
+        return None
 
     return None
 

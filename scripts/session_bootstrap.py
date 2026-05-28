@@ -72,20 +72,55 @@ def _cleanup_legacy_flag_files() -> None:
             pass
 
 
-def write_session_event(consumer_root: str) -> None:
-    """Write <consumer_root>/.agent-config/session-event.json on every
-    SessionStart fire so the agent can detect resume / clear / compact events
-    (not just fresh startup) and re-emit the session banner when appropriate.
+_SESSION_EVENT_DEBOUNCE_SECONDS = 10.0
+
+
+def write_session_event(consumer_root: str, source: str = "") -> None:
+    """Write <consumer_root>/.agent-config/session-event.json with a fresh ts.
+
+    Duplicate SessionStart fires for the same source within the debounce
+    window are collapsed, but a different source (e.g., clear after startup)
+    still advances the event marker so the banner re-emits. A malformed or
+    unreadable existing file is treated as no reusable event and overwritten.
+
     The banner rule in AGENTS.md compares this timestamp to
     <consumer_root>/.agent-config/banner-emitted.json and re-emits when the
     event is newer than the last emission. Per-project scope prevents
     cross-session interference when multiple Claude Code windows run at once.
     """
     path = os.path.join(consumer_root, ".agent-config", "session-event.json")
+    now = time.time()
     try:
+        existing_ts = 0.0
+        existing_source = ""
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                if isinstance(existing_data, dict):
+                    raw_ts = existing_data.get("ts", 0)
+                    if isinstance(raw_ts, (int, float)):
+                        existing_ts = float(raw_ts)
+                    raw_source = existing_data.get("source", "")
+                    if isinstance(raw_source, str):
+                        existing_source = raw_source
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                existing_ts = 0.0
+                existing_source = ""
+
+        age = now - existing_ts
+        if (
+            source == existing_source
+            and 0 <= age < _SESSION_EVENT_DEBOUNCE_SECONDS
+        ):
+            return  # Same-source duplicate within debounce window
+
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload: dict = {"ts": now}
+        if source:
+            payload["source"] = source
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"ts": time.time()}, f)
+            json.dump(payload, f)
     except Exception:
         pass
 
@@ -196,6 +231,28 @@ def _maybe_print_pending_updates(project_root) -> None:
     )
 
 
+def _read_source_from_stdin() -> str:
+    """Return the SessionStart payload's ``source`` value, or empty string
+    if absent.
+
+    Claude Code's SessionStart hook payload includes a ``source`` field with
+    one of ``startup`` / ``resume`` / ``clear`` / ``compact``. Skipping the
+    event write only on ``compact`` keeps the banner gate from re-arming
+    mid-session under auto-compaction (issue anywhere-agents#7) while still
+    re-arming on genuine new-context events. Missing or malformed stdin
+    falls through to write (legacy callers, older CC versions, manual tests).
+    """
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return ""
+        data = json.loads(raw)
+        source = data.get("source", "")
+        return source if isinstance(source, str) else ""
+    except Exception:
+        return ""
+
+
 def main() -> int:
     cwd = os.getcwd()
 
@@ -237,7 +294,15 @@ def main() -> int:
         # guard.py) can tell a fresh event needs a new banner. Source repos
         # have no .agent-config/ to write to; they fall back to prompt-level
         # banner compliance per AGENTS.md Session Start Check.
-        write_session_event(consumer_root)
+        #
+        # Skip the event write on auto-compaction so the banner gate does
+        # not re-arm mid-session and block in-flight skill tool calls
+        # (issue anywhere-agents#7). Other sources (startup / resume /
+        # clear) still write so the banner reappears on genuine new
+        # context.
+        source = _read_source_from_stdin()
+        if source != "compact":
+            write_session_event(consumer_root, source=source)
 
         # Resolve the bootstrap subprocess command from the consumer root so
         # a nested-cwd launch still runs the correct .agent-config/bootstrap.*.
