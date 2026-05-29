@@ -9,6 +9,12 @@ Codex data: read from the most recent rollout JSONL under ~/.codex/sessions/.
 Codex writes `payload.rate_limits` on every `token_count` event with the
 same shape (primary = 5h window, secondary = 7d window). Snapshot is as
 fresh as the last Codex prompt; older windows are flagged `(stale)`.
+
+Side effect: each render also persists the Claude `rate_limits` to
+~/.claude/rate-limits-cache.json (best-effort, never fatal) so a Codex
+session or the standalone `agent-quota` command can read Claude's quota
+off disk without a live Claude statusLine render. Override the path with
+the CLAUDE_RL_CACHE env var.
 """
 import glob
 import json
@@ -18,6 +24,9 @@ import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
 CODEX_PCT_FIELD = "used_percent"
+CLAUDE_RL_CACHE = os.environ.get("CLAUDE_RL_CACHE") or os.path.join(
+    os.path.expanduser("~"), ".claude", "rate-limits-cache.json"
+)
 
 
 def fmt_window(window, pct_field):
@@ -39,6 +48,29 @@ def fmt_window(window, pct_field):
     if secs >= 60:
         return out + f" ({secs // 60}m)"
     return out + " (<1m)"
+
+
+def persist_claude(data):
+    """Write the latest Claude rate_limits to disk so off-session readers
+    (a Codex session, the agent-quota command) can show Claude's quota.
+
+    Best-effort: any failure is swallowed. The statusLine output must never
+    depend on this succeeding. Written atomically via a temp file + replace
+    so a concurrent reader never sees a half-written file.
+    """
+    rl = data.get("rate_limits")
+    if not rl:
+        return
+    try:
+        model = (data.get("model") or {}).get("display_name")
+        payload = {"model": model, "rate_limits": rl, "ts": time.time()}
+        os.makedirs(os.path.dirname(CLAUDE_RL_CACHE), exist_ok=True)
+        tmp = CLAUDE_RL_CACHE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, CLAUDE_RL_CACHE)
+    except Exception:
+        pass
 
 
 def claude_segment(data):
@@ -90,6 +122,7 @@ def main():
     except Exception:
         sys.stdout.write("statusline: bad stdin\n")
         return
+    persist_claude(data)
     line = claude_segment(data)
     cx = codex_segment()
     if cx:

@@ -115,6 +115,7 @@ strict_files=(
   scripts/guard.py
   scripts/session_bootstrap.py
   scripts/statusline.py
+  scripts/agent-quota.py
   scripts/generate_agent_configs.py
   scripts/pre-push-smoke.sh
   scripts/remote-smoke.sh

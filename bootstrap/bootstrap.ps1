@@ -360,6 +360,10 @@ if (Test-Path .agent-config/repo/scripts/statusline.py) {
   New-Item -ItemType Directory -Force -Path $userClaude | Out-Null
   Copy-Item .agent-config/repo/scripts/statusline.py (Join-Path $userClaude 'statusline.py') -Force
 }
+if (Test-Path .agent-config/repo/scripts/agent-quota.py) {
+  New-Item -ItemType Directory -Force -Path $userClaude | Out-Null
+  Copy-Item .agent-config/repo/scripts/agent-quota.py (Join-Path $userClaude 'agent-quota.py') -Force
+}
 if (Test-Path .agent-config/repo/user/settings.json) {
   New-Item -ItemType Directory -Force -Path $userClaude | Out-Null
   $userSettings = Join-Path $userClaude 'settings.json'

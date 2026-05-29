@@ -362,6 +362,10 @@ if [ -f .agent-config/repo/scripts/statusline.py ]; then
   mkdir -p "$HOME/.claude"
   cp -f .agent-config/repo/scripts/statusline.py "$HOME/.claude/statusline.py"
 fi
+if [ -f .agent-config/repo/scripts/agent-quota.py ]; then
+  mkdir -p "$HOME/.claude"
+  cp -f .agent-config/repo/scripts/agent-quota.py "$HOME/.claude/agent-quota.py"
+fi
 if [ -f .agent-config/repo/user/settings.json ]; then
   mkdir -p "$HOME/.claude"
   if [ -f "$HOME/.claude/settings.json" ]; then

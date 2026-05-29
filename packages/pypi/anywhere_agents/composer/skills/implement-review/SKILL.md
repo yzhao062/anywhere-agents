@@ -168,6 +168,8 @@ Emit one line at Phase 1c entry stating which channel was picked and why (e.g., 
 
 ## Prerequisites
 
+Begin each run by showing the cross-agent usage snapshot, so the quota situation is visible at this run (Codex has no statusLine, so an implement-review run is where a Codex-primary session surfaces it). Invoke `agent-quota` with a real Python interpreter matched to your shell. Do not execute the bare `~/.claude/agent-quota.py` path (it hits the Windows Store launcher shim), and do not call the extensionless `~/.claude/hooks/_python` wrapper from PowerShell (it is a Bash script and runs there as a silent no-op). In Bash or Git Bash, use `"$HOME/.claude/hooks/_python" "$HOME/.claude/agent-quota.py"`. In PowerShell, run the script with your project Python directly, for example `& <project-python> "$HOME/.claude/agent-quota.py"`. In either shell you may instead run the repo copy with the project's Python (`scripts/agent-quota.py`, or `.agent-config/repo/scripts/agent-quota.py` in a consumer). Show its two-row `Claude / Codex · 5h / 7d` output. It is a local disk read with no API or token cost (about 0.1s), so it is fine to run every time; if neither the script nor a Python runner is available, skip silently and never block the review on it.
+
 At skill start, check for staged changes (`git diff --cached`). If nothing is staged but unstaged or untracked changes exist, list them and ask the user whether to stage all (`git add -A`), stage specific files, or abort. Do not auto-stage without confirmation — untracked files may be sensitive or unrelated. If there are no changes at all, there is nothing to review -- inform the user and stop.
 
 ## Pre-Review Checks (optional)
