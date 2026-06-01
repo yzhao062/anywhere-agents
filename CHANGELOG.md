@@ -9,9 +9,42 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+_No unreleased changes queued._
+
+## [0.7.2] — 2026-05-31
+
+Ships everything that accumulated on `main` after v0.7.1: the cross-agent `implement-review` reviewer backends (Claude Code and GitHub Copilot), the cross-agent quota / usage view, and the Windows fixes that make the Claude reviewer reliable under the Codex-primary configuration.
+
+### Added
+
+- **`implement-review` Claude Code reviewer backend** (#8): when Codex (or the user) is the primary implementer, the Auto-terminal can dispatch headless `claude -p` as the reviewer. Claude reviews the staged snapshot with `Read,Bash` tool access and the dispatcher saves its final answer to `Review-Claude-Code.md`, avoiding the unattended Windows hangs seen with path-scoped `Write(...)` / `Edit(...)` and `--allowedTools` preapproval patterns. A sibling `_claude_guard.ps1` refuses to dispatch when the orchestrator is Claude Code itself (self-review).
+- **`implement-review` GitHub Copilot CLI reviewer backend** for the Auto-terminal channel, mirroring the Codex backend's state-dir / stall-watch / health-check contract.
+- **Cross-agent quota / usage view**: surfaces Claude Max and Codex 5h / weekly quota together, with portable deploy and implement-review surfacing.
+- **Bootstrap auto-updates the Codex npm CLI** during the session-start refresh.
+
 ### Fixed
 
-- **`implement-review` Claude reviewer backend**: Claude now reviews the staged snapshot with `Read,Bash` tool access and writes the final review through the dispatcher, avoiding the unattended Windows hangs seen with path-scoped `Write(...)` / `Edit(...)` and `--allowedTools` preapproval patterns. Health checks now scan Claude stderr-side tails and accept the shorter `**Verification notes.**` form.
+- **Claude reviewer invocation isolation** (Windows): headless `claude -p` now runs with `--strict-mcp-config --mcp-config <empty>` plus `--setting-sources project,local`, so a user-level Codex MCP server and user hooks can no longer load inside the reviewer. This closes the `Codex -> dispatch-claude -> claude -p -> Codex MCP -> codex.exe` recursion that hung the dispatch and produced an empty review.
+- **Windows PowerShell dispatcher** launches `claude -p` through `ProcessStartInfo` instead of a transient `.cmd` helper (removes path/redirect quoting fragility) and pins `StandardInputEncoding` to UTF-8 (no BOM) so non-ASCII staged diffs reach the reviewer intact.
+- **`dispatch-claude.sh`** uses a bash 3.2-safe empty-array expansion under `set -u` (macOS CI).
+- **Pack pointer 3-path lookup** (`_POINTER_TEMPLATE`, #6): generated command pointers resolve skills through the `skills/` then `.claude/skills/` then `.agent-config/repo/skills/` order.
+- **SessionStart banner** (#7): source-aware debounce and a first-arm-only guard stop the banner from re-firing on rapid SessionStart events.
+
+### Docs
+
+- 3-path skill lookup documented as a cross-agent rule; new tool-use reliability, memory-persistence, and copy-paste formatting guidance in `AGENTS.md`; a Codex `conversationDetailMode = "DEFAULT"` recommendation and a "do not nest `pwsh -Command` with `$` variables" shell rule.
+
+### Internal
+
+- `package-smoke` npm / PyPI install retry budget widened to absorb CDN lag.
+- Cross-repo (`agent-config` and `anywhere-agents`) STRICT parity and source-to-wheel composer-mirror parity verified clean for the implement-review tree via `scripts/check-parity.sh`.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.1 -> 0.7.2
+- npm `anywhere-agents` `package.json` `version`: 0.7.1 -> 0.7.2
+
+SemVer: 0.7.1 -> 0.7.2, released as a patch. A strict reading would be a minor bump, since this release debuts the Claude Code and GitHub Copilot reviewer backends and the cross-agent quota view (new user-visible capabilities) that landed on `main` after v0.7.1; they are bundled here with the Windows reviewer-isolation and stdin-encoding fixes. No breaking changes.
 
 ## [0.7.1] — 2026-05-21
 
@@ -785,7 +818,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.0...v0.6.1
