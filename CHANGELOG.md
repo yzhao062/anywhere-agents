@@ -11,6 +11,25 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.3] — 2026-06-01
+
+Patch release: removes a hardcoded maintainer-specific Python path from two shipped scripts and replaces it with environment-derived conda discovery.
+
+### Fixed
+
+- **`scripts/_python` and `skills/implement-review/scripts/health-check.ps1` no longer hardcode a `miniforge3/envs/py312` interpreter path** (#10). Both ship in the package and tripped the release leak sweep. They now discover a conda/Miniforge interpreter from the environment (`CONDA_PREFIX`, then `CONDA_ROOT`, a resolvable `conda`/`mamba` launcher, and a `$HOME` `conda-meta` signature scan), with no hardcoded env name or install dir, before falling through to `py -3` / `python3` / `python` on PATH (WindowsApps shims skipped). Verified end-to-end through the implement-review loop (Codex review, two rounds), cross-repo STRICT parity, and a clean leak sweep.
+
+### Changed
+
+- **`_python` interpreter preference is now environment-derived, not pinned to a `py312` env.** A hook or tool that relied on `_python` resolving a *specific* conda env (for example, one carrying an editable package) should set `ANYWHERE_AGENTS_PYTHON` to that env's interpreter; it is `_python`'s explicit override, honored before any discovery. With `CONDA_PREFIX` unset and several envs present, discovery prefers the conda base interpreter, which is correct for the stdlib-only first-party hooks but will not carry a package installed only in a named env.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.2 -> 0.7.3
+- npm `anywhere-agents` `package.json` `version`: 0.7.2 -> 0.7.3
+
+SemVer: 0.7.2 -> 0.7.3, released as a patch. Leak-hygiene fix to shipped scripts plus a documented interpreter-preference change with the `ANYWHERE_AGENTS_PYTHON` escape hatch; no API change.
+
 ## [0.7.2] — 2026-05-31
 
 Ships everything that accumulated on `main` after v0.7.1: the cross-agent `implement-review` reviewer backends (Claude Code and GitHub Copilot), the cross-agent quota / usage view, and the Windows fixes that make the Claude reviewer reliable under the Codex-primary configuration.
@@ -818,7 +837,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.6.1...v0.7.0
