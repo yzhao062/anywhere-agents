@@ -195,8 +195,12 @@ If anything is off, replace `all clear` with a semicolon-separated list of concr
 
   [features]
   fast_mode = true
+
+  [desktop]
+  conversationDetailMode = "DEFAULT"
   ```
   `service_tier = "fast"` enables 1.5x-speed inference (2x credits for ChatGPT auth; standard API pricing for API key); omit if cost matters more than latency.
+  `conversationDetailMode = "DEFAULT"` keeps Codex terminal output concise; avoid `STEPS_PROSE` / Coding mode unless you explicitly want command-level progress shown during turns.
 - **Windows PATH note**: Claude Code launches MCP servers through bash, not cmd or PowerShell, so `.cmd` wrappers and `$env:APPDATA` do not work. If `codex` is not on bash PATH, register with the full path using forward slashes and NO `.cmd` extension (e.g., `C:/Users/<you>/AppData/Roaming/npm/codex`). Run `where codex` (cmd) or `Get-Command codex` (PowerShell) to find it.
 - **`approval_policy=never` rationale**: without it, MCP shell commands trigger "MCP server requests your input" dialogs in Claude Code. With it, failures return to Codex/Claude as tool errors. Claude Code's PreToolUse hooks still gate the outer MCP tool call. For interactive Codex terminal sessions (NOT MCP), prefer `approval_policy = "on-request"` in `config.toml`.
 - **Windows recommendation: prefer the terminal path over MCP.** On Windows (11 Build 26200+), MCP has residual rough edges (approval prompts, AV false positives). The terminal path (Codex interactive window for reviews) avoids both. Prefer terminal on Windows; MCP is smoother on macOS/Linux.
@@ -270,6 +274,7 @@ Set a per-guard escape env when a legitimate write has a banned word in *meta-di
 - Examples of read-only invocations that should not require approval: `git status`, `git diff`, `git log`, `git branch` (no flags), `git show`, `git stash list`, `git remote -v`, `git submodule status`, `git ls-files`, `git tag --list`. Filesystem reads (`ls`, `cat`) and benign local operations (`mkdir`) are also fine.
 - Examples of invocations that always require explicit approval: `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, `git merge`, `git branch -d`, `git remote add/remove`, `git tag <name>` (creating/deleting), `git stash drop`.
 - Filesystem commands like `cp` and `mv` are fine for scratch and temporary files. Moves or renames that affect git-tracked files should be reviewed before executing.
+- **Do not wrap PowerShell inside PowerShell with inline `-Command` when the payload contains `$` variables.** In a PowerShell shell, run the PowerShell body directly, or write a temporary `.ps1` and invoke it with `-File`. Forms like `pwsh.exe -Command "foreach($f in ...) { ... }"` cause the outer shell to expand `$f`, `$_`, and `$cutoff` before the inner shell runs, producing broken commands.
 - **Avoid inline Python with `#` comments in quoted arguments.** Claude Code flags "newline followed by `#` inside a quoted argument" as a path-hiding risk and prompts for approval. Instead, write the code to a `.py` file and run `python <script>.py`.
 
 ## Tool-Use Reliability

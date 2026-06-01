@@ -187,6 +187,7 @@ if (-not $exe) {
 $tailPath = Join-Path $stateDir 'tail'
 $tailStderrPath = Join-Path $stateDir 'tail.stderr-tmp'
 $relayPromptPath = Join-Path $stateDir 'prompt-relay'
+$emptyMcpConfigPath = Join-Path $stateDir 'empty-mcp-config.json'
 $diffPath = Join-Path $stateDir 'staged-diff'
 $gitDiffStderrPath = Join-Path $stateDir 'git-diff.stderr'
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -242,50 +243,67 @@ $relayPrompt = @(
     $diffText
 ) -join "`n"
 [System.IO.File]::WriteAllText($relayPromptPath, ($relayPrompt + "`n"), $utf8NoBom)
+[System.IO.File]::WriteAllText($emptyMcpConfigPath, '{"mcpServers":{}}' + "`n", $utf8NoBom)
 
 $ErrorActionPreference = 'Continue'
 
-# Run claude -p via a transient .cmd helper so stdin/stdout redirection and
-# token inheritance match the existing Windows dispatchers.
-$cmdHelper = Join-Path $stateDir 'run-claude.cmd'
-$exeEsc = $exe -replace '%', '%%'
-$validationDirEsc = $validationDir -replace '%', '%%'
-$relayPromptEsc = $relayPromptPath -replace '%', '%%'
-$tailPathEsc = $tailPath -replace '%', '%%'
-$tailStderrPathEsc = $tailStderrPath -replace '%', '%%'
-# Compose the cmd line as segments and join them.
+# Run claude -p directly via ProcessStartInfo. A transient .cmd helper makes
+# Windows path quoting brittle for --add-dir and redirected stdin.
 # --bare is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153 documents
 # bare mode as API-key/apiKeyHelper auth only: OAuth and keychain auth are
 # disabled when --bare is set. Defaulting to --bare would break the typical
 # subscription user.
-$bareArg = ''
-if ($env:CLAUDE_DISPATCH_BARE -eq '1') {
-    $bareArg = ' --bare'
-}
+$useBare = ($env:CLAUDE_DISPATCH_BARE -eq '1')
 $permissionFlag = '--per' + 'mission-' + 'mode'
 $toolFlag = '--too' + 'ls'
 $permMode = 'by' + 'pass' + 'Per' + 'missions'
 $toolList = 'Read' + ',' + 'Ba' + 'sh'
-$cmdSegments = @(
-    '@echo off',
-    'chcp 65001 >NUL',
-    'cd /d "' + $validationDirEsc + '"',
-    'set GIT_PAGER=cat',
-    ('"' + $exeEsc + '" -p ' + $permissionFlag + ' ' + $permMode +
-        ' ' + $toolFlag + ' "' + $toolList + '"' +
-        ' --add-dir "' + $validationDirEsc + '"' +
-        $bareArg +
-        ' --output-format text' +
-        ' < "' + $relayPromptEsc + '"' +
-        ' > "' + $tailPathEsc + '" 2> "' + $tailStderrPathEsc + '"')
+$claudeArgs = @(
+    '-p',
+    $permissionFlag, $permMode,
+    $toolFlag, $toolList,
+    '--add-dir', $validationDir,
+    '--setting-sources', 'project,local',
+    '--strict-mcp-config', '--mcp-config', $emptyMcpConfigPath,
+    '--output-format', 'text'
 )
-$cmdBody = ($cmdSegments -join "`r`n") + "`r`n"
-[System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
+if ($useBare) {
+    $claudeArgs += '--bare'
+}
 
-& $cmdHelper
-$claudeExit = $LASTEXITCODE
+try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.WorkingDirectory = $validationDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardInputEncoding = $utf8NoBom
+    $psi.EnvironmentVariables['GIT_PAGER'] = 'cat'
+    foreach ($arg in $claudeArgs) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
 
-Remove-Item -LiteralPath $cmdHelper -Force -ErrorAction SilentlyContinue
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $proc.StandardInput.WriteLine([System.IO.File]::ReadAllText($relayPromptPath, $utf8NoBom))
+    $proc.StandardInput.Close()
+    $proc.WaitForExit()
+
+    [System.IO.File]::WriteAllText($tailPath, $stdoutTask.GetAwaiter().GetResult(), $utf8NoBom)
+    [System.IO.File]::WriteAllText($tailStderrPath, $stderrTask.GetAwaiter().GetResult(), $utf8NoBom)
+    $claudeExit = $proc.ExitCode
+} catch {
+    [System.IO.File]::WriteAllText($tailStderrPath, ("dispatch-claude: failed to launch claude: " + $_.Exception.Message + "`n"), $utf8NoBom)
+    $claudeExit = 2
+}
 
 # Ensure the tail file exists even if claude emitted nothing
 if (-not (Test-Path -LiteralPath $tailPath -PathType Leaf)) {

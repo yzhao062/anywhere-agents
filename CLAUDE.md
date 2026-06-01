@@ -264,6 +264,7 @@ Set a per-guard escape env when a legitimate write has a banned word in *meta-di
 - Examples of read-only invocations that should not require approval: `git status`, `git diff`, `git log`, `git branch` (no flags), `git show`, `git stash list`, `git remote -v`, `git submodule status`, `git ls-files`, `git tag --list`. Filesystem reads (`ls`, `cat`) and benign local operations (`mkdir`) are also fine.
 - Examples of invocations that always require explicit approval: `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, `git merge`, `git branch -d`, `git remote add/remove`, `git tag <name>` (creating/deleting), `git stash drop`.
 - Filesystem commands like `cp` and `mv` are fine for scratch and temporary files. Moves or renames that affect git-tracked files should be reviewed before executing.
+- **Do not wrap PowerShell inside PowerShell with inline `-Command` when the payload contains `$` variables.** In a PowerShell shell, run the PowerShell body directly, or write a temporary `.ps1` and invoke it with `-File`. Forms like `pwsh.exe -Command "foreach($f in ...) { ... }"` cause the outer shell to expand `$f`, `$_`, and `$cutoff` before the inner shell runs, producing broken commands.
 - **Avoid inline Python with `#` comments in quoted arguments.** Claude Code flags "newline followed by `#` inside a quoted argument" as a path-hiding risk and prompts for approval. Instead, write the code to a `.py` file and run `python <script>.py`.
 
 ## Tool-Use Reliability

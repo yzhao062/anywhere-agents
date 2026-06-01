@@ -171,6 +171,7 @@ fi
 # review file after Claude exits. That avoids unattended Write/Edit permission
 # prompts and keeps the auto-terminal path non-interactive.
 RELAY_PROMPT_FILE="$STATE_DIR/prompt-relay"
+EMPTY_MCP_CONFIG_FILE="$STATE_DIR/empty-mcp-config.json"
 DIFF_FILE="$STATE_DIR/staged-diff"
 GIT_DIFF_STDERR="$STATE_DIR/git-diff.stderr"
 VALIDATION_DIR="$(pwd)"
@@ -201,6 +202,7 @@ fi
     printf '\n\n%s\n\n' "Dispatcher-provided staged diff:"
     cat "$DIFF_FILE"
 } > "$RELAY_PROMPT_FILE"
+printf '%s\n' '{"mcpServers":{}}' > "$EMPTY_MCP_CONFIG_FILE"
 
 # Run claude -p with the relay prompt fed via stdin (mirrors Codex's
 # `< prompt-file` shape, avoiding ARG_MAX traps on long prompts). Claude gets
@@ -231,6 +233,8 @@ fi
         --permission-mode bypassPermissions \
         --tools "Read,Bash" \
         --add-dir "$VALIDATION_DIR" \
+        --setting-sources project,local \
+        --strict-mcp-config --mcp-config "$EMPTY_MCP_CONFIG_FILE" \
         ${CLAUDE_BARE_ARGS[@]+"${CLAUDE_BARE_ARGS[@]}"} \
         --output-format text \
         < "$RELAY_PROMPT_FILE" > "$STATE_DIR/tail" 2> "$STATE_DIR/tail.stderr-tmp"

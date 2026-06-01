@@ -420,6 +420,26 @@ class _DispatchContractMixin:
                 f"prompt body must arrive on stdin: {stdin_body!r}",
             )
 
+    def test_prompt_non_ascii_round_trip(self) -> None:
+        """Relay prompt preserves non-ASCII text over stdin."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            unicode_line = "Unicode payload: 中文 cafe\u0301 emoji🙂"
+            prompt.write_text(
+                f"REVIEW PROMPT body\n{unicode_line}\n",
+                encoding="utf-8",
+            )
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stdin_body = self._read_stdin(log_dir)
+            self.assertIn(
+                unicode_line, stdin_body,
+                f"non-ASCII prompt text must round-trip through stdin: {stdin_body!r}",
+            )
+
     def test_prompt_body_not_passed_as_literal_arg(self) -> None:
         """No argv element may contain the prompt body text."""
         with _temp_dir() as td:
@@ -532,6 +552,43 @@ class _DispatchContractMixin:
             self.assertEqual(result.returncode, 0, result.stderr)
             args = self._read_args(log_dir)
             self.assertIn("--add-dir", args, f"claude must receive --add-dir: {args}")
+
+    def test_claude_invoked_with_project_local_settings_only(self) -> None:
+        """Headless Claude review must not inherit user-level hooks/MCP state."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = self._read_args(log_dir)
+            self.assertIn("--setting-sources", args,
+                          f"claude must receive --setting-sources: {args}")
+            idx = args.index("--setting-sources")
+            self.assertGreater(len(args), idx + 1)
+            self.assertEqual(args[idx + 1], "project,local")
+
+    def test_claude_invoked_with_empty_strict_mcp_config(self) -> None:
+        """Global Codex MCP must not be auto-started inside the Claude backend."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = self._read_args(log_dir)
+            self.assertIn("--strict-mcp-config", args,
+                          f"claude must receive --strict-mcp-config: {args}")
+            self.assertIn("--mcp-config", args,
+                          f"claude must receive --mcp-config: {args}")
+            idx = args.index("--mcp-config")
+            self.assertGreater(len(args), idx + 1)
+            config_path = Path(args[idx + 1])
+            self.assertEqual(config_path.name, "empty-mcp-config.json")
+            self.assertEqual(config_path.read_text(encoding="utf-8"),
+                             '{"mcpServers":{}}\n')
 
     def test_claude_invoked_without_sandbox_flag(self) -> None:
         """`--sandbox` is Codex-only and must not reach claude."""
@@ -845,10 +902,9 @@ class DispatchClaudeFlagContract(unittest.TestCase):
         ]
 
     def test_prompt_via_stdin_redirection(self) -> None:
-        # The sh side uses `< "$RELAY_PROMPT_FILE"` directly. The PowerShell side
-        # builds the cmd-helper redirection through a string-concat segment,
-        # so a substring search for ` < "` in the ps1 source catches both
-        # the inline and segmented forms.
+        # The sh side uses shell stdin redirection. The PowerShell side uses
+        # ProcessStartInfo with redirected stdin to avoid Windows .cmd quoting
+        # noise around paths such as C:\tmp.
         sh_text = DISPATCH_SH.read_text(encoding="utf-8")
         ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
         self.assertIn(
@@ -856,9 +912,12 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             "dispatch-claude.sh must redirect relay prompt to stdin",
         )
         self.assertIn(
-            ' < "', ps1_text,
-            "dispatch-claude.ps1 cmd helper must redirect prompt file to stdin "
-            "(either inline `< \"...\"` or segmented string construction)",
+            "RedirectStandardInput = $true", ps1_text,
+            "dispatch-claude.ps1 must redirect stdin into claude",
+        )
+        self.assertIn(
+            "StandardInput.WriteLine", ps1_text,
+            "dispatch-claude.ps1 must feed the relay prompt through stdin",
         )
 
     def test_no_dash_p_at_file_reference(self) -> None:
