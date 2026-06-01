@@ -95,12 +95,13 @@ with open(os.path.join(log_dir, "cwd"), "w", encoding="utf-8") as f:
     f.write(os.getcwd())
 
 # Read any stdin and record it: the Claude backend delivers the prompt via
-# stdin redirection, so this captures the prompt body for assertion.
+# stdin redirection, so this captures the prompt body for assertion. Use
+# bytes so Windows CI's console code page cannot corrupt UTF-8 prompt bytes.
 try:
-    stdin_data = sys.stdin.read()
+    stdin_data = sys.stdin.buffer.read()
 except Exception:
-    stdin_data = ""
-with open(os.path.join(log_dir, "stdin"), "w", encoding="utf-8") as f:
+    stdin_data = b""
+with open(os.path.join(log_dir, "stdin"), "wb") as f:
     f.write(stdin_data)
 
 sys.stdout.write(os.environ.get("MOCK_CLAUDE_STDOUT", "mock-claude: stdout\n"))
