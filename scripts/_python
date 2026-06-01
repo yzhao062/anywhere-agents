@@ -13,8 +13,10 @@
 #
 # What this does:
 #   1. Honor explicit override via $ANYWHERE_AGENTS_PYTHON if set and executable.
-#   2. Probe well-known miniforge / conda layouts under $HOME (env name `py312`
-#      first, then bare miniforge3 / anaconda3 root).
+#   2. Discover conda interpreters from the environment, with no hard-coded env
+#      name or install dir: the active env via $CONDA_PREFIX, then roots from
+#      $CONDA_ROOT, a resolvable conda|mamba launcher, and any $HOME/*/ dir
+#      carrying a conda-meta/ marker; each root's base python and envs/* probed.
 #   3. Fall through to the first python3 / python on PATH whose realpath is NOT
 #      under WindowsApps (filtering out the App Execution Alias shim).
 #   4. Final fallback: vanilla python3 / python (preserves existing behavior on
@@ -33,24 +35,53 @@ if [ -n "${ANYWHERE_AGENTS_PYTHON:-}" ] && [ -x "$ANYWHERE_AGENTS_PYTHON" ]; the
   exec "$ANYWHERE_AGENTS_PYTHON" "$@"
 fi
 
-# 2. Probe well-known miniforge / conda layouts under $HOME.
-for layout in \
-    "$HOME/miniforge3/envs/py312/python.exe" \
-    "$HOME/miniforge3/envs/py312/bin/python" \
-    "$HOME/miniforge3/envs/py312/bin/python3" \
-    "$HOME/miniforge3/python.exe" \
-    "$HOME/miniforge3/bin/python" \
-    "$HOME/miniforge3/bin/python3" \
-    "$HOME/anaconda3/envs/py312/python.exe" \
-    "$HOME/anaconda3/envs/py312/bin/python" \
-    "$HOME/anaconda3/python.exe" \
-    "$HOME/anaconda3/bin/python" \
-    "$HOME/.conda/envs/py312/python.exe" \
-    "$HOME/.conda/envs/py312/bin/python"; do
-  if [ -x "$layout" ]; then
-    exec "$layout" "$@"
-  fi
+# 2. Discover conda/Miniforge interpreters from the environment (no hard-coded
+#    env name or install dir). Every exec runs in the current shell (for loops
+#    over literals, globs, and a bash array) so exec replaces this process
+#    rather than a pipe subshell.
+conda_roots=()
+
+# 2a. Active env (most specific): honor $CONDA_PREFIX directly.
+if [ -n "${CONDA_PREFIX:-}" ]; then
+  for py in "$CONDA_PREFIX/python.exe" "$CONDA_PREFIX/bin/python" "$CONDA_PREFIX/bin/python3"; do
+    [ -x "$py" ] && exec "$py" "$@"
+  done
+  case "$CONDA_PREFIX" in
+    */envs/*) conda_roots+=("${CONDA_PREFIX%/envs/*}") ;;
+    *)        conda_roots+=("$CONDA_PREFIX") ;;
+  esac
+fi
+
+# 2b. Roots from $CONDA_ROOT and a resolvable conda|mamba launcher.
+[ -n "${CONDA_ROOT:-}" ] && conda_roots+=("$CONDA_ROOT")
+for mgr in conda mamba; do
+  mgrpath=$(command -v "$mgr" 2>/dev/null || true)
+  [ -n "$mgrpath" ] && conda_roots+=("$(dirname "$(dirname "$mgrpath")")")
 done
+
+# 2c. Roots discovered under $HOME by the conda-meta base-env marker (locates an
+#     install dir by signature, without assuming its name).
+if [ -n "${HOME:-}" ]; then
+  for d in "$HOME"/*/; do
+    [ -d "${d}conda-meta" ] && conda_roots+=("${d%/}")
+  done
+fi
+
+# 2d. Probe each discovered root: base interpreter first, then its envs/*.
+if [ "${#conda_roots[@]}" -gt 0 ]; then
+  for root in "${conda_roots[@]}"; do
+    [ -n "$root" ] || continue
+    for py in "$root/python.exe" "$root/bin/python" "$root/bin/python3"; do
+      [ -x "$py" ] && exec "$py" "$@"
+    done
+    for envdir in "$root"/envs/*/; do
+      [ -d "$envdir" ] || continue
+      for py in "${envdir}python.exe" "${envdir}bin/python" "${envdir}bin/python3"; do
+        [ -x "$py" ] && exec "$py" "$@"
+      done
+    done
+  done
+fi
 
 # 3. PATH lookup, skipping Windows Store shim. type -a -p enumerates ALL
 #    candidates of a name on PATH so that a shim hit at position 1 does not

@@ -14,19 +14,69 @@ if (-not (Test-Path -LiteralPath $pyHelper -PathType Leaf)) {
 }
 
 # Pick a Python that can actually execute code. Three combined hazards on
-# Windows in this user's setup: (1) PATH `python` may be the Microsoft Store
-# App Execution Alias, which Get-Command sees but cannot use; (2) `python3`
-# is also usually an Alias; (3) Miniforge -- the documented project default
-# (see CLAUDE.md > Environment Notes) -- is installed under %USERPROFILE%
-# but is not always on PATH for non-interactive subprocesses launched via
-# `pwsh -File`. Strategy: probe Miniforge first, then `py -3`, then PATH
-# `python3` / `python`; skip WindowsApps Store shims; verify each survivor
-# can actually execute `-c 'import sys; sys.exit(0)'`.
+# Windows: (1) PATH `python` may be the Microsoft Store App Execution Alias,
+# which Get-Command sees but cannot use; (2) `python3` is also usually an
+# Alias; (3) a conda/Miniforge install is often absent from PATH for
+# non-interactive subprocesses launched via `pwsh -File`. Strategy: probe an
+# active conda env and its sibling envs first (discovered from CONDA_PREFIX /
+# CONDA_ROOT and from a resolvable conda/mamba launcher, with no hard-coded
+# install dir or env name), then `py -3`, then PATH `python3` / `python`; skip
+# WindowsApps Store shims; verify each survivor can actually execute
+# `-c 'import sys; sys.exit(0)'`.
 $pythonCandidates = @()
-if ($env:USERPROFILE) {
-    $pythonCandidates += @{ Exe = (Join-Path $env:USERPROFILE 'miniforge3\envs\py312\python.exe'); Args = @() }
-    $pythonCandidates += @{ Exe = (Join-Path $env:USERPROFILE 'miniforge3\python.exe'); Args = @() }
+
+# Conda/Miniforge discovery, derived entirely from the environment so nothing
+# machine-specific ships in this file.
+$condaRoots = @()
+if ($env:CONDA_PREFIX) {
+    $activePy = Join-Path $env:CONDA_PREFIX 'python.exe'
+    if (Test-Path -LiteralPath $activePy -PathType Leaf) {
+        $pythonCandidates += @{ Exe = $activePy; Args = @() }
+    }
+    # <root>\envs\<name> -> <root>; a base-env prefix is itself the root.
+    $cpParent = Split-Path $env:CONDA_PREFIX -Parent
+    if ($cpParent -and (Split-Path $cpParent -Leaf) -eq 'envs') {
+        $condaRoots += (Split-Path $cpParent -Parent)
+    } else {
+        $condaRoots += $env:CONDA_PREFIX
+    }
 }
+if ($env:CONDA_ROOT) { $condaRoots += $env:CONDA_ROOT }
+foreach ($mgr in @('conda', 'mamba')) {
+    $mgrCmd = Get-Command $mgr -ErrorAction SilentlyContinue
+    if ($mgrCmd -and $mgrCmd.Source) {
+        $mgrRoot = Split-Path (Split-Path $mgrCmd.Source -Parent) -Parent
+        if ($mgrRoot) { $condaRoots += $mgrRoot }
+    }
+}
+# Roots discovered under the home dir by the conda-meta base-env marker (locates
+# an install dir by signature, without assuming its name). Mirrors _python 2c so
+# the no-active-env / no-conda-on-PATH case still resolves a real interpreter.
+foreach ($homeDir in @($HOME, $env:USERPROFILE)) {
+    if (-not $homeDir) { continue }
+    if (-not (Test-Path -LiteralPath $homeDir -PathType Container)) { continue }
+    Get-ChildItem -LiteralPath $homeDir -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if (Test-Path -LiteralPath (Join-Path $_.FullName 'conda-meta') -PathType Container) {
+            $condaRoots += $_.FullName
+        }
+    }
+}
+foreach ($root in ($condaRoots | Where-Object { $_ } | Select-Object -Unique)) {
+    $rootPy = Join-Path $root 'python.exe'
+    if (Test-Path -LiteralPath $rootPy -PathType Leaf) {
+        $pythonCandidates += @{ Exe = $rootPy; Args = @() }
+    }
+    $envsDir = Join-Path $root 'envs'
+    if (Test-Path -LiteralPath $envsDir -PathType Container) {
+        Get-ChildItem -LiteralPath $envsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $envPy = Join-Path $_.FullName 'python.exe'
+            if (Test-Path -LiteralPath $envPy -PathType Leaf) {
+                $pythonCandidates += @{ Exe = $envPy; Args = @() }
+            }
+        }
+    }
+}
+
 $pythonCandidates += @{ Exe = 'py';      Args = @('-3') }
 $pythonCandidates += @{ Exe = 'python3'; Args = @() }
 $pythonCandidates += @{ Exe = 'python';  Args = @() }
@@ -53,7 +103,7 @@ foreach ($candidate in $pythonCandidates) {
     }
 }
 if (-not $pyCmd) {
-    [Console]::Error.WriteLine("health-check: no usable Python interpreter found (probed Miniforge paths under USERPROFILE, py launcher, python3, python; WindowsApps Store aliases skipped)")
+    [Console]::Error.WriteLine("health-check: no usable Python interpreter found (probed conda env/root discovery, py launcher, python3, python; WindowsApps Store aliases skipped)")
     exit 2
 }
 
