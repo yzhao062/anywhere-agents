@@ -11,6 +11,19 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.4] — 2026-06-13
+
+Patch release: mirrors the agent-config antithesis writing rule into the bundled `AGENTS.md`. It also extends `implement-review` so prose diffs run the writing-rules audit before review.
+
+### Added
+
+- **Antithesis rule in Formatting Defaults.** `AGENTS.md`, `CLAUDE.md`, and `agents/codex.md` now tell agents to avoid emphatic antithesis. Examples include "X, not Y", "not just X, but Y", and "it is not X, it is Y". The rule keeps negation available when it rejects a specific alternative.
+- **Writing-rules audit for prose diffs.** The Pre-Review checklist adds a Prose row for `agent-style review --audit-only` mechanical hits. It sends semantic RULE-07 checks to the style-review host pass. If that pass is unavailable, it falls back to template grep. `references/review-lenses.md` now applies General-lens item 7 to any prose diff.
+
+### Compatibility
+
+- No CLI, install-flow, or pack-manifest change. The bundled `agent-style` pack pin stays at `v0.3.5`. Consumers that specifically want RULE-07 wording from the `agent-style` pack block can pin `agent-style` to `v0.3.6` in `agent-config.yaml`.
+
 ## [0.7.3] — 2026-06-01
 
 Patch release: removes a hardcoded maintainer-specific Python path from two shipped scripts and replaces it with environment-derived conda discovery.
@@ -837,7 +850,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.0...v0.7.1

@@ -181,6 +181,7 @@ Before sending staged changes for review, run automated checks that catch mechan
 | LaTeX paper or proposal | Compile. Scan the log for overfull/underfull box warnings and undefined references. Report counts. |
 | Anonymized submission | Grep staged files for author names, GitHub/lab URLs, institutional names, and tool names. Source these from the project's de-anonymization checklist if one exists; otherwise use the git user name, institution domain, and any names in the paper's author metadata or `\author{}` block. |
 | Code | Run the project linter and type checker if configured. |
+| Prose (`.md` / `.rst` / `.txt` / `.tex`, or prose-heavy diff) | Run `agent-style review --audit-only <staged prose files>` if the CLI is on PATH; report deterministic hits with line numbers. The plain CLI reports the semantic rules (including RULE-07 antithesis) as skipped, so also audit the staged prose for those, especially RULE-07 antithesis (`not just ... but`, `it is not ... it is`, and clause-level `X, not Y`): use the `style-review` host pass when available, otherwise grep those templates. Fix locally before sending to the reviewer. |
 
 Report any findings to the user before proceeding to Phase 1. Findings here do not go to the reviewer; fix them locally first.
 
