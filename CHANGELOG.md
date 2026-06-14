@@ -11,6 +11,26 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.5] — 2026-06-13
+
+Patch release: closes three `agent-config` issues and bumps the bundled `agent-style` pin to `v0.3.6` so the default composer pin matches the shipped RULE-07 pack.
+
+### Fixed
+
+- **Codex reviewer no longer hangs on a user MCP server** (agent-config#1). The `implement-review` Auto-terminal Codex backend now runs `codex exec` with `--ignore-user-config` (default on; opt out with `CODEX_DISPATCH_ISOLATE_MCP=off`), so a user-level Codex MCP server (for example `node_repl`), plugin, or hook can no longer auto-start inside the headless reviewer, spawn a nested `codex`, and hang the round with an empty review. This is the Codex-side parallel to the v0.7.2 Claude-backend isolation. A narrower `-c mcp_servers={}` was tried first, but codex 0.139 deep-merges it and the configured servers still start. Because `--ignore-user-config` also resets the reasoning effort, the dispatcher re-passes `-c model_reasoning_effort` (default `xhigh`; override `CODEX_DISPATCH_REASONING`) so the reviewer stays at full strength, and the model stays codex's built-in default (`gpt-5.5`). The user's `service_tier` and any custom `model_provider` are not re-passed (hardcoding a tier would make every round fail for a consumer whose account lacks it); a review that depends on them should opt out, with full config-preserving isolation (a temp `CODEX_HOME` minus the MCP tables) tracked as a follow-up. New contract tests freeze the default-on isolation, the reasoning re-pass, and the opt-out across `dispatch-codex.sh` and `dispatch-codex.ps1`.
+- **Quota readout is now self-describing** (agent-config#2, agent-config#3). `scripts/agent-quota.py` labels each window as `94% left` rather than a bare `94%`, and the `implement-review` Prerequisites step states that the figures are remaining headroom. A high figure now reads as quota still available, which removes the inverted reading that had nearly driven a wrong channel-downgrade decision.
+
+### Changed
+
+- **Bundled `agent-style` pin moves to `v0.3.6`.** `bootstrap/packs.yaml` and the wheel composer mirror now default the `agent-style` pack to `v0.3.6`, matching the user-level and project pins that already moved. Consumers that fall back to the bundled default stop seeing the version-mismatch warning against a `v0.3.6` user pin. The RULE-07 antithesis wording shipped in `agent-style v0.3.6`.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.4 -> 0.7.5
+- npm `anywhere-agents` `package.json` `version`: 0.7.4 -> 0.7.5
+
+SemVer: 0.7.4 -> 0.7.5, released as a patch. Two bug fixes to shipped scripts and the reviewer dispatch, plus a bundled-pin bump; no API or pack-manifest schema change.
+
 ## [0.7.4] — 2026-06-13
 
 Patch release: mirrors the agent-config antithesis writing rule into the bundled `AGENTS.md`. It also extends `implement-review` so prose diffs run the writing-rules audit before review.
@@ -850,7 +870,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.1...v0.7.2

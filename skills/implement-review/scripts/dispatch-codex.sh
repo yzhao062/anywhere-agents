@@ -136,7 +136,40 @@ fi
 # CODEX_DISPATCH_SANDBOX (default: danger-full-access).
 CODEX_BIN="${CODEX_BIN:-codex}"
 CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
-"$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" - < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
+
+# Reviewer isolation (default on; set CODEX_DISPATCH_ISOLATE_MCP=off to opt out).
+# A user-level Codex MCP server must not auto-start inside the headless
+# reviewer. Live repro (agent-config#1): a configured MCP server (node_repl)
+# auto-started under `codex exec`, spawned a nested codex.exe, looped on
+# "ERROR: Reconnecting... N/5", and hung 15+ minutes with an empty review --
+# the same recursion the Claude reviewer backend already guards against with
+# --strict-mcp-config. `--ignore-user-config` is the only reliable stop: the
+# narrower `-c mcp_servers={}` is deep-merged by codex 0.139 and leaves the
+# configured servers running (verified live -- node_repl still spawned). It
+# drops the user's MCP servers, plugins, and hooks; the model still defaults to
+# codex's built-in (gpt-5.5, matching a typical config) and auth still uses
+# CODEX_HOME, but reasoning effort drops to "none", so re-pass it via
+# -c model_reasoning_effort (default xhigh; override CODEX_DISPATCH_REASONING)
+# to avoid a silent reviewer downgrade. What is NOT re-passed: service_tier and
+# any custom model_provider / base_url. service_tier is left to codex's default
+# on purpose -- hardcoding the maintainer's "fast" tier would make every round
+# fail for a consumer whose account lacks it, and Codex's built-in model
+# default already matches the common gpt-5.5 config. A review that genuinely
+# needs a custom provider or a specific tier should set
+# CODEX_DISPATCH_ISOLATE_MCP=off; full config-preserving
+# isolation (a temp CODEX_HOME holding a copy of config.toml minus the MCP
+# tables) is the documented follow-up. Isolation args go before the trailing
+# `-` so stdin stays the final positional. The `off` sentinel matches the
+# dispatch-codex.ps1 opt-out (case-insensitive) for cross-shell parity. Note:
+# the .ps1 copy of this note is kept short on purpose -- a longer comment
+# beside its cmdBody construction trips a Windows-AV heuristic (Bitdefender
+# AMSI parse block), so the full rationale lives here, not there.
+CODEX_DISPATCH_REASONING="${CODEX_DISPATCH_REASONING:-xhigh}"
+CODEX_ISOLATE_ARGS=(--ignore-user-config -c "model_reasoning_effort=$CODEX_DISPATCH_REASONING")
+if [ "$(printf '%s' "${CODEX_DISPATCH_ISOLATE_MCP:-}" | tr '[:upper:]' '[:lower:]')" = "off" ]; then
+    CODEX_ISOLATE_ARGS=()
+fi
+"$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" ${CODEX_ISOLATE_ARGS[@]+"${CODEX_ISOLATE_ARGS[@]}"} - < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1
 CODEX_EXIT=$?
 
 # Pipe last 80 lines of tail to stderr for caller visibility

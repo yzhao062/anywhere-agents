@@ -1111,7 +1111,7 @@ class PackVerifyTests(unittest.TestCase):
             project = pathlib.Path(d) / "project"
             project.mkdir()
             # Lock entries shaped to match the post-v0.5.7 wheel-bundled
-            # identity (v0.3.5 + compact path) so the classifier sees a
+            # identity (v0.3.6 + compact path) so the classifier sees a
             # consistent (project=L=defaults) tuple and emits "deployed".
             agent_style_outputs = ["AGENTS.md"]
             aa_core_outputs = [".claude/skills/aa-core-skills/SKILL.md"]
@@ -1121,7 +1121,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.5",
+                        "v0.3.6",
                         agent_style_outputs,
                     ),
                     "aa-core-skills": self._lock_entry("", "", aa_core_outputs),
@@ -1181,7 +1181,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.5",
+                        "v0.3.6",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1228,7 +1228,7 @@ class PackVerifyTests(unittest.TestCase):
                     "name": "agent-style",
                     "source": {
                         "url": "https://github.com/yzhao062/agent-style",
-                        "ref": "v0.3.5",
+                        "ref": "v0.3.6",
                     },
                 },
             ])
@@ -1236,7 +1236,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.5",
+                        "v0.3.6",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1383,7 +1383,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.5",
+                        "v0.3.6",
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(

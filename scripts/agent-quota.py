@@ -60,12 +60,16 @@ def _reset(window):
 
 
 def _fmt(window, pct_field):
+    # The source field is *used* percentage; the rendered number is the
+    # remaining headroom (100 - used). The "left" suffix makes the row
+    # self-describing so neither a human nor an agent reads it inverted:
+    # "94% left" means plenty of quota remains, not "94% consumed".
     used = window.get(pct_field)
     if used is None:
         return "—"
     remaining = max(0.0, 100.0 - float(used))
     r = _reset(window)
-    return f"{remaining:.0f}%" + (f" ({r})" if r else "")
+    return f"{remaining:.0f}% left" + (f" ({r})" if r else "")
 
 
 def _codex_model():

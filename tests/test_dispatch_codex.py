@@ -412,6 +412,131 @@ class _DispatchContractMixin:
                 f"CODEX_DISPATCH_SANDBOX override must reach codex: {args}",
             )
 
+    def test_codex_invoked_with_mcp_isolation_default(self) -> None:
+        """Default-on isolation passes --ignore-user-config + reasoning re-pass.
+
+        Regression guard for agent-config#1: a user-level Codex MCP server
+        auto-starting under `codex exec` recursed into a nested codex and hung
+        the headless reviewer with an empty review. --ignore-user-config is the
+        only reliable stop (a narrower `-c mcp_servers={}` is deep-merged by
+        codex and leaves the servers running). Because that flag also drops
+        reasoning effort to "none", the dispatcher re-passes
+        `-c model_reasoning_effort` (default xhigh) so the reviewer is not
+        silently downgraded. This freezes that both reach codex's CLI before
+        the trailing stdin marker.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            # Force the default path regardless of the ambient environment.
+            old = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
+            old_r = os.environ.pop("CODEX_DISPATCH_REASONING", None)
+            try:
+                result = self._run_dispatch(
+                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
+                )
+            finally:
+                if old is not None:
+                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
+                if old_r is not None:
+                    os.environ["CODEX_DISPATCH_REASONING"] = old_r
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+            self.assertIn("--ignore-user-config", args,
+                          f"--ignore-user-config must isolate the reviewer: {args}")
+            self.assertIn("-c", args, f"-c flag must be present: {args}")
+            self.assertIn(
+                "model_reasoning_effort=xhigh", args,
+                f"reasoning effort must be re-passed (default xhigh): {args}",
+            )
+            # Bind the config value to its flag: a future arg shuffle could
+            # leave both tokens present but parsed wrong (Codex Round 1 Low).
+            self.assertIn(
+                ("-c", "model_reasoning_effort=xhigh"), list(zip(args, args[1:])),
+                f"reasoning config must immediately follow a -c: {args}",
+            )
+            self.assertEqual(args[-1], "-",
+                             f"stdin marker must stay the final positional: {args}")
+
+    def test_codex_mcp_isolation_can_be_disabled(self) -> None:
+        """CODEX_DISPATCH_ISOLATE_MCP=off drops the isolation flags.
+
+        Escape hatch for the rare review that genuinely needs the user's full
+        config (MCP servers, plugins, hooks). When off, codex args must carry
+        neither --ignore-user-config nor the reasoning re-pass, falling back to
+        the plain `exec --sandbox <mode> -` shape.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            old = os.environ.get("CODEX_DISPATCH_ISOLATE_MCP")
+            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = "off"
+            try:
+                result = self._run_dispatch(
+                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
+                )
+            finally:
+                if old is None:
+                    os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
+                else:
+                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "--ignore-user-config", args,
+                f"isolation=off must drop --ignore-user-config: {args}",
+            )
+            # Reject ANY reasoning re-pass in opt-out mode, not just the
+            # default value (Codex Round 2 Low): off is the full-config escape
+            # hatch, so no model_reasoning_effort override should be injected.
+            self.assertFalse(
+                any(str(arg).startswith("model_reasoning_effort=") for arg in args),
+                f"isolation=off must drop any reasoning re-pass: {args}",
+            )
+            # Sandbox flag and stdin marker are unaffected by the opt-out.
+            self.assertIn("--sandbox", args, f"--sandbox must remain: {args}")
+            self.assertEqual(args[-1], "-", f"last arg must be '-': {args}")
+
+    def test_codex_isolation_reasoning_override(self) -> None:
+        """CODEX_DISPATCH_REASONING overrides the re-passed reasoning effort.
+
+        --ignore-user-config drops the user's reasoning effort, so the
+        dispatcher re-passes it. The default is xhigh; this env var lets a
+        consumer whose model/account does not support xhigh pick another
+        level. Guards that the override actually reaches codex's CLI.
+        """
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
+            old_r = os.environ.get("CODEX_DISPATCH_REASONING")
+            os.environ["CODEX_DISPATCH_REASONING"] = "high"
+            try:
+                result = self._run_dispatch(
+                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
+                )
+            finally:
+                if old_iso is not None:
+                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
+                if old_r is None:
+                    os.environ.pop("CODEX_DISPATCH_REASONING", None)
+                else:
+                    os.environ["CODEX_DISPATCH_REASONING"] = old_r
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+            self.assertIn(
+                "model_reasoning_effort=high", args,
+                f"CODEX_DISPATCH_REASONING override must reach codex: {args}",
+            )
+            self.assertIn(
+                ("-c", "model_reasoning_effort=high"), list(zip(args, args[1:])),
+                f"override reasoning config must immediately follow a -c: {args}",
+            )
+            self.assertNotIn(
+                "model_reasoning_effort=xhigh", args,
+                f"override must replace the xhigh default: {args}",
+            )
+
     def test_exit_code_zero_propagation(self) -> None:
         with _temp_dir() as td:
             tmpdir = Path(td)
@@ -564,6 +689,47 @@ class DispatchSandboxFlagContract(unittest.TestCase):
                       "dispatch-codex.ps1 must read $env:CODEX_DISPATCH_SANDBOX")
         self.assertIn("danger-full-access", text,
                       "dispatch-codex.ps1 must default sandbox to danger-full-access")
+
+
+class DispatchMcpIsolationContract(unittest.TestCase):
+    """Both dispatchers must isolate user MCP servers by default.
+
+    Background: agent-config#1. A user-level Codex MCP server (e.g.
+    node_repl) auto-started under `codex exec`, spawned a nested codex,
+    looped on "ERROR: Reconnecting... N/5", and hung the headless reviewer
+    15+ minutes with an empty review. The fix passes --ignore-user-config
+    (the only reliable stop; a narrower `-c mcp_servers={}` is deep-merged
+    by codex and leaves servers running). Because that flag also drops the
+    reasoning effort to "none", the dispatcher re-passes
+    `-c model_reasoning_effort` (default xhigh) so the reviewer is not
+    silently downgraded; the model stays codex's default (gpt-5.5). Default
+    on; opt out with CODEX_DISPATCH_ISOLATE_MCP=off.
+
+    These static checks freeze the wiring so a future refactor that drops
+    the override (while the runtime mock tests happen to still pass) fails
+    here, mirroring DispatchSandboxFlagContract's rationale. Both scripts
+    keep the override inline as a plain env ternary (no captured helper
+    output spliced into the command) so the Windows-AV heuristic that
+    blocks richer logic next to the cmdBody construction stays clear.
+    """
+
+    def test_sh_isolates_mcp(self) -> None:
+        text = DISPATCH_SH.read_text(encoding="utf-8")
+        self.assertIn("CODEX_DISPATCH_ISOLATE_MCP", text,
+                      "dispatch-codex.sh must read CODEX_DISPATCH_ISOLATE_MCP")
+        self.assertIn("--ignore-user-config", text,
+                      "dispatch-codex.sh must isolate via --ignore-user-config")
+        self.assertIn("model_reasoning_effort", text,
+                      "dispatch-codex.sh must re-pass reasoning effort")
+
+    def test_ps1_isolates_mcp(self) -> None:
+        text = DISPATCH_PS1.read_text(encoding="utf-8")
+        self.assertIn("CODEX_DISPATCH_ISOLATE_MCP", text,
+                      "dispatch-codex.ps1 must read $env:CODEX_DISPATCH_ISOLATE_MCP")
+        self.assertIn("--ignore-user-config", text,
+                      "dispatch-codex.ps1 must isolate via --ignore-user-config")
+        self.assertIn("model_reasoning_effort", text,
+                      "dispatch-codex.ps1 must re-pass reasoning effort")
 
 
 # Mock codex that consumes stdin then sleeps (writes nothing to stdout).

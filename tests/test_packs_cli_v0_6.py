@@ -1157,7 +1157,7 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
     # stale ``stale_project_ref`` in both ``agent-config.yaml`` and the
     # lock; the canonical apply path must converge them to
     # ``bundled_ref``.
-    bundled_ref = "v0.3.5"
+    bundled_ref = "v0.3.6"
     stale_project_ref = "v0.3.2"
     bundled_policy = "auto"
     # Synthetic commits that distinguish the stale-lock state from the

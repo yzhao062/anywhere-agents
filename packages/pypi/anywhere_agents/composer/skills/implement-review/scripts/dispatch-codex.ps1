@@ -224,7 +224,12 @@ $tailPathEsc = $tailPath -replace '%', '%%'
 $promptFileEsc = $PromptFile -replace '%', '%%'
 $sandboxMode = if ($env:CODEX_DISPATCH_SANDBOX) { $env:CODEX_DISPATCH_SANDBOX } else { 'danger-full-access' }
 $sandboxModeEsc = $sandboxMode -replace '%', '%%'
-$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`n""$codexBinEsc"" exec --sandbox $sandboxModeEsc - > ""$tailPathEsc"" 2>&1 < ""$promptFileEsc""`r`n"
+# Reviewer isolation (default on; CODEX_DISPATCH_ISOLATE_MCP=off opts out).
+# --ignore-user-config drops user MCP/plugins/hooks; reasoning is re-passed
+# (model uses codex's default). See dispatch-codex.sh for what is not kept.
+$reasoning = if ($env:CODEX_DISPATCH_REASONING) { $env:CODEX_DISPATCH_REASONING } else { 'xhigh' }
+$isolateArg = if ($env:CODEX_DISPATCH_ISOLATE_MCP -eq 'off') { '' } else { "--ignore-user-config -c model_reasoning_effort=$reasoning " }
+$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`n""$codexBinEsc"" exec --sandbox $sandboxModeEsc $isolateArg- > ""$tailPathEsc"" 2>&1 < ""$promptFileEsc""`r`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
 

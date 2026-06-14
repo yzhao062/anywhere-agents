@@ -497,12 +497,12 @@ class TestBcGuardDistinguishesMinimalFromExplicitPin(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         # The bundled manifest declares ``agent-style`` with
-        # ``ref: v0.3.5`` and ``update_policy: auto`` (per
+        # ``ref: v0.3.6`` and ``update_policy: auto`` (per
         # bootstrap/packs.yaml in this repo). All sub-cases below are
         # written against that bundled default.
         self.pack_name = "agent-style"
         self.bundled_url = "https://github.com/yzhao062/agent-style"
-        self.bundled_ref = "v0.3.5"
+        self.bundled_ref = "v0.3.6"
         # ``_has_explicit_default_override`` ignores ``row`` when the
         # user-level identity is bundled; provide a stand-in row that
         # passes that early check so the function falls through to the

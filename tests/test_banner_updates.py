@@ -278,7 +278,7 @@ class CLIBannerVerifyTests(unittest.TestCase):
                         "name": "agent-style",
                         "source": {
                             "repo": "https://github.com/yzhao062/agent-style",
-                            "ref": "v0.3.5",
+                            "ref": "v0.3.6",
                         },
                         "passive": [
                             {
@@ -318,7 +318,7 @@ class CLIBannerVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": {
                         "source_url": "https://github.com/yzhao062/agent-style",
-                        "requested_ref": "v0.3.5",
+                        "requested_ref": "v0.3.6",
                         "resolved_commit": "ef" * 20,
                         "files": [
                             {
