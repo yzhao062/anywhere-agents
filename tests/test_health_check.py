@@ -557,6 +557,63 @@ class HealthCheckPython(unittest.TestCase):
             self.assertEqual(parsed["check-8"][0], "WARN")
             self.assertIn("missing-dispatch-tail", parsed["check-8"][1])
 
+    # ----- Check 8 Fix A (line-level echo classifier) + Fix B (two-tier) -----
+    # Real-failure-wins: a real failure must keep WARNing even when it looks
+    # line-numbered or carries a backslash path. Validated live against the
+    # preserved R1 dispatch tail; these freeze the shapes permanently.
+    def test_check8_warns_on_line_numbered_real_diagnostic(self) -> None:
+        """A line-numbered line that begins (after the number prefix) with a
+        runner/log diagnostic token is a REAL failure, not a source echo, and
+        must still WARN. Echo suppression must never drop it."""
+        self._assert_check8_warn("12: ERROR: HTTP/1.1 429 too many requests\n")
+
+    def test_check8_warns_on_windows_path_eacces(self) -> None:
+        """A real EACCES failure on a Windows path (backslashes) must WARN. A
+        bare backslash must NEVER classify a line as a regex-source echo, or
+        real Windows-path failures would be silently dropped."""
+        self._assert_check8_warn(
+            "ERROR: EACCES opening C:\\Users\\me\\Review-Codex.md\n"
+        )
+
+    def test_check8_warns_on_rate_limit_exceeded_intrinsic(self) -> None:
+        """The failure FORM `rate limit exceeded` is intrinsic and counts on its
+        own, with no error-frame token required. Closes the R3 false-negative
+        where a bare `Rate limit exceeded` line was dropped as generic."""
+        self._assert_check8_warn("Rate limit exceeded after 3 retries\n")
+
+    def test_check8_warns_on_too_many_requests_intrinsic(self) -> None:
+        """`Too Many Requests` (the 429 text form) is intrinsic; counts alone."""
+        self._assert_check8_warn("Too Many Requests\n")
+
+    def test_check8_passes_on_line_numbered_source_citation(self) -> None:
+        """A line-numbered source citation (codex quoting a file with line
+        numbers) whose content is neither a diagnostic nor an intrinsic pattern
+        is a benign echo and must NOT count."""
+        self._assert_check8_pass(
+            "61: token co-occurs with an error-frame token on the same line\n"
+        )
+
+    def test_check8_passes_on_literal_regex_source_line(self) -> None:
+        r"""A line quoting a health-check pattern definition (regex
+        metacharacters like ``\S`` / ``(?:`` / ``\bENOSPC\b``) is a benign echo
+        and must NOT count. This is the dominant self-review FP source."""
+        self._assert_check8_pass(
+            '50: r"HTTP/\\S* (?:429|5\\d\\d)",\n'
+            '51: r"\\bENOSPC\\b",\n'
+        )
+
+    def test_check8_passes_on_bare_rate_limit_without_frame(self) -> None:
+        """Bare `rate limit` in benign prose, with no error-frame token nearby,
+        must NOT count (Fix B generic rule)."""
+        self._assert_check8_pass(
+            "the rate limit is 100 requests per minute by design\n"
+        )
+
+    def test_check8_warns_on_bare_rate_limit_with_frame(self) -> None:
+        """Bare `rate limit` WITH an error-frame token on the same line counts
+        (Fix B generic rule)."""
+        self._assert_check8_warn("ERROR: rate limit was hit during the run\n")
+
     # ----- Check 9: stall warning -----
     def test_check9_warns_when_stall_warning_present(self) -> None:
         with tempfile.TemporaryDirectory() as td:

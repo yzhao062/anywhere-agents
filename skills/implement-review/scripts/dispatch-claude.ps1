@@ -232,7 +232,8 @@ $relayPrompt = @(
     ("- Do not use " + 'Write' + " or " + 'Edit' + " tools. The dispatch wrapper saves your final answer to $ExpectedReviewFile.")
     ("- You may run $shellToolName verification commands, tests, grep/rg, and other read/validation tools in the current working directory.")
     "- The current working directory is a disposable staged snapshot when git export succeeds: $validationDir"
-    '- Do not run mutating, publishing, network, package-install, cleanup, or destructive commands.'
+    '- You may use the built-in WebSearch and WebFetch tools to verify checkable external facts (citations, links, library or API behavior, versions).'
+    '- Do not run mutating, publishing, package-install, cleanup, or destructive commands, and do not make network calls through shell commands such as curl or wget; use WebFetch or WebSearch for any network lookup.'
     '- Return the complete review as your final answer, starting with the required Round marker.'
     ''
     'Original review prompt:'
@@ -257,7 +258,7 @@ $useBare = ($env:CLAUDE_DISPATCH_BARE -eq '1')
 $permissionFlag = '--per' + 'mission-' + 'mode'
 $toolFlag = '--too' + 'ls'
 $permMode = 'by' + 'pass' + 'Per' + 'missions'
-$toolList = 'Read' + ',' + 'Ba' + 'sh'
+$toolList = 'Read' + ',' + 'Ba' + 'sh' + ',WebSearch,WebFetch'
 $claudeArgs = @(
     '-p',
     $permissionFlag, $permMode,

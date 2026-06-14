@@ -585,6 +585,19 @@ class DispatchCopilotFlagContract(unittest.TestCase):
             self.assertIn("--add-dir", text)
             self.assertIn("--no-ask-user", text)
 
+    def test_copilot_stays_offline(self) -> None:
+        """The Copilot fallback backend has no web access: URL permission is
+        all-or-nothing via url(), too broad for an auto-launched reviewer, so it
+        is withheld. Pin the offline contract so a future edit does not silently
+        grant network access to this backend."""
+        for text in self._both():
+            self.assertNotIn("url(", text,
+                             "dispatch-copilot must not grant url() web access")
+            self.assertNotIn("--allow-all-tools", text,
+                             "dispatch-copilot must not grant all tools")
+            self.assertNotIn("--allow-all-urls", text,
+                             "dispatch-copilot must not grant all URLs")
+
     def test_git_pager_neutralized(self) -> None:
         for text in self._both():
             self.assertIn("GIT_PAGER", text,

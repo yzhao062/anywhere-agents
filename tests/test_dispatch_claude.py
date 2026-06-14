@@ -14,7 +14,7 @@ wiring end-to-end without invoking the real claude.
 Claude-specific contract (vs Codex / Copilot):
   * a relay prompt is delivered via STDIN (mirrors Codex `< prompt-file>`),
     NOT `-p "@<file>"` like Copilot, NOT as a long literal argument;
-  * flags: `--permission-mode bypassPermissions --tools "Read,Bash"
+  * flags: `--permission-mode bypassPermissions --tools "Read,Bash,WebSearch,WebFetch"
     --add-dir <staged-snapshot> --output-format text`, with `--bare` opt-in
     via `CLAUDE_DISPATCH_BARE=1`;
   * Claude prints the complete review to stdout; dispatch-claude writes that
@@ -470,8 +470,9 @@ class _DispatchContractMixin:
             self.assertIn("-p", args, f"claude must receive -p: {args}")
 
     def test_claude_invoked_with_permission_mode_bypass(self) -> None:
-        """`bypassPermissions` is used with `--tools Read,Bash` so Claude can
-        run verification commands while Write/Edit tools remain unavailable."""
+        """`bypassPermissions` is used with `--tools Read,Bash,WebSearch,WebFetch`
+        so Claude can run verification commands and check external facts while
+        Write/Edit tools remain unavailable."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -486,8 +487,10 @@ class _DispatchContractMixin:
             self.assertGreater(len(args), pm_idx + 1)
             self.assertEqual(args[pm_idx + 1], "bypassPermissions")
 
-    def test_claude_invoked_with_read_and_bash_tools_only(self) -> None:
-        """Claude gets Read+Bash only. The wrapper writes the review file."""
+    def test_claude_invoked_with_read_bash_and_web_tools(self) -> None:
+        """Claude gets Read, Bash, and the built-in web tools (WebSearch,
+        WebFetch) for factual verification. Write/Edit stay unavailable; the
+        wrapper writes the review file."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -502,8 +505,8 @@ class _DispatchContractMixin:
                           f"claude must receive --tools: {args}")
             tools_idx = args.index("--tools")
             self.assertGreater(len(args), tools_idx + 1)
-            self.assertEqual(args[tools_idx + 1], "Read,Bash",
-                             f"Claude backend must expose only Read+Bash: {args}")
+            self.assertEqual(args[tools_idx + 1], "Read,Bash,WebSearch,WebFetch",
+                             f"Claude backend must grant Read, Bash, and web tools: {args}")
 
     def test_claude_invoked_without_bare_by_default(self) -> None:
         """`--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153
@@ -949,17 +952,31 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             "dispatch-claude.ps1 must use bypassPermissions, inline or split",
         )
 
-    def test_read_and_bash_tools_present(self) -> None:
+    def test_read_bash_and_web_tools_present(self) -> None:
         sh_text = DISPATCH_SH.read_text(encoding="utf-8")
         ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        self.assertIn('--tools "Read,Bash"', sh_text,
-                      "dispatch-claude.sh must expose only Read+Bash")
+        self.assertIn('--tools "Read,Bash,WebSearch,WebFetch"', sh_text,
+                      "dispatch-claude.sh must grant Read, Bash, and the built-in web tools")
         self.assertTrue(
-            ('--tools "Read,Bash"' in ps1_text)
-            or ("'Read' + ',Bash'" in ps1_text)
-            or ("'Read' + ',' + 'Ba' + 'sh'" in ps1_text),
-            "dispatch-claude.ps1 must expose only Read+Bash, inline or split",
+            ('--tools "Read,Bash,WebSearch,WebFetch"' in ps1_text)
+            or ("'Read' + ',' + 'Ba' + 'sh' + ',WebSearch,WebFetch'" in ps1_text),
+            "dispatch-claude.ps1 must grant Read, Bash, and web tools, inline or split",
         )
+
+    def test_mcp_and_settings_isolation_preserved(self) -> None:
+        """Web tools are built-in, not MCP, so adding them must not weaken the
+        isolation that keeps a user-level Codex MCP server (and user hooks) out
+        of the Claude reviewer: empty MCP config + strict-mcp-config +
+        project,local settings must all remain."""
+        for text in self._both():
+            self.assertIn("--strict-mcp-config", text,
+                          "dispatch-claude must keep --strict-mcp-config")
+            self.assertIn("--setting-sources", text,
+                          "dispatch-claude must keep --setting-sources")
+            self.assertIn("project,local", text,
+                          "dispatch-claude must scope settings to project,local")
+            self.assertIn('"mcpServers":{}', text,
+                          "dispatch-claude must write an empty MCP config")
 
     def test_no_write_edit_or_allowedtools_pattern_allowlist(self) -> None:
         """Claude should not get Write/Edit tools or Bash pattern preapproval."""

@@ -8,7 +8,7 @@ Based on Google's eng-practices code review guidelines and Microsoft's Engineeri
 
 1. **Design** -- Does the change belong here or in a library? Do the pieces interact sensibly? Does it fit the system's architecture? (Google)
 2. **Functionality** -- Does it do what the developer intended? Check edge cases, concurrency, and race conditions. (Google)
-3. **Complexity** -- Can a reader understand it quickly? Is any part over-engineered or prematurely generalized? Flag functions with more than three arguments. (Google, Microsoft)
+3. **Complexity and over-engineering** -- Can a reader understand it quickly? Is any part over-engineered, prematurely generalized, or abstracted ahead of a second caller (YAGNI)? Flag speculative configurability, indirection with a single implementation, and functions with more than three arguments. Weight this by the code's expected lifetime: an abstraction that will be rewritten before it pays off is over-engineering. (Google, Microsoft)
 4. **Security and data protection** -- Injection, hardcoded secrets, unsafe deserialization, OWASP top-10 issues. Any PII or customer data exposure? (Microsoft)
 5. **Error handling** -- Are errors handled gracefully and explicitly? Are failure modes clear? (Microsoft)
 6. **Tests** -- Are new behaviors covered? Do existing tests still make sense? Will they actually fail when the code breaks? (Google)
@@ -16,6 +16,8 @@ Based on Google's eng-practices code review guidelines and Microsoft's Engineeri
 8. **Consistency** -- Does the change follow the style guide? If the guide is silent, is it consistent with surrounding code? (Google)
 9. **Performance** -- Obvious inefficiencies, unnecessary allocations, or algorithmic complexity issues? (Microsoft)
 10. **Documentation** -- If the change affects how users build, test, or interact with the code, is documentation updated? (Google)
+11. **Long-term maintainability** (durable code only) -- For code expected to live and change over time, not throwaway scripts or one-off migrations, how will it age? Look at hidden coupling and global state, unnamed magic constants, and implicit invariants a future editor could break. Check whether error paths are debuggable and whether tests and docs let the next person change it safely. Down-weight for explicitly short-lived code, and state which longevity assumption you applied.
+12. **Temporary-artifact hygiene** -- Flag anything in the diff that should not ship: debug prints or leftover logging, commented-out code, dead scaffolding or unused placeholders, scratch or backup files staged by accident (for example `PLAN-*.md`, `Review-*.md`, `*.tmp`, `*_old.*`, one-off probe scripts), and stray TODO stubs with no follow-up. Recommend removal or a gitignore entry. Routine intentional logging is not a hit.
 
 Overarching standard: approve once the change *definitely improves overall code health*, even if it is not perfect. Seek continuous improvement, not perfection. (Google)
 

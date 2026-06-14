@@ -44,12 +44,22 @@ SUSPICIOUS_PHRASES = [
     r"sandbox.*fail",
 ]
 
-TOOL_FAILURE_PATTERNS = [
+# Check 8 failure vocabulary, split into two tiers (Fix B; see SKILL.md
+# Phase 2.0 and the W3 plan). INTRINSIC patterns are failure FORMS a runtime
+# emits; they count on their own. GENERIC patterns are ambiguous words that also
+# appear in benign prose; they count only when an error-frame token sits on the
+# same or an adjacent (non-echo) line. The split closes the false-negative class
+# of terse real failures (e.g. a bare ``Rate limit exceeded`` line) that an
+# earlier blanket "needs an error frame" rule would have dropped.
+INTRINSIC_FAILURE_PATTERNS = [
     r"tool .* failed",
     r"mcp tool failed",
     r"HTTP/\S* (?:429|5\d\d)",
     r"status (?:429|5\d\d)",
-    r"rate limit",
+    r"too many requests",
+    r"rate limit exceeded",
+    r"rate limited",
+    r"service unavailable",
     r"quota exceeded",
     r"insufficient_quota",
     r"connection refused",
@@ -66,6 +76,59 @@ TOOL_FAILURE_PATTERNS = [
     r"\bECONNRESET\b",
     r"\bECONNREFUSED\b",
 ]
+
+# Generic words: count only with an error-frame token nearby. Bare "rate limit"
+# appears in benign prose ("the rate limit logic"); the failure FORM "rate limit
+# exceeded" is intrinsic above.
+GENERIC_FAILURE_PATTERNS = [
+    # No \b anchors: they would pollute the auto-generated breakdown label
+    # ("brate") for negligible precision. The spaces around "rate limit" already
+    # bound it in practice, and a stray "moderate limit" would only count next
+    # to an error frame, a benign WARN.
+    r"rate limit",
+]
+
+# Error-frame tokens that license a GENERIC pattern to count on the same or an
+# adjacent non-echo line.
+ERROR_FRAME_PATTERNS = [
+    r"\berror\b", r"\bfailed\b", r"\bfailure\b", r"\bfatal\b", r"\bexception\b",
+    r"\btraceback\b", r"\bdenied\b", r"\bunauthorized\b", r"\bforbidden\b",
+    r"\btimeout\b", r"\btimed out\b", r"\brefused\b", r"\breset\b",
+    r"\bunavailable\b", r"\bunreachable\b", r"\baborted\b", r"\bcancell?ed\b",
+    r"\bnon-zero\b", r"\bexit code\b", r"\bstatus code\b", r"\berrno\b",
+    r"\bAPI\b", r"\bRPC\b", r"\bHTTP\b", r"\bTLS\b", r"\bSSL\b", r"\bDNS\b",
+    r"\bgetaddrinfo\b",
+]
+
+# Diagnostic tokens that, at the start of a line-numbered line, mark it as a real
+# runner/log line rather than a source citation (Fix A). Such a line is never
+# classified as an echo. ``E[A-Z]{3,}`` matches errno symbols (EACCES, ENOSPC).
+DIAGNOSTIC_LINE_TOKENS = [
+    r"ERROR", r"WARN", r"FATAL", r"Traceback", r"HTTP/", r"status", r"errno",
+    r"E[A-Z]{3,}",
+]
+
+# Literal regex-source fragments (Fix A). A tail line containing one of these is
+# the health-check pattern list being quoted (codex reading this file or the
+# tests), not a real failure. These are EXACT pattern sources with regex
+# metacharacters; a real failure line or a Windows path never contains them. We
+# deliberately do NOT use a bare-backslash or bare-line-number predicate: a
+# Windows path (``C:\bin``) and a line-numbered real diagnostic
+# (``12: ERROR: HTTP/1.1 429``) must still count.
+REGEX_SOURCE_MARKERS = [
+    r"HTTP/\S* (?:429|5\d\d)",
+    r"status (?:429|5\d\d)",
+    r"sandbox.*runner error",
+    r"\bENOSPC\b",
+    r"\bEACCES\b",
+    r"\bETIMEDOUT\b",
+    r"\bECONNRESET\b",
+    r"\bECONNREFUSED\b",
+    r"tool .* failed",
+]
+
+# Back-compat: callers/tests that import the flat union still work.
+TOOL_FAILURE_PATTERNS = INTRINSIC_FAILURE_PATTERNS + GENERIC_FAILURE_PATTERNS
 
 ANCHOR_PATTERNS = [
     r":\d+\b",
@@ -97,6 +160,46 @@ def strip_code_spans(text: str) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]*`", "", text)
     return text
+
+
+def is_echo_line(line: str, intrinsic_res: list, diagnostic_re) -> bool:
+    r"""True when a tail line is a modeled pattern-echo that must NOT count as a
+    Check 8 marker (Fix A). Conservative by design: a real failure line is never
+    classified as an echo (real-failure-wins). Two modeled echo shapes:
+
+    1. A literal regex-source line: the line quotes a health-check pattern
+       definition (regex metacharacters, e.g. ``HTTP/\S* (?:429|5\d\d)`` or
+       ``\bENOSPC\b``). These exact fragments never appear in a real failure
+       line or a Windows path.
+    2. A line-numbered source citation (``^\s*\d+: ...``) whose content is
+       neither a runner/log diagnostic (ERROR, HTTP/, status, errno, ...) nor a
+       match of any intrinsic failure pattern. A line-numbered real diagnostic
+       such as ``12: ERROR: HTTP/1.1 429`` is therefore kept, not suppressed.
+
+    A bare line-number prefix or a backslash is never sufficient to suppress a
+    line; that would drop real Windows-path and line-numbered failures.
+    """
+    for marker in REGEX_SOURCE_MARKERS:
+        if marker in line:
+            return True
+    m = re.match(r"^\s*\d+:\s?(.*)$", line)
+    if m:
+        rest = m.group(1)
+        if diagnostic_re.match(rest):
+            return False
+        for pat_re in intrinsic_res:
+            if pat_re.search(rest):
+                return False
+        # Intentional intrinsic/generic asymmetry (kept by design): an INTRINSIC
+        # match above keeps the line (real-failure-wins, strong evidence). A
+        # GENERIC match (bare "rate limit") is deliberately NOT checked here, so
+        # a line-numbered generic line stays classified as an echo. Generic
+        # patterns are weak evidence and a `\d+:` prefix is a citation signal
+        # (grep / file-read output); a real generic failure carries no such
+        # prefix. Treating it as an echo avoids re-counting source citations of
+        # rate-limit / error-handling code, which is the W3 FP-reduction goal.
+        return True
+    return False
 
 
 def emit(kind: str, code: str, *parts: str) -> None:
@@ -244,7 +347,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         emit("PASS", "check-7", "0-suspicious-phrases")
 
-    # ----- Check 8: dispatch-tail tool failures (exclude code spans) -----
+    # ----- Check 8: dispatch-tail tool failures (line classifier + two-tier) -----
+    # Fix A (echo classifier) + Fix B (intrinsic/generic) per SKILL.md Phase 2.0
+    # and the W3 plan. Scan line by line: skip modeled pattern-echo lines, count
+    # intrinsic failure patterns on their own, and count generic words only when
+    # an error-frame token sits on the same or an adjacent non-echo line.
     if not tail_file.exists():
         emit("WARN", "check-8", "1", "missing-dispatch-tail")
     else:
@@ -254,31 +361,65 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8", errors="replace"
             )
         tail_no_code = strip_code_spans(tail_text)
-        per_pattern_compiled = [
-            (p, re.compile(p, re.IGNORECASE)) for p in TOOL_FAILURE_PATTERNS
+
+        intrinsic_compiled = [
+            (p, re.compile(p, re.IGNORECASE)) for p in INTRINSIC_FAILURE_PATTERNS
         ]
+        generic_compiled = [
+            (p, re.compile(p, re.IGNORECASE)) for p in GENERIC_FAILURE_PATTERNS
+        ]
+        frame_re = re.compile("|".join(ERROR_FRAME_PATTERNS), re.IGNORECASE)
+        diagnostic_re = re.compile(
+            r"^\s*(?:" + "|".join(DIAGNOSTIC_LINE_TOKENS) + r")", re.IGNORECASE
+        )
+        intrinsic_res = [r for _, r in intrinsic_compiled]
+
+        lines = tail_no_code.splitlines()
+        echo_flags = [
+            is_echo_line(ln, intrinsic_res, diagnostic_re) for ln in lines
+        ]
+        # Only a real (non-echo) line may license a generic match via adjacency.
+        frame_flags = [
+            (not echo_flags[i]) and bool(frame_re.search(ln))
+            for i, ln in enumerate(lines)
+        ]
+
         per_pattern_counts: dict[str, int] = {}
         total_hits = 0
-        for pat_src, pat_re in per_pattern_compiled:
-            n = len(pat_re.findall(tail_no_code))
-            if n:
-                per_pattern_counts[pat_src] = n
-                total_hits += n
+        for idx, line in enumerate(lines):
+            if echo_flags[idx]:
+                continue
+            for pat_src, pat_re in intrinsic_compiled:
+                n = len(pat_re.findall(line))
+                if n:
+                    per_pattern_counts[pat_src] = (
+                        per_pattern_counts.get(pat_src, 0) + n
+                    )
+                    total_hits += n
+            near_frame = (
+                frame_flags[idx]
+                or (idx > 0 and frame_flags[idx - 1])
+                or (idx + 1 < len(lines) and frame_flags[idx + 1])
+            )
+            if near_frame:
+                for pat_src, pat_re in generic_compiled:
+                    n = len(pat_re.findall(line))
+                    if n:
+                        per_pattern_counts[pat_src] = (
+                            per_pattern_counts.get(pat_src, 0) + n
+                        )
+                        total_hits += n
+
         if total_hits:
-            # Emit a compact breakdown alongside the WARN so downstream
-            # Claude can recognize known-noise patterns without re-grepping
-            # the tail. Example breakdown shape:
+            # Compact per-pattern breakdown so downstream Claude can recognize
+            # known-noise shapes (e.g. WSL-stub-bash 1312 burst when Substance
+            # heuristics pass) without re-grepping. Example breakdown shape:
             #   `1312:30 windows-sandbox:24 rate-limit:13 429:11`
-            # Downstream uses the FP-tuning doctrine in SKILL.md to map
-            # known-noise shapes (e.g. WSL-stub-bash 1312 burst when
-            # Substance heuristics pass) to a fast Proceed.
             top = sorted(per_pattern_counts.items(), key=lambda kv: -kv[1])
             breakdown_parts = []
             for pat_src, n in top:
-                # Render a short pattern label: pick the longest run of
-                # word chars in the pattern, lowercased, max 20 chars.
-                # Falls back to the full raw pattern when no word run
-                # exists (rare).
+                # Short label: longest run of word chars in the pattern,
+                # lowercased, max 20 chars. Falls back to the raw pattern.
                 words = re.findall(r"[A-Za-z0-9_]+", pat_src)
                 label = max(words, key=len).lower()[:20] if words else pat_src
                 breakdown_parts.append(f"{label}:{n}")

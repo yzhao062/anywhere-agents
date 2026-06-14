@@ -195,7 +195,8 @@ fi
     printf '%s\n' "- Do not use Write or Edit tools. The dispatch wrapper saves your final answer to ${EXPECTED_REVIEW_FILE}."
     printf '%s\n' "- You may run Bash verification commands, tests, grep/rg, and other read/validation tools in the current working directory."
     printf '%s\n' "- The current working directory is a disposable staged snapshot when git export succeeds: ${VALIDATION_DIR}"
-    printf '%s\n' "- Do not run mutating, publishing, network, package-install, cleanup, or destructive commands."
+    printf '%s\n' "- You may use the built-in WebSearch and WebFetch tools to verify checkable external facts (citations, links, library or API behavior, versions)."
+    printf '%s\n' "- Do not run mutating, publishing, package-install, cleanup, or destructive commands, and do not make network calls through shell commands such as curl or wget; use WebFetch or WebSearch for any network lookup."
     printf '%s\n' "- Return the complete review as your final answer, starting with the required Round marker."
     printf '\n%s\n\n' "Original review prompt:"
     cat "$PROMPT_FILE"
@@ -231,7 +232,7 @@ fi
     cd "$VALIDATION_DIR" || exit 2
     GIT_PAGER=cat "$CLAUDE_CMD" -p \
         --permission-mode bypassPermissions \
-        --tools "Read,Bash" \
+        --tools "Read,Bash,WebSearch,WebFetch" \
         --add-dir "$VALIDATION_DIR" \
         --setting-sources project,local \
         --strict-mcp-config --mcp-config "$EMPTY_MCP_CONFIG_FILE" \
