@@ -981,6 +981,66 @@ class TestPromptUserForUpdates(unittest.TestCase):
         with self.assertRaises(ValueError):
             compose_packs.prompt_user_for_updates([_pending_fixture()])
 
+    # ---- v0.7.6 (anywhere-agents#12): truthy/falsy alias acceptance ----
+
+    @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "1"}, clear=False)
+    def test_env_truthy_one_returns_apply(self) -> None:
+        """anywhere-agents#12: ``=1`` (a natural truthy choice) maps to
+        ``apply`` instead of aborting compose with a ``ValueError`` on the
+        one consumer whose pack-lock happens to be stale."""
+        result = compose_packs.prompt_user_for_updates([_pending_fixture()])
+        self.assertEqual(result, "apply")
+
+    def test_env_truthy_aliases_return_apply(self) -> None:
+        """Every accepted truthy spelling → ``apply``, case-insensitively
+        and ignoring surrounding whitespace."""
+        for value in ("true", "TRUE", "yes", "y", "on", " Apply ", "APPLY"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"ANYWHERE_AGENTS_UPDATE": value}, clear=False
+            ):
+                result = compose_packs.prompt_user_for_updates(
+                    [_pending_fixture()]
+                )
+                self.assertEqual(result, "apply")
+
+    def test_env_falsy_aliases_return_skip(self) -> None:
+        """Every accepted falsy spelling → ``skip``, case-insensitively and
+        ignoring surrounding whitespace."""
+        for value in ("0", "false", "FALSE", "no", "n", "off", " Skip "):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"ANYWHERE_AGENTS_UPDATE": value}, clear=False
+            ):
+                result = compose_packs.prompt_user_for_updates(
+                    [_pending_fixture()]
+                )
+                self.assertEqual(result, "skip")
+
+    @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": ""}, clear=False)
+    def test_env_empty_returns_apply(self) -> None:
+        """An explicitly empty value (``ANYWHERE_AGENTS_UPDATE=``) is treated
+        as the unset default (``apply``), not an unknown-value error."""
+        result = compose_packs.prompt_user_for_updates([_pending_fixture()])
+        self.assertEqual(result, "apply")
+
+    @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "FAIL"}, clear=False)
+    def test_env_fail_is_case_insensitive(self) -> None:
+        """``fail`` matching is case-insensitive; no truthy/falsy alias ever
+        reaches the fail-closed path, only the exact word does."""
+        with self.assertRaises(compose_packs.PackLockDriftAborted):
+            compose_packs.prompt_user_for_updates([_pending_fixture()])
+
+    @patch.dict(os.environ, {"ANYWHERE_AGENTS_UPDATE": "garbage"}, clear=False)
+    def test_unknown_value_message_names_all_aliases(self) -> None:
+        """The fail-loud hint must name every accepted alias, including the
+        single-letter ``y`` / ``n`` and ``off`` forms (anywhere-agents#12
+        review Low: those were accepted but missing from the message)."""
+        with self.assertRaises(ValueError) as ctx:
+            compose_packs.prompt_user_for_updates([_pending_fixture()])
+        msg = str(ctx.exception)
+        self.assertIn("apply/1/true/yes/y/on", msg)
+        self.assertIn("skip/0/false/no/n/off", msg)
+        self.assertIn("fail", msg)
+
 
 # =====================================================================
 # Phase 8 Task 8.2: pending-updates.json — Round 3 M4 stale-file invariant.

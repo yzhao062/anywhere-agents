@@ -9,11 +9,11 @@
 | `ci-mockup-figure` | "mockup", "HTML figure", "dashboard mockup", "timeline figure", "Gantt", "TikZ figure", "arrow routing" | Build HTML mockups of systems, dashboards, and timelines, then capture as space-efficient PNG/PDF figures; use TikZ or skia-canvas for abstract diagrams needing arrow routing |
 | `readme-polish` | "polish README", "modernize README", "README audit", "README rewrite", "README badges", "README hero image" | Audit a GitHub README and rewrite using modern 2025-2026 patterns (centered header, badges, hero image, GitHub alert callouts, emoji feature bullets, collapsibles, Mermaid diagrams) |
 
-The shipped routing table covers the four skills above. Extend it in your fork (or in consuming projects) with rows for your own skills.
+The shipped routing table covers the four skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
 
 ## Extension Template
 
-Copy this section and extend it with your own skills. When a user's prompt matches keywords or files, the router will dispatch to the corresponding skill.
+Copy this section and extend it with your own skills. In a fork, edit the tables below in place; in a consuming project, copy the rows into your bootstrap-proof `routing-table.local.md` (or an `AGENTS.local.md` `## Routing` section) instead, since this file is restored on every bootstrap. When a user's prompt matches keywords or files, the router dispatches to the corresponding skill.
 
 ### Keyword-based routing
 

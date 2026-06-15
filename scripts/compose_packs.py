@@ -359,6 +359,16 @@ def _current_commit(selection: dict) -> str:
     return _selection_ref(selection)
 
 
+# v0.7.6 (anywhere-agents#12): accept common truthy/falsy spellings for
+# ANYWHERE_AGENTS_UPDATE so a natural ``=1`` does not abort compose with a
+# ValueError on the one consumer whose pack-lock happens to be stale. The
+# canonical words still work. ``fail`` stays exact (no alias maps to it) so a
+# fail-closed CI gate is never reached by a truthy value. Genuine typos still
+# raise (fail-loud), now with the accepted spellings named in the message.
+_UPDATE_APPLY_ALIASES = frozenset({"apply", "1", "true", "yes", "y", "on"})
+_UPDATE_SKIP_ALIASES = frozenset({"skip", "0", "false", "no", "n", "off"})
+
+
 def prompt_user_for_updates(pending_updates):
     """Resolve the apply / skip / fail decision for ``pending_updates``.
 
@@ -371,22 +381,29 @@ def prompt_user_for_updates(pending_updates):
     precedence over the env var). Interactivity is not reintroduced; the
     pre-v0.6.0 TTY-Y/N prompt has been retired.
 
-    - ``apply`` (default when env unset) → ``"apply"``.
-    - ``skip`` → ``"skip"``.
+    Value handling (v0.7.6, anywhere-agents#12): matching is
+    case-insensitive and ignores surrounding whitespace.
+
+    - ``apply`` / ``1`` / ``true`` / ``yes`` / ``y`` / ``on`` (and the
+      unset or empty default) → ``"apply"``.
+    - ``skip`` / ``0`` / ``false`` / ``no`` / ``n`` / ``off`` → ``"skip"``.
     - ``fail`` → raises :class:`PackLockDriftAborted` so CI paths can
-      fail closed when drift is unacceptable.
-    - any other value → :class:`ValueError` (fail-loud on typos).
+      fail closed when drift is unacceptable. Only the exact word ``fail``
+      triggers this; no truthy/falsy alias maps to it.
+    - any other value → :class:`ValueError` (fail-loud on typos), with the
+      accepted spellings named in the message.
     """
-    mode = os.environ.get("ANYWHERE_AGENTS_UPDATE", "apply")
-    if mode == "apply":
+    raw = os.environ.get("ANYWHERE_AGENTS_UPDATE", "apply")
+    mode = raw.strip().lower()
+    if mode == "" or mode in _UPDATE_APPLY_ALIASES:
         return "apply"
-    if mode == "skip":
+    if mode in _UPDATE_SKIP_ALIASES:
         return "skip"
     if mode == "fail":
         raise PackLockDriftAborted(pending_updates)
     raise ValueError(
-        f"unknown ANYWHERE_AGENTS_UPDATE value: {mode!r} "
-        "(expected one of: apply, skip, fail)"
+        f"unknown ANYWHERE_AGENTS_UPDATE value: {raw!r} (expected "
+        "apply/1/true/yes/y/on, skip/0/false/no/n/off, or fail)"
     )
 
 

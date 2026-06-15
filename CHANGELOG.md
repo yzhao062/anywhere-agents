@@ -11,6 +11,28 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.6] — 2026-06-14
+
+Patch release: bundles the `implement-review` review-depth and reviewer-channel work (on `main` since v0.7.5) with two `anywhere-agents` issue fixes (#12 composer crash on `=1`, #13 router extension point for consuming repos).
+
+### Added
+
+- **Code-review lens gains depth dimensions.** The `implement-review` code lens in `references/review-lenses.md` now covers complexity and over-engineering (YAGNI, speculative configurability, single-implementation indirection), long-term maintainability for durable code (hidden coupling, magic constants, implicit invariants, debuggability), and temporary-artifact hygiene (debug prints, commented-out code, dead scaffolding, scratch and backup files, stray TODOs). The maintainability dimension is down-weighted for short-lived code, and the lens states its longevity assumption.
+- **Reviewers may parallelize and web-verify (opt-in, capability-gated).** The review prompt now invites a reviewer whose runtime supports it to parallelize a large multi-file review across sub-agents, and to use web search to confirm any finding that rests on a checkable external fact (citation, link, library or API behavior, version) before asserting it. The headless Claude reviewer backend (`dispatch-claude`) gains the built-in `WebSearch` and `WebFetch` tools; the empty-MCP isolation still holds because those are built-in tools, not MCP servers. The Copilot fallback backend stays offline by design (its `url()` permission is all-or-nothing, too broad for an auto-launched reviewer) and a contract test pins that.
+- **Router extension point for consuming repos** (anywhere-agents#13). `my-router` now consults a bootstrap-proof consumer-local routing file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`) and merges those rows on top of the shipped table, with local rows winning on conflict. The prior "extend it in your fork (or in consuming projects)" guidance pointed at on-disk router copies that every bootstrap and `pack verify --fix` reverts, so a consuming repo had no durable place to register a project-local skill with the router.
+
+### Fixed
+
+- **`ANYWHERE_AGENTS_UPDATE=1` no longer aborts compose** (anywhere-agents#12). `compose_packs.py prompt_user_for_updates()` now accepts common truthy spellings (`1`, `true`, `yes`, `y`, `on`, plus the unset or empty default) as `apply`, and falsy spellings (`0`, `false`, `no`, `n`, `off`) as `skip`, case-insensitively and whitespace-trimmed. Previously any value other than the exact words `apply`, `skip`, or `fail` raised a `ValueError` and stopped composition, so a natural `=1` crashed with a raw traceback on the one consumer whose pack-lock happened to be stale. The exact word `fail` still raises `PackLockDriftAborted`; no truthy or falsy alias maps to that fail-closed path. Genuine typos still raise `ValueError`, now naming every accepted spelling. The wheel-bundled composer mirror is updated byte-identically and six regression tests pin the behavior.
+- **Check 8 dispatch-tail scan cuts its near-100% false-positive rate.** The `implement-review` Auto-terminal health-check gains a line-level echo classifier (it strips line-numbered source citations and literal regex-source lines while preserving every real failure line) plus an intrinsic and generic two-tier split. Intrinsic failure forms such as HTTP or status 429/5xx and the Windows 1312 sandbox-runner error count on their own; generic words such as a bare "rate limit" count only when an error-frame token sits on the same or an adjacent line. A self-referential review that only echoes the failure vocabulary stops tripping the warning, while a real terminal, OS, or network failure still surfaces.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.5 -> 0.7.6
+- npm `anywhere-agents` `package.json` `version`: 0.7.5 -> 0.7.6
+
+SemVer: 0.7.5 -> 0.7.6, released as a patch. Reviewer-depth and channel additions to a shipped skill plus two robustness fixes; no API or pack-manifest schema change.
+
 ## [0.7.5] — 2026-06-13
 
 Patch release: closes three `agent-config` issues and bumps the bundled `agent-style` pin to `v0.3.6` so the default composer pin matches the shipped RULE-07 pack.
@@ -870,7 +892,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.2...v0.7.3

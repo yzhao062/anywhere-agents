@@ -1,6 +1,6 @@
 ---
 name: my-router
-description: Context-aware router that detects work type and dispatches to the right skill. Ships with a minimal default routing table; extend it in your fork with your own skill entries.
+description: Context-aware router that detects work type and dispatches to the right skill. Ships with a minimal default routing table; extend it in a fork, or register project-local skills in a consuming repo via routing-table.local.md or an AGENTS.local.md Routing section.
 ---
 
 # My Router
@@ -9,7 +9,7 @@ description: Context-aware router that detects work type and dispatches to the r
 
 A routing layer that sits between the outer workflow (e.g., `superpowers` brainstorm/plan/execute/verify) and domain skills. The router reads the working directory, file types, and user prompt to decide which skill to invoke, so the user does not need to remember skill names.
 
-In this repo's shipped form, the routing table has concrete entries for the four shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, plus `my-router` itself). It is also designed as a **pattern you extend**: add entries for your own skills (whether local to your fork of this repo or local to a consuming project) and the router will dispatch to them.
+In this repo's shipped form, the routing table has concrete entries for the four shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, plus `my-router` itself). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
 
 ## When to Use Superpowers vs. Direct Dispatch
 
@@ -32,11 +32,11 @@ When superpowers is not active (direct dispatch or quick task), the router works
 
 ## How Routing Works
 
-At dispatch time, the router checks three signals in order:
+At dispatch time, the router checks three signals in order (keywords, file types, project structure). In a consuming project, before applying the shipped table below, it first merges any **consumer-local routing extensions**: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. These two files survive bootstrap (the shipped table does not), so they are where a consuming repo registers its own skills; on a keyword or file-type conflict, the local row wins. See [Extending the Router](#extending-the-router).
 
 ### 1. Prompt keywords (highest priority)
 
-The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, and `readme-polish`. Extend it in your fork with entries for your own skills.
+The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, and `readme-polish`. Add entries for your own skills in your fork's `references/routing-table.md`, or, in a consuming project, in a bootstrap-proof local file (see [Extending the Router](#extending-the-router)).
 
 See [`references/routing-table.md`](references/routing-table.md) for the current table and the extension template.
 
@@ -69,13 +69,25 @@ If a project-local skill matches the task better than a pack-deployed or bootstr
 
 ## Extending the Router
 
-To add a new skill to the router's dispatch table:
+Where you register a new skill depends on whether you own this repo or only consume it. The mechanism is the same: a routing row keyed on prompt keywords, file types, and directory hints. Only the location differs, and it must survive your config-refresh path.
 
-1. Add the skill directory under `skills/<your-skill>/` (in your fork of this repo, or in a consuming project's own `skills/`)
-2. Add a row to `references/routing-table.md` with keywords, file types, and directory hints
-3. Add a matching `.claude/commands/<your-skill>.md` pointer file so Claude Code can invoke it directly
+**In a fork of this repo** (you own the shipped table):
 
-The router will pick up the new entry on the next session.
+1. Add the skill directory under `skills/<your-skill>/`.
+2. Add a row to `references/routing-table.md`.
+3. Add a matching `.claude/commands/<your-skill>.md` pointer so Claude Code can invoke it directly.
+
+**In a consuming project** (this skill arrives via bootstrap or `anywhere-agents pack install`):
+
+Do **not** edit `references/routing-table.md` here. Every on-disk copy (`.agent-config/repo/skills/my-router/`, `.claude/skills/my-router/`) is overwritten on the next bootstrap or `pack verify --fix`. Register your skill where bootstrap never reaches:
+
+1. Add the skill directory under `skills/<your-skill>/` (project-local, bootstrap-proof by construction).
+2. Register its routing in **either** of these bootstrap-proof files:
+   - `routing-table.local.md` at the repo root, using the same table format as `references/routing-table.md`; or
+   - a `## Routing` section in `AGENTS.local.md`, convenient when you already keep project overrides there.
+3. Optionally add a project-local `.claude/commands/<your-skill>.md` pointer. The bootstrap copy step is non-destructive and never deletes command files absent from upstream, so a consumer-only pointer survives.
+
+At dispatch time the router merges these local rows on top of the shipped table; on a keyword or file-type conflict, the local entry wins. Both `routing-table.local.md` and `AGENTS.local.md` sit outside the set of files bootstrap rewrites, so the registration persists across refreshes.
 
 ## Combining with Implement-Review
 
@@ -103,4 +115,4 @@ See `implement-review/SKILL.md` for the review loop protocol.
 → Router detects: keyword "polish README" → dispatches to `readme-polish`.
 
 **User says:** (anything else, shipped router has no rule)
-→ Router falls through to superpowers or general agent behavior. Add more rules by editing `references/routing-table.md`.
+→ Router falls through to superpowers or general agent behavior. Add more rules in `references/routing-table.md` (in a fork) or in `routing-table.local.md` / an `AGENTS.local.md` `## Routing` section (in a consuming project).
