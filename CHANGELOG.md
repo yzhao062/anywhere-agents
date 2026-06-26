@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Added
+
+- **`prun` parallel-delegation skill.** A new shared skill that lets the coordinating session fan a task out into independent units that run in parallel on Codex (`codex exec`) and Sonnet workers, so the heavy work spends Codex and Sonnet quota rather than the coordinator's. Units may read or write code; code-writing units run inside a throwaway local clone with its remote removed, so a worker cannot commit or push to the real repository. The coordinator gathers each unit's result and diff, integrates the wanted changes, and asks before any commit. Ships `scripts/dispatch-task.{sh,ps1}` for Codex dispatch and `scripts/gather.{sh,ps1}` for result collection, with `tests/test_dispatch_task.py` and `tests/test_gather.py` covering both.
 
 ## [0.7.6] — 2026-06-14
 
