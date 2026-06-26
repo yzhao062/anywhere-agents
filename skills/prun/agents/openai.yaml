@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prun"
+  short_description: "Fan a task out to parallel Codex and Sonnet workers while the coordinator only integrates"
+  default_prompt: "Use $prun to fan a task into independent units that run in parallel on Codex (codex exec) and Sonnet workers while the coordinating session only decomposes, gathers each result, reviews each diff, and integrates. Workers never commit or push: code-writing units run in a throwaway local clone with its remote removed. Look for the skill at skills/prun/SKILL.md first, then .claude/skills/prun/SKILL.md, then .agent-config/repo/skills/prun/SKILL.md. Read the dispatch-task and gather scripts under scripts/ at the same path."

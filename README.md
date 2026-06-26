@@ -291,7 +291,7 @@ The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the
 
 Full reference lives at **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**:
 
-- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`)
+- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `prun`, `readme-polish`)
 - `AGENTS.md` section-by-section reference
 - Customization guide (fork, override, extend)
 - FAQ, troubleshooting, platform notes (Windows, macOS, Linux)

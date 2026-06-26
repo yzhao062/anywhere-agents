@@ -28,7 +28,7 @@ CODEX_MD = ROOT / "agents" / "codex.md"
 GENERATOR_SCRIPT = SCRIPTS_DIR / "generate_agent_configs.py"
 SESSION_HOOK_SCRIPT = SCRIPTS_DIR / "session_bootstrap.py"
 
-SHIPPED_SKILLS = {"implement-review", "my-router", "ci-mockup-figure", "readme-polish"}
+SHIPPED_SKILLS = {"implement-review", "my-router", "ci-mockup-figure", "prun", "readme-polish"}
 
 
 def read_text(path: Path) -> str:
