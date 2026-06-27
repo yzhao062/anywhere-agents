@@ -168,4 +168,34 @@ if (Test-Path -LiteralPath $tailPath -PathType Leaf) {
     }
 }
 
+# Result-loss backstop: if the unit did not write a non-empty result file (a
+# worker's own result-write can fail, e.g. a fragile nested-PowerShell heredoc),
+# salvage the captured tail into the result file so the unit is never SILENTLY
+# missing when gather polls. The orchestrator still gets a non-empty result; the
+# FALLBACK header flags that the structured result is absent and the body is raw
+# worker output to review or re-dispatch.
+$resultEmpty = $true
+if (Test-Path -LiteralPath $ResultFile -PathType Leaf) {
+    if ((Get-Item -LiteralPath $ResultFile).Length -gt 0) { $resultEmpty = $false }
+}
+if ($resultEmpty) {
+    try {
+        $tailText = if (Test-Path -LiteralPath $tailPath -PathType Leaf) { [System.IO.File]::ReadAllText($tailPath) } else { '' }
+        $fallback = "# $UnitId result (FALLBACK, worker wrote no result file)`n" +
+            "Conclusion: INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below.`n" +
+            "Files: unknown`n" +
+            "Open items: worker did not write its result file; review the raw output below or re-dispatch this unit.`n" +
+            "Verification: none (salvaged by dispatch-task, not by the worker)`n`n" +
+            $tailText
+        $resultDir = Split-Path -Parent $ResultFile
+        if ($resultDir -and -not (Test-Path -LiteralPath $resultDir)) {
+            New-Item -ItemType Directory -Path $resultDir -Force | Out-Null
+        }
+        $utf8NoBomResult = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($ResultFile, $fallback, $utf8NoBomResult)
+    } catch {
+        # best-effort backstop; nothing more to do if even this salvage write fails
+    }
+}
+
 exit $codexExit

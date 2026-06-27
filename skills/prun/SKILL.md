@@ -39,9 +39,17 @@ Rule: **units never run on Opus.** Pick Codex or Sonnet per unit by fit.
 
 ## Concurrency
 
-Launch **as many units as the task needs**: a dozen-plus in parallel is normal. The only real
-bounds are local CPU/RAM and Codex quota headroom. Queue beyond what the machine handles
-comfortably; do not cap artificially.
+The orchestrator decides the unit count autonomously. Partition the task by **dependency
+structure** (split only along genuinely independent boundaries) and **balanced workload**
+(roughly equal-sized units, each worth a full worker run). High autonomy is the intent: do not
+target a fixed number, and do not cap artificially. A dozen-plus in parallel is fine when the
+task genuinely decomposes that way.
+
+Two soft bounds, not hard rules: local CPU/RAM (heavy Codex workers contend past roughly a
+handful at once, and the excess just queues) and Codex quota headroom. The usual real ceiling is
+**integration bandwidth**, since the orchestrator must read and reconcile every result, so
+prefer fewer well-scoped units over many tiny ones. Over-splitting into trivial units wastes
+worker startup and tends to produce thin results.
 
 ## What a unit may do, and the one rule
 
@@ -82,7 +90,11 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
      additionally under Claude's `guard.py`, which already gates commit/push.
 5. **Gather**: `scripts/gather.{sh,ps1} <result-file> ...` until all land, or use the per-dispatch
    background-completion signals.
-6. **Integrate**: Opus reads each result plus each clone's `git diff`, merges the wanted changes into
+6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
+   must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
+   recover the worker's output from its `<state-dir>/tail` (dispatch-task also salvages the tail into
+   the result file automatically under a `FALLBACK` header), then re-dispatch or flag the user if it is
+   unusable. Then Opus reads each result plus each clone's `git diff`, merges the wanted changes into
    the real tree, runs verification, and **asks the user before any commit**.
 
 Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
@@ -95,6 +107,9 @@ scripts/dispatch-task.sh --prompt-file <prompt> --result-file <abs result> --uni
 ```
 
 - Emits exactly one stdout line `STATE-DIR <abs-path>`; codex stdout+stderr land in `<state-dir>/tail`.
+- If the worker exits without writing a non-empty result file, dispatch-task salvages its captured
+  `<state-dir>/tail` into the result file under a `FALLBACK` header, so a failed result-write never
+  makes the unit silently vanish at gather. Treat a `FALLBACK` result as "review or re-dispatch."
 - Runs codex from a per-unit working dir: a scratch dir by default (read-only units), or the path in
   `PRUN_SCRATCH_CWD` (point this at a throwaway clone for code-writing units).
 - Env: `CODEX_DISPATCH_SANDBOX` (default `danger-full-access`), `CODEX_DISPATCH_REASONING` (default

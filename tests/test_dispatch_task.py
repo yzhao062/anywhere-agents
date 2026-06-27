@@ -61,6 +61,11 @@ with open(os.path.join(log_dir, "stdin"), "w", encoding="utf-8", newline="") as 
 with open(os.path.join(log_dir, "cwd"), "w", encoding="utf-8") as f:
     f.write(os.getcwd())
 
+result_target = os.environ.get("MOCK_CODEX_WRITE_RESULT")
+if result_target:
+    with open(result_target, "w", encoding="utf-8") as f:
+        f.write(os.environ.get("MOCK_CODEX_RESULT_CONTENT", "# worker result\nreal worker content\n"))
+
 sys.stdout.write(os.environ.get("MOCK_CODEX_STDOUT", "mock-codex: stdout\n"))
 sys.stderr.write(os.environ.get("MOCK_CODEX_STDERR", "mock-codex: stderr\n"))
 
@@ -130,6 +135,7 @@ class _DispatchTaskContractMixin:
     def _run_dispatch(
         self, cwd: Path, prompt_file: Path, result_file: str, unit_id: str,
         codex_bin: Path, log_dir: Path, exit_code: int = 0, timeout: float = 60.0,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CODEX_BIN"] = str(codex_bin)
@@ -138,6 +144,8 @@ class _DispatchTaskContractMixin:
         env["TMPDIR"] = str(cwd)
         env["TEMP"] = str(cwd)
         env["TMP"] = str(cwd)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             self._build_cmd(prompt_file, result_file, unit_id),
             cwd=str(cwd), env=env, capture_output=True, text=True,
@@ -228,6 +236,47 @@ class _DispatchTaskContractMixin:
             state_dir = _parse_state_dir(result.stdout)
             pre = (state_dir / "pre-mtime").read_text(encoding="utf-8").strip()
             self.assertEqual(pre, "0")
+
+    def test_fallback_salvages_tail_when_result_unwritten(self) -> None:
+        """If the worker exits without writing its result file, dispatch-task
+        salvages the captured tail into the result file (FALLBACK header) so the
+        unit is never silently missing when gather polls."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result_file = tmpdir / "result.md"  # the mock never writes this
+            res = self._run_dispatch(
+                tmpdir, prompt, str(result_file), "u_fb", codex, log_dir,
+                extra_env={"MOCK_CODEX_STDOUT": "WORKER-OUTPUT-MARKER\n"},
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue(result_file.exists(),
+                            "fallback must create the result file when the worker did not")
+            body = result_file.read_text(encoding="utf-8")
+            self.assertIn("FALLBACK", body, "salvaged result must be marked FALLBACK")
+            self.assertIn("u_fb", body, "fallback header must name the unit")
+            self.assertIn("WORKER-OUTPUT-MARKER", body,
+                          "fallback must salvage the worker's captured stdout from the tail")
+
+    def test_fallback_does_not_clobber_a_written_result(self) -> None:
+        """When the worker DOES write a non-empty result file, dispatch-task must
+        leave it untouched (no salvage clobber)."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result_file = tmpdir / "result.md"
+            real = "# u_ok result\nConclusion: genuine worker result\n"
+            res = self._run_dispatch(
+                tmpdir, prompt, str(result_file), "u_ok", codex, log_dir,
+                extra_env={
+                    "MOCK_CODEX_WRITE_RESULT": str(result_file),
+                    "MOCK_CODEX_RESULT_CONTENT": real,
+                },
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            body = result_file.read_text(encoding="utf-8")
+            self.assertEqual(body, real, "a worker-written result must survive untouched")
+            self.assertNotIn("FALLBACK", body)
 
     def test_codex_runs_from_scratch_cwd(self) -> None:
         """The Round-3 Medium: codex runs from a per-unit scratch dir under the

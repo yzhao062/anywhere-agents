@@ -147,4 +147,22 @@ CODEX_EXIT=$?
 
 tail -n 80 "$STATE_DIR/tail" >&2 2>/dev/null || true
 
+# Result-loss backstop: if the unit did not write a non-empty result file (a
+# worker's own result-write can fail, e.g. a fragile shell heredoc on Windows),
+# salvage the captured stdout+stderr into the result file so the unit is never
+# SILENTLY missing when gather polls. The orchestrator still gets a non-empty
+# result; the FALLBACK header flags that the structured result is absent and the
+# body is raw worker output to review or re-dispatch.
+if [ ! -s "$RESULT_FILE" ]; then
+    mkdir -p "$(dirname "$RESULT_FILE")" 2>/dev/null || true
+    {
+        printf '# %s result (FALLBACK, worker wrote no result file)\n' "$UNIT_ID"
+        printf 'Conclusion: INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below.\n'
+        printf 'Files: unknown\n'
+        printf 'Open items: worker did not write its result file; review the raw output below or re-dispatch this unit.\n'
+        printf 'Verification: none (salvaged by dispatch-task, not by the worker)\n\n'
+        cat "$STATE_DIR/tail" 2>/dev/null || true
+    } > "$RESULT_FILE" 2>/dev/null || true
+fi
+
 exit "$CODEX_EXIT"
