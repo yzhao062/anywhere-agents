@@ -9,9 +9,20 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-06-27
+
 ### Added
 
 - **`prun` parallel-delegation skill.** A new shared skill that lets the coordinating session fan a task out into independent units that run in parallel on Codex (`codex exec`) and Sonnet workers, so the heavy work spends Codex and Sonnet quota rather than the coordinator's. Units may read or write code; code-writing units run inside a throwaway local clone with its remote removed, so a worker cannot commit or push to the real repository. The coordinator gathers each unit's result and diff, integrates the wanted changes, and asks before any commit. Ships `scripts/dispatch-task.{sh,ps1}` for Codex dispatch and `scripts/gather.{sh,ps1}` for result collection, with `tests/test_dispatch_task.py` and `tests/test_gather.py` covering both. Its web-access guidance routes a content fetch that a cloud fetcher may be blocked on to a Codex unit, which runs on the user's local machine and may reach the page from a local or residential-network IP, while Sonnet's `WebSearch` stays the path for broad discovery.
+- **`prun` active stall monitoring plus a result-loss backstop (issue #5).** `dispatch-task.{sh,ps1}` now salvages a worker's raw output into its result file when the worker writes no structured result, so a dispatched unit is never silently lost, and records its dispatch PID for liveness. A new `monitor.{sh,ps1}` runs in the background and completes on the first actionable event (all units done, any stall, or any failure), waking the turn-based coordinator that would otherwise stay idle while a unit hangs. `tests/test_monitor.py` covers the done, fallback, stall, dead-dispatch, mixed, and timeout paths. `SKILL.md` adds a reconcile-before-integrate step and dependency-based autonomous concurrency guidance.
+- **`prun` registered in the `aa-core-skills` pack.** prun now composes into `.claude/skills/prun/` on claude-code consumers like the other four core skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`), instead of resolving only through the bootstrap fetch cache. Its skill directory and command pointer join the wheel-bundled composer mirror at `packages/pypi/anywhere_agents/composer/`, and `scripts/check-parity.sh` gains prun in its shared-skill and wheel-mirror lists.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.6 -> 0.7.7
+- npm `anywhere-agents` `package.json` `version`: 0.7.6 -> 0.7.7
+
+SemVer: 0.7.6 -> 0.7.7, released as a patch. Adds prun's monitor and backstop (on `main` since v0.7.6) and registers prun into the existing `aa-core-skills` pack; no pack-manifest schema change and no change to the other packs.
 
 ## [0.7.6] — 2026-06-14
 
@@ -894,7 +905,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.6...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.7...HEAD
+[0.7.7]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.3...v0.7.4

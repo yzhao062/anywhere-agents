@@ -27,9 +27,9 @@ packs:
 
   - name: aa-core-skills
     description: >
-      Core skills bundled with anywhere-agents. Ships the four
+      Core skills bundled with anywhere-agents. Ships the five
       shipped-skill directories (implement-review, my-router,
-      ci-mockup-figure, readme-polish) plus their .claude/commands/
+      ci-mockup-figure, readme-polish, prun) plus their .claude/commands/
       pointer files. The pointer files remain in the aa source tree
       during v0.4.0 (see pack-architecture.md § "Pack-emitted command
       pointers") and are pack-emitted to consumer's .claude/commands/
@@ -61,3 +61,9 @@ packs:
             to: .claude/skills/readme-polish/
           - from: .claude/commands/readme-polish.md
             to: .claude/commands/readme-polish.md
+      - kind: skill
+        files:
+          - from: skills/prun/
+            to: .claude/skills/prun/
+          - from: .claude/commands/prun.md
+            to: .claude/commands/prun.md

@@ -23,7 +23,7 @@
 #               composer-aware version; ac's bootstrap snippet still
 #               curls from ac but the file served is now byte-identical
 #               to aa and includes the AC->AA migration block),
-#               skills/{implement-review,ci-mockup-figure,readme-polish}
+#               skills/{implement-review,ci-mockup-figure,readme-polish,prun}
 #               as recursive trees, and the shared-contract test files
 #               tests/test_{dispatch_codex,dispatch_copilot,dispatch_claude,
 #               health_check,guard,session_bootstrap,pointer_files,
@@ -52,7 +52,7 @@
 #               generate_agent_configs.py, bootstrap/packs.yaml,
 #               scripts/packs/ recursive (excluding __pycache__/),
 #               skills/{implement-review,my-router,ci-mockup-figure,
-#               readme-polish}/ recursive, and the four shipped
+#               readme-polish,prun}/ recursive, and the five shipped
 #               .claude/commands/*.md pointers. v0.6.0 promotes this
 #               from the v0.5.x manual diff -rq gate to a release gate.
 #
@@ -185,7 +185,7 @@ done
 
 # ---- STRICT: shared skills (recursive; my-router excluded - BY-DESIGN) ----
 printf '\n== shared skills (recursive byte-identical) ==\n'
-for skill in implement-review ci-mockup-figure readme-polish; do
+for skill in implement-review ci-mockup-figure readme-polish prun; do
   if [ ! -d "$AC_ROOT/skills/$skill" ] || [ ! -d "$AA_ROOT/skills/$skill" ]; then
     fail "skills/$skill/ (missing on one side)"
     continue
@@ -228,6 +228,7 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
     .claude/commands/my-router.md
     .claude/commands/ci-mockup-figure.md
     .claude/commands/readme-polish.md
+    .claude/commands/prun.md
   )
   for f in "${aa_internal_files[@]}"; do
     src="$AA_ROOT/$f"
@@ -257,7 +258,7 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
     fi
   fi
   # skills/{implement-review,my-router,ci-mockup-figure,readme-polish}/
-  for skill in implement-review my-router ci-mockup-figure readme-polish; do
+  for skill in implement-review my-router ci-mockup-figure readme-polish prun; do
     if [ ! -d "$AA_ROOT/skills/$skill" ] || [ ! -d "$AA_MIRROR/skills/$skill" ]; then
       fail "skills/$skill/ (missing on one side: aa source vs wheel mirror)"
       continue
