@@ -15,7 +15,7 @@ gathers their results, reviews their diffs, and integrates. It never runs a unit
 constrained Claude "All models" weekly bucket pays only for coordination.
 
 Mix freely. A combination of Codex and Sonnet often beats all-Codex, by efficiency or by playing
-to each one's strengths (gpt-5.5 on Codex is stronger; Sonnet is cheaper and shares the Claude
+to each one's strengths (the Codex model is stronger; Sonnet is cheaper and shares the Claude
 session).
 
 ## Relationship to the native Workflow tool
@@ -60,7 +60,16 @@ or a unit's result cannot be checked without redoing it.
 | Sonnet subagent | Claude side, own weekly bucket; cheaper than Opus | Secondary, mixable. Runs in the Claude session (its tools / MCP / context). |
 | Opus (this session) | Claude "All models" weekly bucket (constrained) | Coordinator and integrator only. Never a unit. |
 
-Rule: **units never run on Opus.** Pick Codex or Sonnet per unit by fit.
+Rule: **units never run on Opus.** Pick the executor by unit difficulty and quota:
+
+- **Sonnet** is the cheap default for routine units (summaries, surveys, mechanical edits, light
+  research), when its capability is enough.
+- **Codex** is the high-capability tier: its frontier model is comparable to Opus and its quota is
+  separate and abundant, so it is both the default for hard reasoning or heavy code AND the place to
+  **escalate a unit Sonnet cannot handle**. When a unit is too hard for Sonnet, move it to Codex.
+- **Opus stays the coordinator, never a unit.** Promoting a hard unit onto Opus would spend the
+  constrained Anthropic bucket this whole design protects, so the escalation ceiling for a unit is
+  Codex, not Opus.
 
 ## Concurrency
 
@@ -114,8 +123,13 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
    - Sonnet unit: spawn a background Agent subagent with `model: sonnet` and web-capable tools
      (Read/Write/Edit/Bash/WebSearch/WebFetch). For code-writing it works in a clone too, and is
      additionally under Claude's `guard.py`, which already gates commit/push.
-5. **Gather**: `scripts/gather.{sh,ps1} <result-file> ...` until all land, or use the per-dispatch
-   background-completion signals.
+5. **Monitor (do not go idle)**: launch `scripts/monitor.{sh,ps1} <state-dir> ...` in the background
+   (`run_in_background=true`) and wait on its completion. It wakes you on the first actionable event:
+   all done, any unit **stalled** (tail no-growth for `PRUN_STALL_THRESHOLD`, default 10 min), or any
+   unit **failed** (`FALLBACK` result or dead dispatch), printing a per-unit digest. On a stall,
+   surface it to the user with a likely cause (capacity or concurrency pressure; suggest lowering the
+   worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on the
+   still-running units until all are done. (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
 6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
    recover the worker's output from its `<state-dir>/tail` (dispatch-task also salvages the tail into
@@ -159,6 +173,24 @@ scripts/gather.sh <result-file-1> <result-file-2> ...
   (default 10s); no startup-snapshot race.
 - **Use a fresh result path per unit per run** (delete any stale file before dispatch). Have each unit
   write its result in one operation.
+
+## monitor usage
+
+```
+scripts/monitor.sh <state-dir-1> <state-dir-2> ...
+```
+
+- Takes the `STATE-DIR` paths from each dispatch (not result files); reads each unit's `tail` (growth),
+  `result-file` (done/fail), and `dispatch-pid` (liveness).
+- Prints `MONITOR-START units=N stall-threshold=Ts timeout=Ss`, then on the first actionable event
+  `MONITOR-EVENT <all-done|stall|fail|timeout>` and one `UNIT <name> <status>` line per unit (`done` /
+  `failed(fallback)` / `failed(dispatch-dead)` / `stalled(Ns)` / `growing`).
+- Exit: `0` all done, `3` attention needed (a stall or fail), `2` hard timeout.
+- Env: `PRUN_STALL_THRESHOLD` (default 600, ten minutes; raise it for long code-writing units),
+  `PRUN_MONITOR_POLL` (default 15), `PRUN_MONITOR_TIMEOUT` (default 3600), `PRUN_MONITOR_STABLE_WINDOW`
+  (default 10).
+- Run it in the background; after handling a stall or fail, re-launch on the still-running units so a
+  resolved unit is not re-flagged.
 
 ## Return contract (every unit writes this)
 

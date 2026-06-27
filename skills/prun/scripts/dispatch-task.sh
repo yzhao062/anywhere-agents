@@ -117,6 +117,9 @@ fi
 printf '%s\n' "$PRE_MTIME" > "$STATE_DIR/pre-mtime"
 date +%s > "$STATE_DIR/timestamp"
 printf '%s\n' "$RESULT_FILE" > "$STATE_DIR/result-file"
+# Record this dispatcher's PID so monitor.sh can tell a stalled-but-alive unit
+# from a dead dispatch (killed mid-run) that will never produce a result.
+printf '%s\n' "$$" > "$STATE_DIR/dispatch-pid"
 
 # Emit STATE-DIR on stdout (first and only machine-readable line).
 printf 'STATE-DIR %s\n' "$STATE_DIR"

@@ -107,6 +107,9 @@ if (Test-Path -LiteralPath $ResultFile -PathType Leaf) {
 $nowUnix = [int]([DateTimeOffset]::UtcNow).ToUnixTimeSeconds()
 [System.IO.File]::WriteAllText((Join-Path $stateDir 'timestamp'), "$nowUnix`n")
 [System.IO.File]::WriteAllText((Join-Path $stateDir 'result-file'), "$ResultFile`n")
+# Record this dispatcher's PID so monitor.ps1 can tell a stalled-but-alive unit
+# from a dead dispatch (killed mid-run) that will never produce a result.
+[System.IO.File]::WriteAllText((Join-Path $stateDir 'dispatch-pid'), "$PID`n")
 
 [Console]::Out.WriteLine("STATE-DIR $stateDir")
 [Console]::Out.Flush()
