@@ -18,6 +18,31 @@ Mix freely. A combination of Codex and Sonnet often beats all-Codex, by efficien
 to each one's strengths (gpt-5.5 on Codex is stronger; Sonnet is cheaper and shares the Claude
 session).
 
+## Relationship to the native Workflow tool
+
+The native Workflow tool fans a task out across **Claude** subagents under a deterministic script,
+with structured output, judge panels, and resume. A Workflow run counts against the Anthropic plan's
+usage and rate limits, and its agents use the session model unless the script routes a stage to a
+different Claude model.
+
+`prun` has a different quota shape. A **Codex** unit is dispatched by a shell call to `codex exec`,
+so that unit spends the separate Codex account. A **Sonnet** unit still runs on Claude and spends
+Claude-side quota, although it can be cheaper than Opus. The coordinating session also spends a
+small Anthropic amount while it decomposes, dispatches, reads results, and integrates.
+
+The two relate in two ways, both with the current session as the orchestrator:
+
+- **Substitute (quota).** When the Anthropic pool is too constrained to run a Workflow, use prun
+  with Codex-only units, or keep any Sonnet units small and targeted. This shifts the heavy fan-out
+  to Codex while leaving only the coordinator and any chosen Sonnet work in the Anthropic pool.
+- **Complement (diversity).** When a Workflow is affordable and you want cross-vendor perspectives,
+  run a Claude panel through the Workflow and a Codex panel through prun. Use the same structured
+  contract and the same question on both sides, then cross-check. Agreement across vendors is usually
+  a stronger signal than agreement inside one model family, because shared model lineage and tools
+  can share blind spots. Invoke them together in one natural-language request; no special mode is
+  needed. Reserve this for high-stakes work (a review, an audit, a hard design call), since it spends
+  both pools and the coordinator must merge two result sets.
+
 ## When to use
 
 Use `prun` when the task splits into **independent units that can run at once** (different
@@ -82,6 +107,7 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
    working dir is a throwaway clone to edit freely but **not** commit or push; that the unit writes
    a result summary to its result file (a fresh path, in one write).
 3. **Assign**: pick Codex or Sonnet per unit, and read-only (scratch) or code-writing (clone) mode.
+   For a web-heavy unit, "Web access" below covers which executor fits.
 4. **Dispatch in parallel**:
    - Codex unit: run `scripts/dispatch-task.{sh,ps1}` in the background (Bash tool,
      `run_in_background=true`). For a code-writing unit, pass the clone dir via `PRUN_SCRATCH_CWD`.
@@ -154,5 +180,35 @@ report progress and to relaunch only units whose result is missing or fails vali
 
 ## Web access
 
-Codex units get web via `--sandbox danger-full-access` (built-in browser path, confirmed under MCP
-isolation). Sonnet units need an `agentType` granting built-in `WebSearch` + `WebFetch`.
+Both executors reach the web by different paths, each with its own strengths, so assign per unit.
+
+**Codex** runs on the user's local machine, so its requests leave from the user's local network
+rather than the cloud fetcher's egress IP, often a residential IP. That can reach some pages a cloud
+fetcher gets `403` on, though a hardened site can still block on bot score, fingerprint, or rate. It
+also surfaces pages a cloud fetch would miss. Web access comes from `--sandbox danger-full-access`
+(built-in browser path, confirmed under MCP isolation). Codex quota is abundant, so the extra unit is
+cheap.
+
+**Sonnet** units get web from an `agentType` granting built-in `WebSearch` and `WebFetch`. Claude's
+`WebSearch` is good at broad discovery: finding the right page when the URL is unknown.
+
+Routing heuristic (a starting default, with Sonnet still a first-class web path):
+
+- **Fetch a known or likely-blocked URL** (a page a cloud fetch already failed on, or a site that
+  tends to block automated fetchers): prefer a **Codex** unit. The local network path is the reason.
+- **Search or discover** (the URL is unknown, or you need to survey what exists): route to a **Sonnet**
+  unit and its `WebSearch`, usually the better tool for the job.
+- **A fact that matters and might be blocked or stale**: run it on **both** and cross-check. The Codex
+  quota makes the redundancy nearly free, and two paths catch a one-sided block or an out-of-date page.
+
+A Codex web-fetch unit can use curl. Report the HTTP status per URL so a cloud-vs-local block shows
+up in the result. In Windows PowerShell, name the binary `curl.exe`, since a bare `curl` can resolve
+to the `Invoke-WebRequest` alias instead:
+
+```bash
+curl -sSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" -o <body-file> -w "%{http_code} %{url_effective}\n" <URL>
+```
+
+```powershell
+curl.exe -sSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" -o <body-file> -w "%{http_code} %{url_effective}\n" <URL>
+```
