@@ -1,6 +1,6 @@
 # Skills
 
-`anywhere-agents` ships four skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically based on prompt keywords, file types, and directory hints.
+`anywhere-agents` ships five skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically for routing-table matches; `prun` is invoked by explicit parallel fan-out intent.
 
 <div class="grid cards" markdown>
 
@@ -36,6 +36,14 @@
 
     [:octicons-arrow-right-24: Deep docs](readme-polish.md)
 
+-   :material-call-split:{ .lg .middle } &nbsp; __`prun`__
+
+    ---
+
+    Parallel delegation fan-out where Opus coordinates Codex and Sonnet workers that spend their separate quotas.
+
+    [:octicons-arrow-right-24: Deep docs](prun.md)
+
 </div>
 
 ## Skill lookup order
@@ -58,4 +66,4 @@ In a fork of `anywhere-agents`:
 3. Register the skill in `skills/my-router/references/routing-table.md` with triggering keywords, file types, and directory hints.
 4. Add regression tests where appropriate under `tests/`.
 
-See the four shipped skills for reference structure.
+See the five shipped skills for reference structure.

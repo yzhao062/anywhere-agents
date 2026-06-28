@@ -9,7 +9,7 @@ description: Context-aware router that detects work type and dispatches to the r
 
 A routing layer that sits between the outer workflow (e.g., `superpowers` brainstorm/plan/execute/verify) and domain skills. The router reads the working directory, file types, and user prompt to decide which skill to invoke, so the user does not need to remember skill names.
 
-In this repo's shipped form, the routing table has concrete entries for the four shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, plus `my-router` itself). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
+In this repo's shipped form, the routing table has concrete entries for the five shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, `my-router` itself, and `prun` for explicit parallel fan-out intent). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
 
 ## When to Use Superpowers vs. Direct Dispatch
 

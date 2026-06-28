@@ -12,7 +12,7 @@ Thank you for your interest. `anywhere-agents` is a curated, maintained configur
 ## What does not land upstream
 
 - **Feature requests that do not match the maintainer's workflow** — fork and implement in your own copy
-- **New skills** — the shipped skill set (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`) is deliberately curated. Add your own skills to your fork; the router is designed to be extended.
+- **New skills** — the shipped skill set (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`) is deliberately curated. Add your own skills to your fork; the router is designed to be extended.
 - **Style preferences that conflict with existing `AGENTS.md` defaults** — the defaults are the product. If you disagree, fork.
 - **Multi-agent expansion** — support for Cursor, Aider, Gemini CLI, etc. is out of scope for v1.x. Fork if you need it.
 - **Packaging work** (CLI, YAML manifest, web UI) — out of scope by design; see README.

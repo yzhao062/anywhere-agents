@@ -8,8 +8,9 @@
 | `my-router` | any task (this skill) | Detects context and dispatches to the right skill |
 | `ci-mockup-figure` | "mockup", "HTML figure", "dashboard mockup", "timeline figure", "Gantt", "TikZ figure", "arrow routing" | Build HTML mockups of systems, dashboards, and timelines, then capture as space-efficient PNG/PDF figures; use TikZ or skia-canvas for abstract diagrams needing arrow routing |
 | `readme-polish` | "polish README", "modernize README", "README audit", "README rewrite", "README badges", "README hero image" | Audit a GitHub README and rewrite using modern 2025-2026 patterns (centered header, badges, hero image, GitHub alert callouts, emoji feature bullets, collapsibles, Mermaid diagrams) |
+| `prun` | explicit parallel delegation / fan-out intent; not auto-routed by file type | Fan out independent task units to Codex and Sonnet workers while the Opus session coordinates; workers spend separate quotas and never commit or push |
 
-The shipped routing table covers the four skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
+The shipped routing table covers the five skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
 
 ## Extension Template
 

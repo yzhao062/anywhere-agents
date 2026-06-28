@@ -8,7 +8,7 @@ anywhere-agents ships two composition layers. They are independent; a project ca
 
 | Layer | Mechanism | Examples |
 |---|---|---|
-| **Skill pack** | On-demand, invoked via the `Skill` tool when the agent routes to it | `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish` |
+| **Skill pack** | On-demand, invoked via the `Skill` tool when the agent routes to it | `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun` |
 | **Rule pack** | Always-on; injected into `AGENTS.md` at bootstrap time so every prompt sees the content | `agent-style` (writing rules). Future candidates: `agent-security`, `agent-research-ethics` |
 
 Rule packs are the right fit when the content should apply to every interaction (writing discipline, banned words, formatting defaults). Skill packs are the right fit for workflows the agent invokes explicitly (code review, README polish).
@@ -98,7 +98,7 @@ A rule pack is a public GitHub repo that exposes:
 
 4. **Optional README cross-reference.** The pack's README should link to `docs/rule-pack.md` so readers know what anywhere-agents fetches.
 
-For a complete reference example that follows all four conventions, see [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack). It declares three packs in the v2 manifest format (two passive rule packs and one active skill pack queued for v0.5.0), ships the matching content at the conventional paths, and documents the v0.4.0-vs-v0.5.0 loadability split honestly. Fork it as a starting point for your own pack repo.
+For a complete reference example that follows all four conventions, see [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack). It declares three packs in the v2 manifest format (two passive rule packs and active `acad-skills` with four academic-writing skills), ships the matching content at the conventional paths, and can be forked as a starting point for your own pack repo.
 
 ## Composition flow
 

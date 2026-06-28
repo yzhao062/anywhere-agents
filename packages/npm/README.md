@@ -23,7 +23,7 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 
 - Fetches `AGENTS.md` and replaces the local copy
 - Sparse-clones the upstream repo into `.agent-config/`
-- Syncs the shipped skills (`implement-review`, `my-router`) and their Claude Code command pointers
+- Syncs the five shipped skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`) and their Claude Code command pointers
 - Deep-merges project-level `.claude/settings.json`
 - Deploys the safety guard hook to `~/.claude/hooks/guard.py` and the Claude Max + Codex quota statusLine to `~/.claude/statusline.py`, and merges user-level permissions
 - Adds `.agent-config/` to `.gitignore`
@@ -31,7 +31,7 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 After bootstrap, every Claude Code session shows your live Claude Max + Codex 5h / weekly quota at the bottom of the terminal:
 
 ```text
-🤖 Opus 4.7 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+🤖 Opus 4.8 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
 ```
 
 All install logic lives in the shell bootstrap scripts at [`yzhao062/anywhere-agents/bootstrap/`](https://github.com/yzhao062/anywhere-agents/tree/main/bootstrap). This npm package is a thin CLI wrapper so that agents and users in a Node-first workflow can invoke the same mechanism without reaching for `curl`.

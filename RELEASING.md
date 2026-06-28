@@ -57,9 +57,10 @@ bash ../agent-config/scripts/check-parity.sh
 #      STRICT (must be byte-identical; any diff or missing file fails):
 #        scripts/{guard.py, session_bootstrap.py, generate_agent_configs.py, pre-push-smoke.sh,
 #        remote-smoke.sh}, .claude/settings.json, .githooks/pre-push,
-#        .github/workflows/{real-agent-smoke.yml, validate.yml}, .claude/commands/*.md for
-#        each of the 4 shipped skills, skills/{implement-review,ci-mockup-figure,readme-polish}
-#        recursive trees.
+#        .github/workflows/{real-agent-smoke.yml, validate.yml}, .claude/commands/*.md
+#        for all 5 shipped skills, and the STRICT skill trees (recursive)
+#        skills/{implement-review,ci-mockup-figure,readme-polish,prun}
+#        (skills/my-router is BY-DESIGN below).
 #      BY-DESIGN (expected to differ; both sides must exist; a +/- line delta is
 #      reported per file for eyeball):
 #        AGENTS.md (USC / Overleaf / PyCharm stripping),

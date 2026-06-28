@@ -98,6 +98,7 @@ nav:
       - skills/readme-polish.md
       - Copyable patterns: skills/references/patterns.md
       - Audit checklist: skills/references/checklist.md
+    - prun: skills/prun.md
   - AGENTS.md Reference: agents-md.md
   - FAQ: faq.md
   - Changelog: changelog.md

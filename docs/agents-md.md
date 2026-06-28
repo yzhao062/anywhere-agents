@@ -44,7 +44,7 @@ Full guide for registering Codex as an MCP server inside Claude Code. Covers:
 
 - One-time user-level registration (`claude mcp add codex -s user -- codex mcp-server -c approval_policy=never`).
 - Migration from older registrations.
-- Recommended Codex defaults for `config.toml` (gpt-5.4, `xhigh` reasoning, `fast` service tier).
+- Recommended Codex defaults for `config.toml` (gpt-5.5, `xhigh` reasoning, `fast` service tier).
 - Windows-specific gotchas (bash-style invocation, PATH issues, Bitdefender false positives).
 - Why Windows should prefer the terminal path over MCP until the Windows MCP story smooths out.
 
