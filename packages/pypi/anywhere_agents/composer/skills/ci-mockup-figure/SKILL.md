@@ -15,8 +15,8 @@ minimal page area. Three paths depending on figure type:
   timelines, and any figure where content is rectangular with no cross-node
   arrows. Build interactive HTML, capture screenshots, insert into LaTeX.
 - **README / Markdown hero path** (README / Markdown Target section): same
-  HTML build phase, but capture via headless Chrome to a PNG and embed with
-  `![alt](assets/fig.png)`. Requires larger type, higher content density, and
+  HTML build phase, but capture via headless Chrome to a PNG and embed it as a
+  Markdown image referencing `assets/fig.png`. Requires larger type, higher content density, and
   one dominant focal element -- the viewer scales the image down to column width.
 - **Abstract figure path** (Abstract Figure Toolchain section): for
   architecture overviews, dependency topologies, and any figure needing
@@ -563,9 +563,9 @@ See Capture gotchas (Phase 4) for SVG overflow and window-size pairing notes.
 
 ### Embedding
 
-```markdown
-![System overview](assets/fig.png)
-```
+Reference the captured PNG from the README using Markdown image syntax with a
+leading exclamation point: alt text in square brackets, then the relative path
+`assets/fig.png` in parentheses.
 
 No LaTeX environments. No `pdfcrop`. The PNG is the deliverable.
 
