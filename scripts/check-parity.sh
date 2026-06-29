@@ -139,7 +139,8 @@ done
 
 # ---- STRICT: shared-contract test files (pin runtime behavior of shared scripts) ----
 # These tests assert the public contract of shared scripts that are themselves
-# in STRICT (dispatch-codex, dispatch-copilot, health-check, guard, session
+# in STRICT (dispatch-codex, dispatch-copilot, dispatch-task + prun reap-watch,
+# health-check, guard, session
 # bootstrap event/banner state, on-disk shape of every committed
 # .claude/commands/*.md pointer, prompt body byte preservation, bootstrap
 # preflight). Before this block landed, tests/ was aa-local and drifted: aa
@@ -155,6 +156,7 @@ strict_test_files=(
   tests/test_dispatch_codex.py
   tests/test_dispatch_copilot.py
   tests/test_dispatch_claude.py
+  tests/test_dispatch_task.py
   tests/test_health_check.py
   tests/test_guard.py
   tests/test_session_bootstrap.py

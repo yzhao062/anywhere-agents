@@ -129,7 +129,10 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
    unit **failed** (`FALLBACK` result or dead dispatch), printing a per-unit digest. On a stall,
    surface it to the user with a likely cause (capacity or concurrency pressure; suggest lowering the
    worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on the
-   still-running units until all are done. (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
+   still-running units until all are done. `monitor` only observes; the unit's own `dispatch-task`
+   reaps a worker idle past `PRUN_STALL_THRESHOLD` at the same threshold, so a persistent stall
+   surfaces as a `FALLBACK` to re-dispatch rather than a leaked zombie. (`gather.{sh,ps1}` remains for
+   the plain wait-for-all case.)
 6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
    recover the worker's output from its `<state-dir>/tail` (dispatch-task also salvages the tail into
@@ -150,10 +153,19 @@ scripts/dispatch-task.sh --prompt-file <prompt> --result-file <abs result> --uni
 - If the worker exits without writing a non-empty result file, dispatch-task salvages its captured
   `<state-dir>/tail` into the result file under a `FALLBACK` header, so a failed result-write never
   makes the unit silently vanish at gather. Treat a `FALLBACK` result as "review or re-dispatch."
+- Self-heals a hung worker: if the tail stops growing for `PRUN_STALL_THRESHOLD` seconds (default
+  `600`; the same idle signal `monitor` reports) or the run exceeds `CODEX_DISPATCH_TIMEOUT` seconds
+  (default `0` = hard cap off, so the idle signal stays primary and an actively streaming long run is
+  not killed), dispatch-task kills the worker's whole process tree, exits `124`, and writes the
+  `FALLBACK` above naming `idle-stall` or `hard-timeout`. A non-empty result the worker already wrote
+  is preserved, never clobbered. On Windows the watch+kill runs in the sibling `reap-watch.ps1` (an
+  AMSI-safe split of launch from watch+kill; the `.sh` does it inline).
 - Runs codex from a per-unit working dir: a scratch dir by default (read-only units), or the path in
   `PRUN_SCRATCH_CWD` (point this at a throwaway clone for code-writing units).
 - Env: `CODEX_DISPATCH_SANDBOX` (default `danger-full-access`), `CODEX_DISPATCH_REASONING` (default
-  `xhigh`), `CODEX_DISPATCH_ISOLATE_MCP=off` to drop MCP isolation, `PRUN_SCRATCH_CWD` to set the cwd.
+  `xhigh`), `CODEX_DISPATCH_ISOLATE_MCP=off` to drop MCP isolation, `PRUN_SCRATCH_CWD` to set the cwd,
+  `PRUN_STALL_THRESHOLD` (default `600`) for the idle-reap threshold, `CODEX_DISPATCH_TIMEOUT`
+  (default `0` = disabled) for an optional hard wall-clock cap.
 
 ## Sonnet usage
 

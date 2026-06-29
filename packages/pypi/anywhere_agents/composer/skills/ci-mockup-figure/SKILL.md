@@ -9,11 +9,15 @@ description: Create space-efficient figures for papers and proposals. HTML mocku
 
 The goal is **space-efficient, information-dense figures** that communicate
 a system's design, a method's pipeline, or an architectural flowchart in
-minimal page area. Two paths depending on figure type:
+minimal page area. Three paths depending on figure type:
 
 - **HTML mockup path** (Phases 1-4 below): for UI mockups, dashboards,
   timelines, and any figure where content is rectangular with no cross-node
   arrows. Build interactive HTML, capture screenshots, insert into LaTeX.
+- **README / Markdown hero path** (README / Markdown Target section): same
+  HTML build phase, but capture via headless Chrome to a PNG and embed with
+  `![alt](assets/fig.png)`. Requires larger type, higher content density, and
+  one dominant focal element -- the viewer scales the image down to column width.
 - **Abstract figure path** (Abstract Figure Toolchain section): for
   architecture overviews, dependency topologies, and any figure needing
   arrow routing between non-adjacent nodes. Use TikZ, skia-canvas, or
@@ -189,8 +193,19 @@ Adjust coordinates, rerun, get new PDF instantly. No browser, no print quirks.
    per component. No saturated card backgrounds, no shadows, no pills/chips.
 6. **Inter-component arrows with labeled handoffs** (e.g., "Asset Graph",
    "Discovery Trace") as explicit connectors, not just whitespace.
-7. **Professional typography**: system sans-serif (Segoe UI, Arial) or serif
-   (Georgia). Never playful fonts. No emoji.
+7. **Professional typography**: Helvetica or Arial (Nature journal convention).
+   Serif (Georgia) for text-heavy insets. Never Segoe UI, Inter, or geometric
+   narrow variants -- those read as AI-startup product. No emoji.
+
+**Avoid the AI-startup look.** Segoe UI or Inter combined with an
+indigo-violet-and-amber palette reads as a product dashboard, not a research
+figure. For scientific figures:
+
+- **Font**: Helvetica or Arial
+- **Palette**: NPG / ggsci convention -- coral #E64B35, slate-blue #3C5488,
+  teal #00A087, salmon #F39B7F
+- **Avoid**: indigo or violet as a primary color; gradient bars; pill buttons;
+  heavy drop shadows
 
 ## Space Budget (decide first)
 
@@ -217,6 +232,37 @@ system mockups. Use 0.68 only for simple figures with large text.
 **Horizontal layout is mandatory.** Vertical/portrait screenshots waste 50%+
 of their space on a landscape-format page. Design the mockup for wide capture
 from the start.
+
+### README-hero figures
+
+README and documentation hero figures differ from paper figures. Markdown
+viewers scale the PNG to the content column (roughly 700-900 px on GitHub),
+so design for the scaled-down view:
+
+- **Type larger than in a paper figure.** Labels legible at `0.55\textwidth`
+  will be too small in a 700 px GitHub column. Increase all font sizes by at
+  least 1.5x relative to a paper figure.
+- **Fill the frame.** Target >80% content fill. Large empty margins waste
+  limited column area.
+- **One dominant focal element.** A large keystone number, score, or pipeline
+  diagram -- something readable in under two seconds at thumbnail size.
+- Capture with headless Chrome (see README / Markdown Target section); no
+  `pdfcrop`, no LaTeX environment.
+
+## Pre-flight Checklist
+
+Before the first render, verify all of the following:
+
+- [ ] Flat fills only. No gradients on bars, panels, or backgrounds.
+- [ ] No drop shadows.
+- [ ] No pill-shaped buttons; border-radius <= 4 px on any container.
+- [ ] Hairline borders (`1px solid`) are fine. Decorative glows and gradient
+  borders are not.
+- [ ] Font is Helvetica or Arial. Not Segoe UI, Inter, or geometric narrow
+  variants.
+- [ ] Color is reserved for data differentiation. Cut decorative or structural
+  color.
+- [ ] No indigo or violet primary (reads as AI-startup palette).
 
 ## Phase 1: Design the Mockup
 
@@ -404,6 +450,19 @@ the embedded satellite imagery stays raster. Drop the file extension in
 \includegraphics[width=0.55\textwidth]{figure/thrust4-coord}
 ```
 
+### Capture gotchas
+
+- **SVG `height: 100%` inside a flex item overflows.** An inline SVG with
+  `height: 100%` inside `display: flex` expands beyond its parent and overlays
+  adjacent content. Use deterministic fixed heights: give each SVG an explicit
+  `height` in px, a `viewBox` whose aspect ratio matches that box, and
+  `overflow: hidden` as a backstop. Avoid `flex: 1` + `height: 100%` SVG for
+  figure panels.
+- **`--window-size` pairs with `--force-device-scale-factor`.** The
+  `--window-size=W,H` flag sets logical pixels. At `--force-device-scale-factor=2`
+  the output PNG is 2W x 2H physical pixels. Set `W,H` to the CSS viewport
+  dimensions, not the intended output resolution.
+
 ### Trim white margins with `pdfcrop`
 
 Browser-exported PDFs have full-page white margins that waste space in LaTeX.
@@ -472,7 +531,54 @@ multiple national-priority domains"):
 4. Cite data sources with `@misc` bib entries using institutional authors
 5. Reference each panel in the opening paragraph prose
 
+## README / Markdown Target
+
+A sibling capture path for repository README and documentation hero figures.
+The HTML build phase is identical to Phases 1-3; only capture and insertion
+differ.
+
+### Headless capture (agent-runnable, no browser interaction)
+
+Resolve the browser binary first: use whichever Chrome-family executable is on the host
+(`chrome`, `google-chrome`, `chromium`, or `msedge`), or an absolute path to it; create
+`assets/` if it does not exist. Then run:
+
+```bash
+chrome --headless --disable-gpu --hide-scrollbars \
+  --force-device-scale-factor=2 \
+  --window-size=W,H \
+  --screenshot=assets/fig.png \
+  file:///abs/path/to/fig.html
+```
+
+Set `W` and `H` to the CSS viewport dimensions of the mockup (e.g.,
+`--window-size=1400,600` for a wide dashboard). The `--force-device-scale-factor=2`
+flag yields a retina-density PNG: physical output is 2W x 2H pixels, so the
+image stays crisp when scaled down by the Markdown viewer.
+
+Keep the HTML source and all assets under `assets/figure-src/`. The captured
+PNG goes to `assets/fig.png`.
+
+See Capture gotchas (Phase 4) for SVG overflow and window-size pairing notes.
+
+### Embedding
+
+```markdown
+![System overview](assets/fig.png)
+```
+
+No LaTeX environments. No `pdfcrop`. The PNG is the deliverable.
+
 ## Output Checklist
+
+### README / Markdown hero path
+- [ ] HTML source and all assets under `assets/figure-src/`
+- [ ] Headless Chrome capture command tested; PNG in `assets/`
+- [ ] Type at least 1.5x larger than equivalent paper figure
+- [ ] Content fills >80% of frame; one dominant focal element visible at
+  thumbnail size
+- [ ] Pre-flight checklist passed (no gradients, no shadows, Helvetica/Arial,
+  no indigo/violet primary)
 
 ### HTML mockup path
 - [ ] HTML mockup(s) in `figure-src/` with all assets in `figure-src/assets/`

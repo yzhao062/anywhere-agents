@@ -21,10 +21,13 @@
 #   CODEX_DISPATCH_ISOLATE_MCP  "off" disables --ignore-user-config isolation
 #   CODEX_DISPATCH_REASONING    reasoning effort re-pass (default: xhigh)
 #   PRUN_SCRATCH_CWD            explicit scratch working dir (default <state-dir>/work)
+#   PRUN_STALL_THRESHOLD        no-growth seconds before worker reap (default: 600)
+#   CODEX_DISPATCH_TIMEOUT      hard worker seconds before reap (default: 0, disabled)
 #
 # Stdout:  first and only machine-readable line: STATE-DIR <abs-path>
 # Stderr:  diagnostics + last 80 lines of codex combined stdout+stderr
-# Exit:    propagates codex exec's exit code; 2 on usage error.
+# Exit:    propagates codex exec's exit code; 124 when dispatch reaps the worker;
+#          2 on usage error.
 
 set -u
 
@@ -127,6 +130,12 @@ printf 'STATE-DIR %s\n' "$STATE_DIR"
 CODEX_BIN="${CODEX_BIN:-codex}"
 CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
 CODEX_DISPATCH_REASONING="${CODEX_DISPATCH_REASONING:-xhigh}"
+PRUN_STALL_THRESHOLD="${PRUN_STALL_THRESHOLD:-600}"
+CODEX_DISPATCH_TIMEOUT="${CODEX_DISPATCH_TIMEOUT:-0}"
+case "$PRUN_STALL_THRESHOLD" in ''|*[!0-9]*) PRUN_STALL_THRESHOLD=600 ;; esac
+case "$CODEX_DISPATCH_TIMEOUT" in ''|*[!0-9]*) CODEX_DISPATCH_TIMEOUT=0 ;; esac
+DISPATCH_REAP_EXIT=124
+DISPATCH_POLL=1
 
 # Reviewer isolation (default on; CODEX_DISPATCH_ISOLATE_MCP=off opts out).
 # --ignore-user-config stops a user-level Codex MCP server from auto-starting
@@ -142,11 +151,106 @@ fi
 # --skip-git-repo-check is required because the scratch cwd is intentionally
 # NOT a git repo (and --ignore-user-config drops the trusted-projects list);
 # without it codex refuses with "Not inside a trusted directory".
-( cd "$SCRATCH_CWD" && "$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" \
-    --skip-git-repo-check \
-    ${CODEX_ISOLATE_ARGS[@]+"${CODEX_ISOLATE_ARGS[@]}"} - < "$PROMPT_FILE" ) \
-    > "$STATE_DIR/tail" 2>&1
-CODEX_EXIT=$?
+_now() { date +%s 2>/dev/null || echo 0; }
+_size() { sz=$(wc -c < "$1" 2>/dev/null | tr -d ' '); case "${sz:-0}" in ''|*[!0-9]*) echo 0 ;; *) echo "$sz" ;; esac; }
+_mtime() { if m=$(stat -c %Y "$1" 2>/dev/null); then echo "$m"; elif m=$(stat -f %m "$1" 2>/dev/null); then echo "$m"; else echo 0; fi; }
+
+_kill_descendants() {
+    parent="$1"
+    children=$(pgrep -P "$parent" 2>/dev/null || true)
+    for child in $children; do
+        _kill_descendants "$child"
+    done
+    kill -TERM "$parent" 2>/dev/null || true
+}
+
+_kill_descendants_force() {
+    parent="$1"
+    children=$(pgrep -P "$parent" 2>/dev/null || true)
+    for child in $children; do
+        _kill_descendants_force "$child"
+    done
+    kill -KILL "$parent" 2>/dev/null || true
+}
+
+_kill_worker_tree() {
+    worker_pid="$1"
+    if [ "${WORKER_KILL_MODE:-}" = "pgid" ]; then
+        kill -TERM "-$worker_pid" 2>/dev/null || kill -TERM "$worker_pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL "-$worker_pid" 2>/dev/null || kill -KILL "$worker_pid" 2>/dev/null || true
+    else
+        _kill_descendants "$worker_pid"
+        sleep 2
+        _kill_descendants_force "$worker_pid"
+    fi
+}
+
+# The idle watchdog is the main reaper. CODEX_DISPATCH_TIMEOUT=0 disables the
+# wall-clock cap, so active long xhigh runs are not killed unless opted in.
+TAIL_PATH="$STATE_DIR/tail"
+START=$(_now)
+LAST_SIZE=-1
+LAST_MTIME=0
+LAST_GROWTH="$START"
+REAP_REASON=""
+WORKER_KILL_MODE="children"
+if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c 'cd "$1" || exit 1; shift; exec "$@"' dispatch-worker "$SCRATCH_CWD" \
+        "$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" \
+        --skip-git-repo-check \
+        ${CODEX_ISOLATE_ARGS[@]+"${CODEX_ISOLATE_ARGS[@]}"} - < "$PROMPT_FILE" \
+        > "$TAIL_PATH" 2>&1 &
+    WORKER_PID=$!
+    WORKER_KILL_MODE="pgid"
+else
+    ( cd "$SCRATCH_CWD" && "$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" \
+        --skip-git-repo-check \
+        ${CODEX_ISOLATE_ARGS[@]+"${CODEX_ISOLATE_ARGS[@]}"} - < "$PROMPT_FILE" ) \
+        > "$TAIL_PATH" 2>&1 &
+    WORKER_PID=$!
+fi
+
+while kill -0 "$WORKER_PID" 2>/dev/null; do
+    now=$(_now)
+    csize=$(_size "$TAIL_PATH")
+    cmt=0; [ -f "$TAIL_PATH" ] && cmt=$(_mtime "$TAIL_PATH")
+    if [ "$csize" -gt "$LAST_SIZE" ] || [ "$cmt" -gt "$LAST_MTIME" ]; then
+        LAST_SIZE="$csize"
+        LAST_MTIME="$cmt"
+        LAST_GROWTH="$now"
+    elif [ $((now - LAST_GROWTH)) -ge "$PRUN_STALL_THRESHOLD" ]; then
+        REAP_REASON="idle-stall"
+        break
+    fi
+    if [ "$CODEX_DISPATCH_TIMEOUT" -gt 0 ] && [ $((now - START)) -ge "$CODEX_DISPATCH_TIMEOUT" ]; then
+        REAP_REASON="hard-timeout"
+        break
+    fi
+    sleep "$DISPATCH_POLL"
+done
+
+if [ -n "$REAP_REASON" ]; then
+    echo "dispatch-task: reaping worker process tree ($REAP_REASON)" >&2
+    _kill_worker_tree "$WORKER_PID"
+    # Bounded wait: on POSIX the kill reaps the tree and the worker exits at once. On a
+    # shell without pgrep/setsid (e.g. Windows git-bash) the tree kill is best-effort, so
+    # do not block indefinitely -- proceed after a short grace so the dispatcher still
+    # exits and gather still gets a FALLBACK. Use dispatch-task.ps1 on Windows for reliable
+    # tree reaping.
+    _reap_wait=0
+    while kill -0 "$WORKER_PID" 2>/dev/null && [ "$_reap_wait" -lt 10 ]; do
+        sleep 1; _reap_wait=$((_reap_wait + 1))
+    done
+    CODEX_EXIT=$DISPATCH_REAP_EXIT
+    {
+        printf '\n'
+        printf 'dispatch-task: worker reaped (%s); exit code %s.\n' "$REAP_REASON" "$DISPATCH_REAP_EXIT"
+    } >> "$TAIL_PATH" 2>/dev/null || true
+else
+    wait "$WORKER_PID"
+    CODEX_EXIT=$?
+fi
 
 tail -n 80 "$STATE_DIR/tail" >&2 2>/dev/null || true
 
@@ -158,12 +262,21 @@ tail -n 80 "$STATE_DIR/tail" >&2 2>/dev/null || true
 # body is raw worker output to review or re-dispatch.
 if [ ! -s "$RESULT_FILE" ]; then
     mkdir -p "$(dirname "$RESULT_FILE")" 2>/dev/null || true
+    if [ -n "$REAP_REASON" ]; then
+        FALLBACK_CONCLUSION="INCOMPLETE; worker was reaped by dispatch-task ($REAP_REASON) before writing a result; raw worker output salvaged from the dispatch tail below."
+        FALLBACK_OPEN_ITEMS="worker was reaped by dispatch-task ($REAP_REASON); review the raw output below or re-dispatch this unit."
+        FALLBACK_VERIFICATION="none (worker reaped by dispatch-task; tail salvaged by dispatch-task)"
+    else
+        FALLBACK_CONCLUSION="INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below."
+        FALLBACK_OPEN_ITEMS="worker did not write its result file; review the raw output below or re-dispatch this unit."
+        FALLBACK_VERIFICATION="none (salvaged by dispatch-task, not by the worker)"
+    fi
     {
         printf '# %s result (FALLBACK, worker wrote no result file)\n' "$UNIT_ID"
-        printf 'Conclusion: INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below.\n'
+        printf 'Conclusion: %s\n' "$FALLBACK_CONCLUSION"
         printf 'Files: unknown\n'
-        printf 'Open items: worker did not write its result file; review the raw output below or re-dispatch this unit.\n'
-        printf 'Verification: none (salvaged by dispatch-task, not by the worker)\n\n'
+        printf 'Open items: %s\n' "$FALLBACK_OPEN_ITEMS"
+        printf 'Verification: %s\n\n' "$FALLBACK_VERIFICATION"
         cat "$STATE_DIR/tail" 2>/dev/null || true
     } > "$RESULT_FILE" 2>/dev/null || true
 fi

@@ -9,10 +9,13 @@
 #
 # Env: CODEX_BIN, TMPDIR/TEMP/TMP, CODEX_DISPATCH_SANDBOX (default danger-full-access),
 #      CODEX_DISPATCH_ISOLATE_MCP (off disables isolation), CODEX_DISPATCH_REASONING
-#      (default xhigh), PRUN_SCRATCH_CWD (default <state-dir>\work)
+#      (default xhigh), PRUN_SCRATCH_CWD (default <state-dir>\work),
+#      PRUN_STALL_THRESHOLD (default 600), CODEX_DISPATCH_TIMEOUT (default 0,
+#      disabled)
 #
 # Stdout: STATE-DIR <abs-path> (first and only machine-readable line)
-# Exit:   propagates codex exec's exit code; 2 on usage error.
+# Exit:   propagates codex exec's exit code; 124 when dispatch reaps the worker;
+#         2 on usage error.
 
 $ErrorActionPreference = 'Stop'
 
@@ -154,8 +157,58 @@ $cmdBody = "@echo off`r`nchcp 65001 >NUL`r`ncd /d ""$scratchEsc"" || exit /b 1`r
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
 
-& $cmdHelper
-$codexExit = $LASTEXITCODE
+# The idle-stall and hard-timeout bounds are enforced by reap-watch.ps1 (spawned below),
+# which reads PRUN_STALL_THRESHOLD (default 600) and CODEX_DISPATCH_TIMEOUT (default 0 =
+# wall-clock cap disabled; the idle signal is primary) from the environment it inherits
+# here, and writes 'idle-stall' or 'hard-timeout' into <state-dir>/reap-reason if it reaps.
+$dispatchReapExit = 124
+$cmdExe = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+# Async launch via Start-Process -PassThru so reap-watch can be handed the worker PID and
+# this dispatcher can block on WaitForExit. Without -RedirectStandardInput this uses
+# ShellExecute, which does NOT strip the logon token (the cmd helper still does its own
+# < > redirects, so codex's git / browser subprocesses keep the token; avoids Windows
+# error 1312). The watch-and-kill loop deliberately lives in the SEPARATE reap-watch.ps1,
+# NOT here: a single .ps1 that launches a hidden worker, polls it, and kills its tree
+# trips some Windows AV AMSI heuristics and is blocked at parse. This mirrors the
+# implement-review dispatch-codex.ps1 + stall-watch.ps1 split.
+$worker = Start-Process -FilePath $cmdExe -ArgumentList @('/d', '/c', "`"$cmdHelper`"") -PassThru -WindowStyle Hidden
+$codexExit = $null
+
+# Spawn the background watchdog. It reaps the worker tree on idle-stall / hard-timeout and
+# records the reason in <state-dir>/reap-reason. If the script is absent the dispatch
+# still runs (just without the self-heal), so a partial deploy degrades gracefully.
+$reapWatch = Join-Path $PSScriptRoot 'reap-watch.ps1'
+if (Test-Path -LiteralPath $reapWatch -PathType Leaf) {
+    $null = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $reapWatch,
+                        '--state-dir', $stateDir, '--worker-pid', $worker.Id, '--tail', $tailPath) `
+        -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+}
+
+# Block until the worker exits -- either codex finishes, or reap-watch kills the tree.
+$worker.WaitForExit()
+$codexExit = $worker.ExitCode
+
+# Did reap-watch reap the worker? Its reason marker (written BEFORE the kill) tells us to
+# surface exit 124 and a FALLBACK that names the trigger.
+$reapReason = $null
+$reapReasonPath = Join-Path $stateDir 'reap-reason'
+if (Test-Path -LiteralPath $reapReasonPath -PathType Leaf) {
+    try { $reapReason = (Get-Content -LiteralPath $reapReasonPath -Raw -ErrorAction Stop).Trim() } catch { $reapReason = $null }
+}
+if ($reapReason) {
+    $codexExit = $dispatchReapExit
+    [Console]::Error.WriteLine("dispatch-task: worker reaped by reap-watch ($reapReason)")
+    try {
+        [System.IO.File]::AppendAllText(
+            $tailPath,
+            "`ndispatch-task: worker reaped ($reapReason); exit code $dispatchReapExit.`n",
+            $utf8NoBom
+        )
+    } catch {
+        # best-effort tail note
+    }
+}
 
 Remove-Item -LiteralPath $cmdHelper -Force -ErrorAction SilentlyContinue
 
@@ -184,11 +237,20 @@ if (Test-Path -LiteralPath $ResultFile -PathType Leaf) {
 if ($resultEmpty) {
     try {
         $tailText = if (Test-Path -LiteralPath $tailPath -PathType Leaf) { [System.IO.File]::ReadAllText($tailPath) } else { '' }
+        if ($reapReason) {
+            $fallbackConclusion = "INCOMPLETE; worker was reaped by dispatch-task ($reapReason) before writing a result; raw worker output salvaged from the dispatch tail below."
+            $fallbackOpenItems = "worker was reaped by dispatch-task ($reapReason); review the raw output below or re-dispatch this unit."
+            $fallbackVerification = "none (worker reaped by dispatch-task; tail salvaged by dispatch-task)"
+        } else {
+            $fallbackConclusion = "INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below."
+            $fallbackOpenItems = "worker did not write its result file; review the raw output below or re-dispatch this unit."
+            $fallbackVerification = "none (salvaged by dispatch-task, not by the worker)"
+        }
         $fallback = "# $UnitId result (FALLBACK, worker wrote no result file)`n" +
-            "Conclusion: INCOMPLETE; structured result missing, raw worker output salvaged from the dispatch tail below.`n" +
+            "Conclusion: $fallbackConclusion`n" +
             "Files: unknown`n" +
-            "Open items: worker did not write its result file; review the raw output below or re-dispatch this unit.`n" +
-            "Verification: none (salvaged by dispatch-task, not by the worker)`n`n" +
+            "Open items: $fallbackOpenItems`n" +
+            "Verification: $fallbackVerification`n`n" +
             $tailText
         $resultDir = Split-Path -Parent $ResultFile
         if ($resultDir -and -not (Test-Path -LiteralPath $resultDir)) {

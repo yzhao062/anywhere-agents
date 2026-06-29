@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "skills" / "prun" / "scripts"
 DISPATCH_SH = SCRIPTS_DIR / "dispatch-task.sh"
 DISPATCH_PS1 = SCRIPTS_DIR / "dispatch-task.ps1"
+REAP_WATCH_PS1 = SCRIPTS_DIR / "reap-watch.ps1"
 
 
 def _temp_dir():
@@ -47,6 +48,7 @@ MOCK_CODEX_PY = r'''"""Mock codex stub for dispatch-task tests."""
 import json
 import os
 import sys
+import time
 
 log_dir = os.environ.get("MOCK_CODEX_LOG", os.getcwd())
 os.makedirs(log_dir, exist_ok=True)
@@ -68,6 +70,12 @@ if result_target:
 
 sys.stdout.write(os.environ.get("MOCK_CODEX_STDOUT", "mock-codex: stdout\n"))
 sys.stderr.write(os.environ.get("MOCK_CODEX_STDERR", "mock-codex: stderr\n"))
+sys.stdout.flush()
+sys.stderr.flush()
+
+sleep_seconds = os.environ.get("MOCK_CODEX_SLEEP")
+if sleep_seconds:
+    time.sleep(float(sleep_seconds))
 
 sys.exit(int(os.environ.get("MOCK_CODEX_EXIT", "0")))
 '''
@@ -144,6 +152,7 @@ class _DispatchTaskContractMixin:
         env["TMPDIR"] = str(cwd)
         env["TEMP"] = str(cwd)
         env["TMP"] = str(cwd)
+        env.pop("PRUN_SCRATCH_CWD", None)
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -257,6 +266,56 @@ class _DispatchTaskContractMixin:
             self.assertIn("u_fb", body, "fallback header must name the unit")
             self.assertIn("WORKER-OUTPUT-MARKER", body,
                           "fallback must salvage the worker's captured stdout from the tail")
+
+    def test_idle_watchdog_reaps_worker_and_fallback_salvages_tail(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result_file = tmpdir / "result.md"
+            res = self._run_dispatch(
+                tmpdir, prompt, str(result_file), "u_idle", codex, log_dir,
+                timeout=20.0,
+                extra_env={
+                    "MOCK_CODEX_STDOUT": "IDLE-REAP-MARKER\n",
+                    "MOCK_CODEX_SLEEP": "30",
+                    "PRUN_STALL_THRESHOLD": "1",
+                    "CODEX_DISPATCH_TIMEOUT": "0",
+                },
+            )
+            self.assertEqual(res.returncode, 124,
+                             f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+            self.assertTrue(result_file.exists(),
+                            "fallback must create the result file after idle reap")
+            body = result_file.read_text(encoding="utf-8")
+            self.assertIn("FALLBACK", body)
+            self.assertIn("IDLE-REAP-MARKER", body)
+            self.assertIn("idle-stall", body)
+            self.assertIn("exit code 124", body)
+
+    def test_hard_timeout_reaps_worker_and_fallback_names_trigger(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result_file = tmpdir / "result.md"
+            res = self._run_dispatch(
+                tmpdir, prompt, str(result_file), "u_hard", codex, log_dir,
+                timeout=20.0,
+                extra_env={
+                    "MOCK_CODEX_STDOUT": "HARD-TIMEOUT-MARKER\n",
+                    "MOCK_CODEX_SLEEP": "30",
+                    "PRUN_STALL_THRESHOLD": "60",
+                    "CODEX_DISPATCH_TIMEOUT": "1",
+                },
+            )
+            self.assertEqual(res.returncode, 124,
+                             f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+            self.assertTrue(result_file.exists(),
+                            "fallback must create the result file after hard timeout")
+            body = result_file.read_text(encoding="utf-8")
+            self.assertIn("FALLBACK", body)
+            self.assertIn("HARD-TIMEOUT-MARKER", body)
+            self.assertIn("hard-timeout", body)
+            self.assertIn("exit code 124", body)
 
     def test_fallback_does_not_clobber_a_written_result(self) -> None:
         """When the worker DOES write a non-empty result file, dispatch-task must
@@ -508,6 +567,10 @@ class DispatchTaskScriptsTracked(unittest.TestCase):
     def test_ps1_exists(self) -> None:
         self.assertTrue(DISPATCH_PS1.exists(), f"missing: {DISPATCH_PS1}")
 
+    def test_reap_watch_ps1_exists(self) -> None:
+        # Windows watchdog lives in its own file (AMSI split); see reaper contract test.
+        self.assertTrue(REAP_WATCH_PS1.exists(), f"missing: {REAP_WATCH_PS1}")
+
 
 class DispatchTaskStaticContract(unittest.TestCase):
     """Freeze the safety wiring so a refactor that drops a flag fails here."""
@@ -536,6 +599,26 @@ class DispatchTaskStaticContract(unittest.TestCase):
         # The scratch cwd is intentionally not a git repo; codex needs this.
         for text in self._both():
             self.assertIn("--skip-git-repo-check", text)
+
+    def test_dispatch_reaper_contract_present(self) -> None:
+        # The .sh enforces the idle-stall + hard-timeout watchdog inline. The .ps1 side
+        # splits it out into reap-watch.ps1: a single .ps1 that launches a hidden worker
+        # AND polls it AND force-kills its tree trips some Windows AV AMSI heuristics and
+        # is blocked at parse, so dispatch-task.ps1 keeps the env contract + exit 124 and
+        # delegates the watch/kill to reap-watch.ps1 (the dispatch-codex + stall-watch split).
+        sh = DISPATCH_SH.read_text(encoding="utf-8")
+        for token in ("PRUN_STALL_THRESHOLD", "CODEX_DISPATCH_TIMEOUT",
+                      "idle-stall", "hard-timeout", "124"):
+            self.assertIn(token, sh, f"dispatch-task.sh missing {token}")
+
+        ps1 = DISPATCH_PS1.read_text(encoding="utf-8")
+        for token in ("PRUN_STALL_THRESHOLD", "CODEX_DISPATCH_TIMEOUT", "124", "reap-watch"):
+            self.assertIn(token, ps1, f"dispatch-task.ps1 missing {token}")
+
+        reap = REAP_WATCH_PS1.read_text(encoding="utf-8")
+        for token in ("PRUN_STALL_THRESHOLD", "CODEX_DISPATCH_TIMEOUT",
+                      "idle-stall", "hard-timeout", "reap-reason", "taskkill"):
+            self.assertIn(token, reap, f"reap-watch.ps1 missing {token}")
 
 
 if __name__ == "__main__":
