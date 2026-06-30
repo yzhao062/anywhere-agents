@@ -9,6 +9,20 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+## [0.7.8] — 2026-06-29
+
+### Added
+
+- **`prun` self-healing dispatch watchdog.** `dispatch-task.{sh,ps1}` now reaps a hung Codex worker instead of leaking it as a zombie. If the worker's tail capture stops growing for `PRUN_STALL_THRESHOLD` seconds (default `600`), or an optional hard wall-clock cap `CODEX_DISPATCH_TIMEOUT` (default `0` = disabled) is exceeded, the dispatcher kills the worker's whole process tree, exits `124`, and falls through to the existing result-loss backstop so `gather` still receives a non-empty `FALLBACK` result naming the trigger (`idle-stall` or `hard-timeout`). A non-empty result the worker already wrote is preserved, never clobbered. On Windows the watch-and-kill runs in a new sibling `reap-watch.ps1`: a single `.ps1` that launches a hidden worker, polls it, and force-kills its tree trips some Windows AV (e.g. Bitdefender) AMSI heuristics and is blocked at parse, so `dispatch-task.ps1` only launches the worker and spawns the watcher, mirroring the `implement-review` `dispatch-codex` + `stall-watch` split. The `.sh` keeps the watchdog inline (POSIX shells are not AMSI-scanned). `tests/test_dispatch_task.py` gains idle-stall, hard-timeout, and fallback-salvage coverage and is promoted into the STRICT cross-repo parity set; `SKILL.md` documents the new env knobs and the monitor-observes / dispatcher-reaps split.
+- **`ci-mockup-figure` README / Markdown hero path.** The skill adds an agent-runnable headless-Chrome capture path (render an HTML mockup to a PNG and embed it in a README) alongside the existing LaTeX target, a scientific-vs-AI-product aesthetic callout (Helvetica/Arial plus an NPG/ggsci palette, with an explicit avoid-the-AI-tell note), a pre-flight checklist near the top, an SVG-in-flex capture-gotchas note, and README-hero readability/density guidance distinct from paper figures.
+
+### Versions
+
+- PyPI `anywhere-agents` `__version__` and `pyproject.toml` `version`: 0.7.7 -> 0.7.8
+- npm `anywhere-agents` `package.json` `version`: 0.7.7 -> 0.7.8
+
+SemVer: 0.7.7 -> 0.7.8, released as a patch. Adds prun's dispatch-side self-heal and ci-mockup-figure's README-hero path; no pack-manifest schema change and no change to the other packs.
+
 ## [0.7.7] — 2026-06-27
 
 ### Added
@@ -905,7 +919,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.7...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.8...HEAD
+[0.7.8]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.4...v0.7.5
