@@ -147,14 +147,14 @@ CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
 # narrower `-c mcp_servers={}` is deep-merged by codex 0.139 and leaves the
 # configured servers running (verified live -- node_repl still spawned). It
 # drops the user's MCP servers, plugins, and hooks; the model still defaults to
-# codex's built-in (gpt-5.5, matching a typical config) and auth still uses
+# codex's built-in recommended model and auth still uses
 # CODEX_HOME, but reasoning effort drops to "none", so re-pass it via
 # -c model_reasoning_effort (default xhigh; override CODEX_DISPATCH_REASONING)
 # to avoid a silent reviewer downgrade. What is NOT re-passed: service_tier and
 # any custom model_provider / base_url. service_tier is left to codex's default
 # on purpose -- hardcoding the maintainer's "fast" tier would make every round
 # fail for a consumer whose account lacks it, and Codex's built-in model
-# default already matches the common gpt-5.5 config. A review that genuinely
+# default already matches the common recommended config. A review that genuinely
 # needs a custom provider or a specific tier should set
 # CODEX_DISPATCH_ISOLATE_MCP=off; full config-preserving
 # isolation (a temp CODEX_HOME holding a copy of config.toml minus the MCP

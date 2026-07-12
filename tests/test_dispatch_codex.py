@@ -702,7 +702,7 @@ class DispatchMcpIsolationContract(unittest.TestCase):
     by codex and leaves servers running). Because that flag also drops the
     reasoning effort to "none", the dispatcher re-passes
     `-c model_reasoning_effort` (default xhigh) so the reviewer is not
-    silently downgraded; the model stays codex's default (gpt-5.5). Default
+    silently downgraded; the model stays on codex's built-in default. Default
     on; opt out with CODEX_DISPATCH_ISOLATE_MCP=off.
 
     These static checks freeze the wiring so a future refactor that drops
