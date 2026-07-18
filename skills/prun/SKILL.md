@@ -1,22 +1,27 @@
 ---
 name: prun
-description: Parallel delegation fan-out. The Opus session coordinates while many task units run in parallel on Codex and Sonnet workers (never on Opus), to spend the Codex and Sonnet quotas instead of the constrained Opus one. Units may read or write code; workers never commit or push, and Opus plus the user are the final integration gate.
+description: Parallel delegation fan-out. The Claude session coordinates (on whatever Claude model is currently selected, e.g. Opus or Fable) while task units run in parallel on workers (never on the coordinator). Codex (`codex exec`, a separate abundant account) is the prioritized default; Sonnet is reserved for units needing Claude-session-internal capabilities (MCP/email tools, Artifacts, cross-vendor web verification), with the orchestrator deciding per unit. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
 ---
 
 # prun (parallel run)
 
 ## Overview
 
-`prun` fans a task out into independent units that run in parallel on cheap or separate-quota
-workers, while the Opus session only coordinates. Workers are **Codex** (`codex exec`, a
-separate account from Claude, abundant quota, strong on hard reasoning and code) and **Sonnet**
-subagents (cheaper, inside the Claude session). Opus decomposes the task, dispatches the units,
-gathers their results, reviews their diffs, and integrates. It never runs a unit itself, so the
-constrained Claude "All models" weekly bucket pays only for coordination.
+`prun` fans a task out into independent units that run in parallel on separate-quota or in-session
+workers, while the Claude session only coordinates. Workers are **Codex** (`codex exec`, a separate abundant account, frontier model) and **Sonnet**
+subagents (inside the Claude session). **Codex is the prioritized default**: its quota is separate
+from the Claude plan and its current model (gpt-5.6 tier) is strong on hard reasoning and code, so
+most units go to Codex. **Sonnet is reserved** for units that need something the Claude session
+uniquely provides (see the Executors rule). The coordinator decomposes the task, dispatches the units, gathers
+their results, reviews their diffs, and integrates. It never runs a unit itself.
 
-Mix freely. A combination of Codex and Sonnet often beats all-Codex, by efficiency or by playing
-to each one's strengths (the Codex model is stronger; Sonnet is cheaper and shares the Claude
-session).
+The orchestrator picks the executor per unit; when in doubt, Codex. A Codex unit runs through the
+separately authenticated Codex/OpenAI account, so the worker run does not draw on the Claude plan at
+all. A Sonnet unit and the Claude coordinator both consume the current Claude account's quota; the
+exact split across models and weekly buckets depends on the plan and on active promotions and shifts
+over time, so check Settings > Usage before relying on any model-specific split. Codex is the default
+because its worker run is outside the Claude plan; keep Sonnet units targeted because they draw
+Claude-side quota.
 
 ## Relationship to the native Workflow tool
 
@@ -26,9 +31,10 @@ usage and rate limits, and its agents use the session model unless the script ro
 different Claude model.
 
 `prun` has a different quota shape. A **Codex** unit is dispatched by a shell call to `codex exec`,
-so that unit spends the separate Codex account. A **Sonnet** unit still runs on Claude and spends
-Claude-side quota, although it can be cheaper than Opus. The coordinating session also spends a
-small Anthropic amount while it decomposes, dispatches, reads results, and integrates.
+so the worker run uses the separate Codex/OpenAI account. A **Sonnet** unit and the coordinating
+session both draw the current Claude account's quota, so reserve Sonnet for units that need the
+Claude session's own tools. The coordinating session also spends a small Anthropic amount while it
+decomposes, dispatches, reads results, and integrates.
 
 The two relate in two ways, both with the current session as the orchestrator:
 
@@ -56,20 +62,28 @@ or a unit's result cannot be checked without redoing it.
 
 | Executor | Quota | Notes |
 |---|---|---|
-| Codex (`codex exec`) | Codex/OpenAI account, separate from Claude; abundant | Primary. Strong on hard reasoning and code. Run many in parallel. |
-| Sonnet subagent | Claude side, own weekly bucket; cheaper than Opus | Secondary, mixable. Runs in the Claude session (its tools / MCP / context). |
-| Opus (this session) | Claude "All models" weekly bucket (constrained) | Coordinator and integrator only. Never a unit. |
+| Codex (`codex exec`) | Separately authenticated Codex/OpenAI account; abundant | **Prioritized default.** Frontier model (gpt-5.6 tier), strong on hard reasoning and code, and the worker run spends no Claude-plan quota. Run many in parallel. |
+| Sonnet subagent | Current Claude account; check Settings > Usage for the applicable limits or credits | Reserved, not a default. Runs in the Claude session, so it alone can reach session-internal tools (MCP / email / Artifacts) that Codex cannot. |
+| Claude session (this session) | Current Claude account; check Settings > Usage for the applicable limits or credits | Coordinator and integrator only, on whatever model is selected. Never a unit. |
 
-Rule: **units never run on Opus.** Pick the executor by unit difficulty and quota:
+Rule: **units never run on the coordinator (the Claude session itself).** The orchestrator picks the
+executor per unit, with a strong default toward Codex:
 
-- **Sonnet** is the cheap default for routine units (summaries, surveys, mechanical edits, light
-  research), when its capability is enough.
-- **Codex** is the high-capability tier: its frontier model is comparable to Opus and its quota is
-  separate and abundant, so it is both the default for hard reasoning or heavy code AND the place to
-  **escalate a unit Sonnet cannot handle**. When a unit is too hard for Sonnet, move it to Codex.
-- **Opus stays the coordinator, never a unit.** Promoting a hard unit onto Opus would spend the
-  constrained Anthropic bucket this whole design protects, so the escalation ceiling for a unit is
-  Codex, not Opus.
+- **Codex is the default for almost every unit** (code, research, analysis, web fetch). Its quota is
+  separate and abundant and its frontier model (gpt-5.6 tier) is capability-competitive with the top Claude models,
+  so there is rarely a reason to prefer another worker. Start here.
+- **Sonnet is the reserved exception, chosen only when a unit needs a tool the Claude session has but
+  the isolated Codex worker does not.** Codex is an external process, so route to Sonnet when a unit
+  needs a session-internal MCP / email connector (Gmail, Calendar, Drive, Slack), the Artifact tool,
+  or a **cross-vendor web-search verification** where you want a Claude-side `WebSearch` result to
+  cross-check the Codex one. A normal Sonnet subagent inherits the session's available tools but
+  **starts with fresh, isolated context** (it does not see the conversation history), so put any
+  needed state in its unit prompt; if a task truly needs the full live conversation, keep it in the
+  coordinator (an explicit fork inherits that context but also the coordinator's model, so it is not
+  a Sonnet worker). The orchestrator decides per unit; when in doubt, use Codex. Sonnet draws
+  Claude-side quota, so keep these units targeted.
+- **The Claude session stays the coordinator, never a unit.** A single small session-tool task the coordinator can
+  do inline; reach for Sonnet when you need to run *many* such units in parallel.
 
 ## Concurrency
 
@@ -90,7 +104,7 @@ worker startup and tends to produce thin results.
 A unit may **read or write code**, run commands, and fetch the web, with full access. The single
 hard rule: a worker **never commits, pushes, or runs destructive git** (`commit`, `push`,
 branch/tag mutation, `reset --hard`, `clean`). Everything else is allowed. The final gate is
-**Opus integrating the results and the user deciding**; workers never touch the real repo history.
+**the Claude session integrating the results and the user deciding**; workers never touch the real repo history.
 
 This is enforced structurally, not by trust:
 
@@ -102,12 +116,12 @@ This is enforced structurally, not by trust:
   git -C <clone-dir> remote remove origin
   ```
   The worker edits freely in the clone. An accidental `git push` has no remote to reach (GitHub /
-  Overleaf stay untouched); an accidental `git commit` only lands in the throwaway clone. Opus reads
+  Overleaf stay untouched); an accidental `git commit` only lands in the throwaway clone. The coordinator reads
   `git -C <clone-dir> diff`, integrates the wanted changes into the real tree, and **the user
   approves the actual commit**. That is the only gate.
 
 No credential scrubbing or sandbox wall: the user writes the prompts, the clone has no path to the
-real remotes, and Opus plus the user are the integration gate. That is the whole safety model.
+real remotes, and the Claude session plus the user are the integration gate. That is the whole safety model.
 
 ## Flow
 
@@ -115,14 +129,17 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
 2. **Decompose**: write one prompt per unit. State the task; for a code-writing unit, that the
    working dir is a throwaway clone to edit freely but **not** commit or push; that the unit writes
    a result summary to its result file (a fresh path, in one write).
-3. **Assign**: pick Codex or Sonnet per unit, and read-only (scratch) or code-writing (clone) mode.
+3. **Assign**: default the unit to Codex; pick Sonnet only for the reserved cases (session-internal
+   MCP / email / Artifacts, or cross-vendor web verification). Also pick read-only (scratch) or code-writing (clone) mode.
    For a web-heavy unit, "Web access" below covers which executor fits.
 4. **Dispatch in parallel**:
    - Codex unit: run `scripts/dispatch-task.{sh,ps1}` in the background (Bash tool,
      `run_in_background=true`). For a code-writing unit, pass the clone dir via `PRUN_SCRATCH_CWD`.
-   - Sonnet unit: spawn a background Agent subagent with `model: sonnet` and web-capable tools
-     (Read/Write/Edit/Bash/WebSearch/WebFetch). For code-writing it works in a clone too, and is
-     additionally under Claude's `guard.py`, which already gates commit/push.
+   - Sonnet unit: spawn a background Agent subagent with `model: sonnet`. It inherits the session's
+     available tools, including MCP and connector tools; if you set a `tools` allowlist, include every
+     connector, Artifact, file, shell, and web tool the unit needs. The subagent starts with fresh
+     context, so put any needed state in its prompt. For code-writing it works in a clone too, under
+     Claude's `guard.py`, which already gates commit/push.
 5. **Monitor (do not go idle)**: launch `scripts/monitor.{sh,ps1} <state-dir> ...` in the background
    (`run_in_background=true`) and wait on its completion. It wakes you on the first actionable event:
    all done, any unit **stalled** (tail no-growth for `PRUN_STALL_THRESHOLD`, default 10 min), or any
@@ -137,7 +154,7 @@ real remotes, and Opus plus the user are the integration gate. That is the whole
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
    recover the worker's output from its `<state-dir>/tail` (dispatch-task also salvages the tail into
    the result file automatically under a `FALLBACK` header), then re-dispatch or flag the user if it is
-   unusable. Then Opus reads each result plus each clone's `git diff`, merges the wanted changes into
+   unusable. Then the coordinator reads each result plus each clone's `git diff`, merges the wanted changes into
    the real tree, runs verification, and **asks the user before any commit**.
 
 Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
@@ -169,9 +186,12 @@ scripts/dispatch-task.sh --prompt-file <prompt> --result-file <abs result> --uni
 
 ## Sonnet usage
 
-Spawn an Agent-tool subagent with `model: sonnet` and the tools the unit needs. Give it the same
-return contract and result-file path. For a code-writing unit, point it at a clone dir; commit and
-push are also gated by `guard.py` on the Claude side.
+Sonnet is the reserved executor (see Executors), for units needing session-internal tools (MCP /
+email connectors, the Artifact tool) or a cross-vendor web verification. Spawn an Agent-tool subagent
+with `model: sonnet`. It inherits the session's available tools but starts with **fresh context** (it
+does not see the conversation), so put any needed state in the unit prompt. Give it the same return
+contract and result-file path. For a code-writing unit, point it at a clone dir; commit and push are
+also gated by `guard.py` on the Claude side.
 
 ## gather usage
 
@@ -234,16 +254,19 @@ also surfaces pages a cloud fetch would miss. Web access comes from `--sandbox d
 cheap.
 
 **Sonnet** units get web from an `agentType` granting built-in `WebSearch` and `WebFetch`. Claude's
-`WebSearch` is good at broad discovery: finding the right page when the URL is unknown.
+`WebSearch` is strong at broad discovery (finding the right page when the URL is unknown), but
+discovery alone is not a session-internal capability, so treat Sonnet here as a reserved path for an
+explicitly wanted Claude-side cross-check or for recovery after Codex discovery falls short, not as
+the default for discovery.
 
-Routing heuristic (a starting default, with Sonnet still a first-class web path):
+Routing heuristic (apply the Executors rule; when in doubt, Codex):
 
-- **Fetch a known or likely-blocked URL** (a page a cloud fetch already failed on, or a site that
-  tends to block automated fetchers): prefer a **Codex** unit. The local network path is the reason.
-- **Search or discover** (the URL is unknown, or you need to survey what exists): route to a **Sonnet**
-  unit and its `WebSearch`, usually the better tool for the job.
-- **A fact that matters and might be blocked or stale**: run it on **both** and cross-check. The Codex
-  quota makes the redundancy nearly free, and two paths catch a one-sided block or an out-of-date page.
+- **Fetch or discover on one path**: use a **Codex** unit first, whether or not the URL is known. Its
+  local-network path also reaches some pages a cloud fetch gets `403` on.
+- **Codex discovery fell short, or acceptance needs a Claude-side result**: add a targeted **Sonnet**
+  unit and its `WebSearch`.
+- **A high-stakes fact that might be stale or blocked**: run Codex first, then add a Sonnet
+  cross-check when the value of a second vendor's view justifies the Claude-side quota.
 
 A Codex web-fetch unit can use curl. Report the HTTP status per URL so a cloud-vs-local block shows
 up in the result. In Windows PowerShell, name the binary `curl.exe`, since a bare `curl` can resolve
