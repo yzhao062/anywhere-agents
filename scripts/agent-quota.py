@@ -11,7 +11,9 @@ Data sources (both on disk, no live render or API call needed):
   - Claude: ~/.claude/rate-limits-cache.json, written by statusline.py on
     each Claude Code statusLine render (override via CLAUDE_RL_CACHE).
   - Codex:  most recent ~/.codex/sessions/**/rollout-*.jsonl, field
-    payload.rate_limits (primary = 5h, secondary = 7d).
+    payload.rate_limits. Each window carries window_minutes, so the label
+    is derived from it (300 -> 5h, 10080 -> 7d): Codex dropped the fixed 5h
+    window on 2026-07-12, so primary is now weekly and secondary may be null.
 
 Each side is only as fresh as that agent's last activity; the age is shown
 in brackets so a stale snapshot is obvious.
@@ -72,6 +74,20 @@ def _fmt(window, pct_field):
     return f"{remaining:.0f}% left" + (f" ({r})" if r else "")
 
 
+def _codex_window_label(window):
+    """Label a Codex window by its actual duration (window_minutes) so a
+    weekly window is not mislabeled '5h'. 300 -> '5h', 10080 -> '7d'. Codex
+    dropped the fixed 5h window on 2026-07-12; primary is now weekly."""
+    m = window.get("window_minutes")
+    if not m:
+        return ""
+    if m % 1440 == 0:
+        return f"{m // 1440}d"
+    if m % 60 == 0:
+        return f"{m // 60}h"
+    return f"{m}m"
+
+
 def _codex_model():
     try:
         import tomllib
@@ -128,10 +144,20 @@ def codex_row():
             break
     if not rl:
         return "Codex    (no rate_limits in latest rollout)"
-    five = _fmt(rl.get("primary") or {}, CODEX_PCT_FIELD)
-    week = _fmt(rl.get("secondary") or {}, CODEX_PCT_FIELD)
+    segs = []
+    for key in ("primary", "secondary"):
+        w = rl.get(key)
+        if not w:
+            continue
+        label = _codex_window_label(w) or key
+        segs.append(f"{label} {_fmt(w, CODEX_PCT_FIELD)}")
+    credits = rl.get("credits") or {}
+    bal = credits.get("balance")
+    if credits.get("has_credits") or (bal not in (None, "", "0")):
+        segs.append(f"credits {bal}" if bal not in (None, "") else "credits")
     model = _codex_model()
-    return f"Codex    {model:<12}  5h {five:<20}  7d {week:<20}  [{_age(os.path.getmtime(newest))}]"
+    body = "   ".join(segs) if segs else "(no windows)"
+    return f"Codex    {model:<12}  {body}  [{_age(os.path.getmtime(newest))}]"
 
 
 def main():

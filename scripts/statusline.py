@@ -6,9 +6,12 @@ Pro/Max subscribers. Field is absent for API-key sessions and before first
 API response of a session.
 
 Codex data: read from the most recent rollout JSONL under ~/.codex/sessions/.
-Codex writes `payload.rate_limits` on every `token_count` event with the
-same shape (primary = 5h window, secondary = 7d window). Snapshot is as
-fresh as the last Codex prompt; older windows are flagged `(stale)`.
+Codex writes `payload.rate_limits` on every `token_count` event. Each window
+carries `window_minutes`, so the label is derived from it (300 -> 5h,
+10080 -> 7d) instead of hard-coded: Codex dropped the fixed 5h window on
+2026-07-12, so `primary` is now the weekly meter and `secondary` may be
+null. Snapshot is as fresh as the last Codex prompt; older windows are
+flagged `(stale)`.
 
 Side effect: each render also persists the Claude `rate_limits` to
 ~/.claude/rate-limits-cache.json (best-effort, never fatal) so a Codex
@@ -48,6 +51,22 @@ def fmt_window(window, pct_field):
     if secs >= 60:
         return out + f" ({secs // 60}m)"
     return out + " (<1m)"
+
+
+def codex_window_label(window):
+    """Label a Codex rate-limit window by its actual duration (from
+    window_minutes) so a weekly window is not mislabeled '5h'. Codex dropped
+    the fixed 5h window on 2026-07-12; primary is now weekly (10080). Deriving
+    the label keeps this correct whether Codex reports weekly-only or restores
+    the 5h. 300 -> '5h', 10080 -> '7d'."""
+    m = window.get("window_minutes")
+    if not m:
+        return ""
+    if m % 1440 == 0:
+        return f"{m // 1440}d"
+    if m % 60 == 0:
+        return f"{m // 60}h"
+    return f"{m}m"
 
 
 def persist_claude(data):
@@ -111,9 +130,20 @@ def codex_segment():
             break
     if not rl:
         return None
-    primary = fmt_window(rl.get("primary") or {}, CODEX_PCT_FIELD)
-    secondary = fmt_window(rl.get("secondary") or {}, CODEX_PCT_FIELD)
-    return f"Codex 5h {primary} · 7d {secondary}"
+    segs = []
+    for key in ("primary", "secondary"):
+        w = rl.get(key)
+        if not w:
+            continue
+        label = codex_window_label(w) or key
+        segs.append(f"{label} {fmt_window(w, CODEX_PCT_FIELD)}")
+    credits = rl.get("credits") or {}
+    bal = credits.get("balance")
+    if credits.get("has_credits") or (bal not in (None, "", "0")):
+        segs.append(f"cr {bal}" if bal not in (None, "") else "cr")
+    if not segs:
+        return None
+    return "Codex " + " · ".join(segs)
 
 
 def main():
