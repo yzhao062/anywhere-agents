@@ -65,7 +65,8 @@
   },
   "env": {
     "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+    "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": "1000"
   },
   "statusLine": {
     "type": "command",
