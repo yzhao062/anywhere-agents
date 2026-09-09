@@ -10,32 +10,48 @@ Phase 9.
 Data sources (both on disk, no live render or API call needed):
   - Claude: ~/.claude/rate-limits-cache.json, written by statusline.py on
     each Claude Code statusLine render (override via CLAUDE_RL_CACHE).
-  - Codex:  most recent ~/.codex/sessions/**/rollout-*.jsonl, field
+  - Codex:  ~/.codex/sessions/**/rollout-*.jsonl, field
     payload.rate_limits. Each window carries window_minutes, so the label
     is derived from it (300 -> 5h, 10080 -> 7d): Codex dropped the fixed 5h
     window on 2026-07-12, so primary is now weekly and secondary may be null.
+    Each snapshot also carries a limit_id. A session running a per-model
+    bucket reports that bucket rather than the account plan, and such a
+    bucket usually sits near 0% used, so rendering it verbatim reads as full
+    quota while the plan is half spent. A recognized plan reading therefore
+    always wins, and an unrecognized id never displaces one; a side meter is
+    shown labeled only when the sampled rollouts hold no plan reading at
+    all. Recency among those rollouts goes by the record timestamp, since
+    NTFS defers the mtime update on a rollout whose session still holds it
+    open. mtime still bounds which rollouts are opened, so the result is the
+    freshest plan reading among those sampled rather than the newest on
+    disk; the row's age bracket is what makes an old one visible.
 
 Each side is only as fresh as that agent's last activity; the age is shown
 in brackets so a stale snapshot is obvious.
 """
-import glob
 import json
 import os
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
 CODEX_PCT_FIELD = "used_percent"
+# The account plan meter. Rollouts written before per-model buckets shipped
+# carry no limit_id at all, so an absent id counts as the main meter.
+CODEX_MAIN_LIMIT_IDS = (None, "", "codex")
+# Recency bound: enough rollouts to see past a run of side-meter sessions,
+# few enough that a readout stays a handful of tail reads.
+MAX_ROLLOUT_SCAN = 12
+MAX_RL_LINES_PER_FILE = 200
+# Clock jitter tolerated when aging a record. Past it, a record stamped in
+# the future is refused rather than clamped: see _codex_snapshot_age.
+CODEX_FUTURE_TOLERANCE_SECONDS = 60
 CLAUDE_RL_CACHE = os.environ.get("CLAUDE_RL_CACHE") or os.path.join(
     os.path.expanduser("~"), ".claude", "rate-limits-cache.json"
 )
 
 
-def _age(ts):
-    if not ts:
-        return "?"
-    secs = int(time.time() - float(ts))
-    if secs < 0:
-        return "just now"
+def _fmt_age(secs):
+    """Render an age already measured in seconds."""
     if secs < 60:
         return "just now"
     if secs < 3600:
@@ -43,6 +59,15 @@ def _age(ts):
     if secs < 86400:
         return f"{secs // 3600}h{(secs % 3600) // 60}m ago"
     return f"{secs // 86400}d ago"
+
+
+def _age(ts):
+    """Render the age of an absolute epoch. The Codex row measures its own
+    age first, because a rollout record can be unageable in ways an epoch
+    cannot; it calls _fmt_age directly."""
+    if ts is None or ts == "":
+        return "?"
+    return _fmt_age(max(0, int(time.time() - float(ts))))
 
 
 def _reset(window):
@@ -88,6 +113,186 @@ def _codex_window_label(window):
     return f"{m}m"
 
 
+def _codex_is_main_meter(rate_limits):
+    """True when a snapshot belongs to the account plan meter.
+
+    Codex tags each snapshot once per-model meters exist: the plan bucket
+    reports limit_id "codex" with a null limit_name, a model-specific bucket
+    reports its own pair (for example "codex_bengalfox" /
+    "GPT-5.3-Codex-Spark"). Older rollouts carry neither field."""
+    return rate_limits.get("limit_id") in CODEX_MAIN_LIMIT_IDS
+
+
+def _codex_meter_label(rate_limits):
+    """Short tag for a side meter, empty string for the main one.
+
+    "GPT-5.3-Codex-Spark" renders as "Spark". The trailing segment is a
+    display heuristic, not a uniqueness guarantee: two bucket names could
+    share a suffix."""
+    if _codex_is_main_meter(rate_limits):
+        return ""
+    name = rate_limits.get("limit_name") or rate_limits.get("limit_id") or ""
+    return name.rsplit("-", 1)[-1] if "-" in name else name
+
+
+def _epoch(ts):
+    """ISO-8601 rollout timestamp to epoch seconds, or None if unparseable."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _codex_snapshot_age(ts, path):
+    """Age of a selected snapshot in seconds, or None when it cannot be aged
+    honestly.
+
+    Three inputs, three answers. A record in the producer's format ages off
+    its own timestamp. A record carrying no timestamp at all, which is what
+    rollouts predating the field look like, falls back to the file's mtime.
+    A record whose timestamp is present but unusable, either unparseable or
+    stamped ahead of the clock, returns None and is reported as unknown
+    rather than clamped or quietly handed the mtime. A future stamp is the
+    case that matters: it keeps outranking valid newer readings until real
+    time catches up, so any age computed for it would present the stalest
+    available reading as the freshest."""
+    now = time.time()
+    if not ts:
+        try:
+            return max(0, int(now - os.path.getmtime(path)))
+        except OSError:
+            return None
+    written = _epoch(ts)
+    if written is None or written - now > CODEX_FUTURE_TOLERANCE_SECONDS:
+        return None
+    return max(0, int(now - written))
+
+
+def _read_rollout_snapshots(path):
+    """Yield (timestamp, rate_limits) for the freshest snapshot of each
+    limit_id in one rollout's tail, newest first.
+
+    Lines are chronological, so walking backwards reaches each meter's latest
+    snapshot first; a repeat of an id already seen in this file is older and
+    is skipped. The line budget caps the parse on a rollout whose tail is
+    dense with token_count events."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return
+    seen = set()
+    examined = 0
+    for line in reversed(tail.splitlines()):
+        if "rate_limits" not in line:
+            continue
+        examined += 1
+        if examined > MAX_RL_LINES_PER_FILE:
+            return
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        rl = (obj.get("payload") or {}).get("rate_limits")
+        if not rl:
+            continue
+        key = rl.get("limit_id")
+        if key in seen:
+            continue
+        seen.add(key)
+        yield obj.get("timestamp") or "", rl
+
+
+def _codex_rate_limits():
+    """Freshest recognized plan snapshot among the sampled rollouts.
+
+    Returns (rate_limits, timestamp, path), or None when no rollout yields
+    one. A recognized plan reading beats an unrecognized bucket even when
+    the bucket is newer, because pinning the account plan is the point of
+    the selection; the row's age bracket is what keeps an old plan reading
+    from passing for a current one.
+
+    mtime orders which files are opened but never which snapshot wins, for
+    two reasons measured on this data. A live session keeps its rollout open,
+    and NTFS holds that file's mtime at creation time until the handle
+    closes, so a finished session looks newer than one still running. And the
+    newest file may be reporting a side meter whose reading is minutes older
+    than the plan reading in another rollout.
+
+    MAX_ROLLOUT_SCAN is a latency budget, not a correctness threshold: a
+    plan reading in a rollout that mtime ranks below it is not seen.
+
+    Ordering is a string compare. That is exact for the producer's fixed
+    `YYYY-MM-DDTHH:MM:SS.mmmZ` spelling and not for ISO-8601 at large, where
+    differing fractional precision sorts wrong. A rollout predating the
+    timestamp field sorts last within its own preference class and only wins
+    by default."""
+    files = _codex_rollouts()
+    if not files:
+        return None
+    best_main = None
+    best_any = None
+    for path in files[:MAX_ROLLOUT_SCAN]:
+        for ts, rl in _read_rollout_snapshots(path):
+            cand = (rl, ts, path)
+            if best_any is None or ts > best_any[1]:
+                best_any = cand
+            if _codex_is_main_meter(rl) and (best_main is None or ts > best_main[1]):
+                best_main = cand
+    return best_main or best_any
+
+
+def _codex_rollouts():
+    """Every rollout path under ~/.codex/sessions, newest mtime first.
+
+    os.scandir rather than glob plus getmtime: the walk keeps each DirEntry
+    and takes the mtime from it. On Windows that value arrives with the
+    directory listing and costs nothing, where getmtime is a separate
+    syscall per file; on Unix the first entry.stat() still makes one and
+    only repeats come free. Measured on Windows over about 5,200 rollouts,
+    discovery went from roughly 160 ms to roughly 15 ms, which a status
+    line pays on every render.
+
+    Three ways this walk refuses to fail. A directory it cannot read is
+    skipped rather than raised, because one unreadable session folder is no
+    reason to lose the whole readout on every prompt. A symlinked directory
+    is not descended into, which bounds the walk against a symlink cycle;
+    glob's `**` did follow them. A Windows junction is still descended
+    into, since it keeps the directory attribute that follow_symlinks=False
+    tests, but that gap predates this walk and Codex's date tree has no
+    reason to hold one. And an entry whose stat raises because it was
+    removed after the listing is dropped, which is ordinary here: Codex
+    writes this tree while it is read. Windows may still answer from cached
+    metadata in that case, and the tail reader catches the failed open."""
+    root = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
+    found = []
+    stack = [root]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as listing:
+                entries = list(listing)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                elif (entry.name.startswith("rollout-")
+                        and entry.name.endswith(".jsonl")
+                        and entry.is_file(follow_symlinks=False)):
+                    found.append((entry.stat().st_mtime, entry.path))
+            except OSError:
+                continue
+    found.sort(reverse=True)
+    return [path for _, path in found]
+
+
 def _codex_model():
     try:
         import tomllib
@@ -115,35 +320,12 @@ def claude_row():
 
 
 def codex_row():
-    home = os.path.expanduser("~")
-    files = glob.glob(
-        os.path.join(home, ".codex", "sessions", "**", "rollout-*.jsonl"),
-        recursive=True,
-    )
-    if not files:
-        return "Codex    (no session rollout found under ~/.codex/sessions/)"
-    newest = max(files, key=os.path.getmtime)
-    try:
-        with open(newest, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            tail = f.read().decode("utf-8", errors="ignore")
-    except OSError:
-        return "Codex    (latest rollout unreadable)"
-    rl = None
-    for line in reversed(tail.splitlines()):
-        if "rate_limits" not in line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        rl = (obj.get("payload") or {}).get("rate_limits")
-        if rl:
-            break
-    if not rl:
-        return "Codex    (no rate_limits in latest rollout)"
+    found = _codex_rate_limits()
+    if found is None:
+        if not _codex_rollouts():
+            return "Codex    (no session rollout found under ~/.codex/sessions/)"
+        return "Codex    (no rate_limits in recent rollouts)"
+    rl, ts, path = found
     segs = []
     for key in ("primary", "secondary"):
         w = rl.get(key)
@@ -155,9 +337,14 @@ def codex_row():
     bal = credits.get("balance")
     if credits.get("has_credits") or (bal not in (None, "", "0")):
         segs.append(f"credits {bal}" if bal not in (None, "") else "credits")
-    model = _codex_model()
+    # The side-meter tag replaces the configured model name: the row would
+    # otherwise read "gpt-6-astra  5h 100% left" off a Spark bucket.
+    meter = _codex_meter_label(rl)
+    model = f"[{meter}]" if meter else _codex_model()
     body = "   ".join(segs) if segs else "(no windows)"
-    return f"Codex    {model:<12}  {body}  [{_age(os.path.getmtime(newest))}]"
+    age = _codex_snapshot_age(ts, path)
+    shown = "?" if age is None else _fmt_age(age)
+    return f"Codex    {model:<12}  {body}  [{shown}]"
 
 
 def main():
