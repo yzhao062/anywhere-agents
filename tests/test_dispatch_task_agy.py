@@ -158,8 +158,9 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", args)
         self.assertNotIn("--disable-slash-commands", args)
         self.assertIn("--sandbox", args)
-        self.assertEqual(
-            Path((self.log / "cwd.txt").read_text(encoding="utf-8")), self.work
+        actual_cwd = Path((self.log / "cwd.txt").read_text(encoding="utf-8"))
+        self.assertTrue(
+            actual_cwd.samefile(self.work), f"{actual_cwd} != {self.work}"
         )
         relay = (self.log / "prompt.txt").read_text(encoding="utf-8")
         self.assertIn("Audit section 3", relay)
