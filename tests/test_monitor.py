@@ -107,6 +107,20 @@ class _MonitorContractMixin:
             self.assertIn("MONITOR-EVENT fail", r.stdout)
             self.assertIn("failed(fallback)", r.stdout)
 
+    def test_fallback_agy_header_is_failure(self) -> None:
+        # Regression: dispatch-task-agy.py's publish_fallback writes a different
+        # header ("Agy wrote no final result") than dispatch-task's backstop
+        # ("worker wrote no result file"). Both must match the shared
+        # "result (FALLBACK, " prefix and classify as failed(fallback).
+        with _temp_dir() as td:
+            a = self._make_state_dir(
+                td, "u1",
+                result="# u1 result (FALLBACK, Agy wrote no final result)\n...\n")
+            r = self._run_monitor([a])
+            self.assertEqual(r.returncode, 3, f"{r.stdout}\n{r.stderr}")
+            self.assertIn("MONITOR-EVENT fail", r.stdout)
+            self.assertIn("failed(fallback)", r.stdout)
+
     def test_stall_detected(self) -> None:
         # Tail present but never grows, no result, no dispatch-pid -> stalled.
         with _temp_dir() as td:
@@ -147,6 +161,27 @@ class _MonitorContractMixin:
             self.assertTrue(
                 r.stdout.startswith("MONITOR-START units=1 stall-threshold="),
                 f"first line schema:\n{r.stdout}")
+
+    def test_fallback_header_quoted_on_first_line_is_done(self) -> None:
+        # Review finding: a real result whose first line merely quotes the
+        # producer header text (say, a unit that audits these monitors) must
+        # not be classified as a fallback; only an anchored header counts.
+        with _temp_dir() as td:
+            a = self._make_state_dir(
+                td, "u1",
+                result="# u1 result: audit of `result (FALLBACK, ` matching\nConclusion: ok\n")
+            r = self._run_monitor([a])
+            self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+            self.assertIn("UNIT u1 done", r.stdout)
+
+    def test_fallback_header_is_case_sensitive_on_both_platforms(self) -> None:
+        with _temp_dir() as td:
+            a = self._make_state_dir(
+                td, "u1",
+                result="# u1 result (fallback, lowercase mention)\nConclusion: ok\n")
+            r = self._run_monitor([a])
+            self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+            self.assertIn("UNIT u1 done", r.stdout)
 
     def test_fallback_only_matches_header_not_body(self) -> None:
         # Regression (review M2): a real result that merely mentions FALLBACK in its

@@ -43,7 +43,19 @@ if sys.argv[1:] == ["models"]:
 (log / "cwd.txt").write_text(os.getcwd(), encoding="utf-8")
 event = json.loads(sys.stdin.readline())
 (log / "prompt.txt").write_text(event["message"]["content"], encoding="utf-8")
-print(json.dumps({"event": "init", "model": "gemini-3.8-flash-high"}))
+init_event = {"event": "init", "model": "gemini-3.8-flash-high"}
+if os.environ.get("MOCK_AGY_NO_INIT_CONVERSATION_ID") != "1":
+    init_event["conversation_id"] = os.environ.get(
+        "MOCK_AGY_CONVERSATION_ID", "conv-fixed-0001"
+    )
+print(json.dumps(init_event))
+worker_result = os.environ.get("MOCK_AGY_WRITE_RESULT")
+if worker_result:
+    Path(worker_result).write_text(
+        "# unit_a result\nConclusion: worker-written\nFiles: none\n"
+        "Open items: none\nVerification: mock\n\n| row | value |\n|---|---|\n| a | 1 |\n",
+        encoding="utf-8",
+    )
 if os.environ.get("MOCK_AGY_NO_RESULT") != "1":
     response = os.environ.get(
         "MOCK_AGY_RESPONSE",
@@ -103,8 +115,10 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
     def _run(
         self,
         result_path: Path | None = None,
-        mode: str = "plan",
+        mode: str | None = "plan",
         extra_env: dict[str, str] | None = None,
+        extra_args: list[str] | None = None,
+        own_cwd: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         target = result_path or (self.root / "unit-result.md")
         env = os.environ.copy()
@@ -119,21 +133,28 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
                 "TMPDIR": str(self.root),
             }
         )
+        if own_cwd:
+            # Let the dispatcher create its own scratch directory, which is
+            # the only case where an omitted --mode is allowed.
+            env.pop("PRUN_SCRATCH_CWD", None)
         if extra_env:
             env.update(extra_env)
+        argv = [
+            str(PYTHON),
+            str(DISPATCH),
+            "--prompt-file",
+            str(self.prompt),
+            "--result-file",
+            str(target),
+            "--unit-id",
+            "unit_a",
+        ]
+        if mode is not None:
+            argv += ["--mode", mode]
+        if extra_args:
+            argv += extra_args
         result = subprocess.run(
-            [
-                str(PYTHON),
-                str(DISPATCH),
-                "--prompt-file",
-                str(self.prompt),
-                "--result-file",
-                str(target),
-                "--unit-id",
-                "unit_a",
-                "--mode",
-                mode,
-            ],
+            argv,
             cwd=self.root,
             env=env,
             text=True,
@@ -179,12 +200,143 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         ):
             self.assertTrue((state_dir / name).is_file(), name)
 
-    def test_accept_edits_is_explicit(self) -> None:
-        result, _ = self._run(mode="accept-edits")
+    def test_default_mode_is_accept_edits_with_skip_permissions(self) -> None:
+        result, _ = self._run(mode=None, own_cwd=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
         self.assertEqual(args[args.index("--mode") + 1], "accept-edits")
         self.assertIn("--dangerously-skip-permissions", args)
+        state_dir = Path(result.stdout.strip().split(" ", 1)[1])
+        actual_cwd = Path((self.log / "cwd.txt").read_text(encoding="utf-8"))
+        self.assertTrue(actual_cwd.samefile(state_dir / "work"))
+
+    def test_omitted_mode_with_caller_workspace_fails_before_launch(self) -> None:
+        # Review finding: the unattended default must not reach a directory
+        # the caller supplied, which could be the real checkout.
+        for label, kwargs in (
+            ("PRUN_SCRATCH_CWD", {}),
+            ("--add-dir", {"own_cwd": True, "extra_args": ["--add-dir", str(self.work)]}),
+        ):
+            with self.subTest(label):
+                if (self.log / "args.json").exists():
+                    (self.log / "args.json").unlink()
+                result, target = self._run(mode=None, **kwargs)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("explicit", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(target.exists())
+                self.assertFalse((self.log / "args.json").exists())
+
+    def test_explicit_accept_edits_in_clone_keeps_unattended_permissions(self) -> None:
+        result, _ = self._run(mode="accept-edits")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("--dangerously-skip-permissions", args)
+        actual_cwd = Path((self.log / "cwd.txt").read_text(encoding="utf-8"))
+        self.assertTrue(actual_cwd.samefile(self.work))
+
+    def test_empty_add_dir_and_continue_from_fail_closed(self) -> None:
+        # Review finding: an unset shell variable must not resolve to the
+        # invocation directory or silently start a fresh conversation.
+        for label, extra in (
+            ("--add-dir", ["--add-dir", ""]),
+            ("--add-dir-blank", ["--add-dir", "   "]),
+            ("--continue-from", ["--continue-from", ""]),
+            ("--continue-from-blank", ["--continue-from", " "]),
+        ):
+            with self.subTest(label):
+                if (self.log / "args.json").exists():
+                    (self.log / "args.json").unlink()
+                result, target = self._run(extra_args=extra)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("non-empty", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(target.exists())
+                self.assertFalse((self.log / "args.json").exists())
+
+    def test_plan_mode_carries_neither_accept_edits_nor_skip(self) -> None:
+        result, _ = self._run(mode="plan")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        self.assertNotIn("--dangerously-skip-permissions", args)
+
+    def test_conversation_id_is_recorded_from_init_event(self) -> None:
+        result, _ = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_dir = Path(result.stdout.strip().split(" ", 1)[1])
+        recorded = (state_dir / "conversation-id").read_text(encoding="utf-8")
+        self.assertEqual(recorded, "conv-fixed-0001\n")
+
+    def test_no_init_event_conversation_id_writes_no_file(self) -> None:
+        result, _ = self._run(extra_env={"MOCK_AGY_NO_INIT_CONVERSATION_ID": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_dir = Path(result.stdout.strip().split(" ", 1)[1])
+        self.assertFalse((state_dir / "conversation-id").exists())
+
+    def test_add_dir_is_forwarded_for_each_directory(self) -> None:
+        dir_a = self.root / "extra-a"
+        dir_b = self.root / "extra-b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        result, _ = self._run(
+            extra_args=["--add-dir", str(dir_a), "--add-dir", str(dir_b)]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        positions = [i for i, token in enumerate(args) if token == "--add-dir"]
+        self.assertEqual(len(positions), 2)
+        forwarded = {args[i + 1] for i in positions}
+        self.assertEqual(forwarded, {str(dir_a.resolve()), str(dir_b.resolve())})
+
+    def test_add_dir_rejects_missing_directory(self) -> None:
+        missing = self.root / "does-not-exist"
+        result, target = self._run(extra_args=["--add-dir", str(missing)])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(target.exists())
+        self.assertFalse((self.log / "args.json").exists())
+
+    def test_continue_from_forwards_conversation_flag(self) -> None:
+        first_result, _ = self._run()
+        self.assertEqual(first_result.returncode, 0, first_result.stderr)
+        first_state_dir = Path(first_result.stdout.strip().split(" ", 1)[1])
+        recorded_id = (first_state_dir / "conversation-id").read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertTrue(recorded_id)
+
+        second_result, _ = self._run(
+            result_path=self.root / "unit-result-continued.md",
+            extra_args=["--continue-from", str(first_state_dir)],
+        )
+        self.assertEqual(second_result.returncode, 0, second_result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(args[args.index("--conversation") + 1], recorded_id)
+
+    def test_continue_from_missing_conversation_id_file_exits_before_launch(
+        self,
+    ) -> None:
+        empty_dir = self.root / "state-without-id"
+        empty_dir.mkdir()
+        result, target = self._run(
+            extra_args=["--continue-from", str(empty_dir)]
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(target.exists())
+        self.assertFalse((self.log / "args.json").exists())
+
+        blank_id_dir = self.root / "state-with-blank-id"
+        blank_id_dir.mkdir()
+        (blank_id_dir / "conversation-id").write_text("\n", encoding="utf-8")
+        result2, target2 = self._run(
+            result_path=self.root / "unit-result-2.md",
+            extra_args=["--continue-from", str(blank_id_dir)],
+        )
+        self.assertEqual(result2.returncode, 2)
+        self.assertEqual(result2.stdout, "")
+        self.assertFalse(target2.exists())
 
     def test_nonzero_exit_publishes_fallback(self) -> None:
         result, target = self._run(extra_env={"MOCK_AGY_EXIT": "9"})
@@ -205,6 +357,26 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 70)
         self.assertFalse((self.log / "prompt.txt").exists())
         self.assertIn("unavailable", target.read_text(encoding="utf-8"))
+
+    def test_worker_written_result_is_kept_and_response_stored_beside(self) -> None:
+        # A live unit wrote its trace table to the result file and then replied
+        # with a one-line summary; the dispatcher replaced the table with the
+        # summary. The worker's file must win and the response must land beside it.
+        target = self.root / "unit-result.md"
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(target),
+                "MOCK_AGY_RESPONSE": "done",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = target.read_text(encoding="utf-8")
+        self.assertIn("Conclusion: worker-written", body)
+        self.assertIn("| a | 1 |", body)
+        beside = self.root / "unit-result.response.md"
+        self.assertEqual(beside.read_text(encoding="utf-8"), "done\n")
+        self.assertNotIn("FALLBACK", body)
 
     def test_existing_result_is_never_overwritten(self) -> None:
         target = self.root / "existing.md"

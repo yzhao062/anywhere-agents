@@ -44,6 +44,7 @@ guarantees the anywhere-agents copies are byte-identical, so pinning the ac
 copy pins both.
 """
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -811,6 +812,17 @@ class TestAgyQuota(unittest.TestCase):
         cache = os.path.join(tmp, "agy-quota-cache.json")
         return cache, cache + ".last-attempt", cache + ".refresh.lock"
 
+    def test_missing_agy_binary_is_named_and_starts_no_refresh(self):
+        # Spark (no agy installed) rendered "(refresh started)" forever: the
+        # helper exited 1 in the background and nothing said why.
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, attempt, lock = self._paths(tmp)
+            with mock.patch.object(agent_quota, "AGY_QUOTA_CACHE", cache),                     mock.patch.object(agent_quota, "AGY_QUOTA_ATTEMPT", attempt),                     mock.patch.object(agent_quota, "AGY_QUOTA_LOCK", lock),                     mock.patch.object(agent_quota, "_agy_binary", return_value=None),                     mock.patch.object(agent_quota, "_start_agy_refresh") as start,                     mock.patch.object(agent_quota, "claude_row", return_value="Claude"),                     mock.patch.object(agent_quota, "codex_row", return_value="Codex"),                     mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]),                     mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(agent_quota.main(), 0)
+        start.assert_not_called()
+        self.assertIn("agy not installed", out.getvalue())
+        self.assertNotIn("refresh started", out.getvalue())
+
     def test_detailed_quota_shows_both_agy_pools_but_statusline_stays_primary(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache, attempt, lock = self._paths(tmp)
@@ -903,19 +915,63 @@ class TestAgyQuota(unittest.TestCase):
             with mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache):
                 agy = statusline.agy_segment(compact=True)
 
-        self.assertEqual(claude, "🤖 Opus 5h82% 7d38%")
-        self.assertIn("AgyG 5h75%(", agy)
-        self.assertIn("7d40%(", agy)
+        self.assertEqual(claude, "cc 5h82% 7d38%")
+        self.assertIn("agy 5h75% (", agy)
+        self.assertIn("7d40% (", agy)
         self.assertIn("@2m", agy)
         self.assertNotIn("ULTRA", agy)
         self.assertNotIn(" · ", agy)
+        self.assertNotIn("AgyG", agy)
 
     def test_compact_expired_window_uses_named_reset_marker(self):
         shown = statusline.fmt_window_compact(
             {"used_percentage": 10, "resets_at": time.time() - 1},
             statusline.CLAUDE_PCT_FIELD,
         )
-        self.assertEqual(shown, "90%(reset)")
+        self.assertEqual(shown, "90% (reset)")
+
+    def test_compact_main_joins_pools_with_pipes_and_cc_label(self):
+        """main() is the only place the pool separator is assembled; the
+        segment functions never insert it themselves, so this pins the
+        join directly instead of re-deriving it from the pieces."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, _, _ = self._paths(tmp)
+            payload = _agy_payload()
+            pathlib.Path(cache).write_text(
+                json.dumps(
+                    {
+                        "cached_at": time.time() - 120,
+                        "plan_tier": "ULTRA",
+                        "usage": payload["command"]["data"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdin = io.StringIO(json.dumps({
+                "model": {"display_name": "Opus 5 (1M context)"},
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 18},
+                    "seven_day": {"used_percentage": 62},
+                },
+            }))
+            out = io.StringIO()
+            # A fresh, patched home has no ~/.codex/sessions, so codex_segment
+            # yields nothing here and the line carries only the cc and agy
+            # pools; that still proves the " | " join, and persist_claude /
+            # start_agy_refresh are stubbed so the run touches no real disk
+            # state or subprocess.
+            with mock.patch("os.path.expanduser", _fake_home(tmp)), \
+                    mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache), \
+                    mock.patch.object(statusline, "persist_claude"), \
+                    mock.patch.object(statusline, "start_agy_refresh"), \
+                    mock.patch("sys.stdin", stdin), \
+                    mock.patch("sys.stdout", out):
+                statusline.main()
+            line = out.getvalue().rstrip("\n")
+
+        self.assertTrue(line.startswith("cc "))
+        self.assertEqual(line.count(" | "), 1)
+        self.assertIn(" | agy ", line)
 
 
 if __name__ == "__main__":

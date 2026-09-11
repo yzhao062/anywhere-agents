@@ -112,7 +112,7 @@ def fmt_window_compact(window, pct_field):
         return out
     secs = int(float(resets_at) - time.time())
     if secs <= 0:
-        return out + "(reset)"
+        return out + " (reset)"
     if secs >= 86400:
         reset = f"{secs // 86400}d{(secs % 86400) // 3600}h"
     elif secs >= 3600:
@@ -121,7 +121,7 @@ def fmt_window_compact(window, pct_field):
         reset = f"{secs // 60}m"
     else:
         reset = "<1m"
-    return f"{out}({reset})"
+    return f"{out} ({reset})"
 
 
 def fmt_age(secs):
@@ -216,14 +216,9 @@ def claude_segment(data, compact=False):
     model = (data.get("model") or {}).get("display_name") or "?"
     rl = data.get("rate_limits") or {}
     if compact:
-        if model.endswith(" context)") and " (" in model:
-            model = model.rsplit(" (", 1)[0]
-        head, separator, tail = model.rpartition(" ")
-        if separator and tail.replace(".", "", 1).isdigit():
-            model = head
         five = fmt_window_compact(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
         week = fmt_window_compact(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
-        return f"🤖 {model} 5h{five} 7d{week}"
+        return f"cc 5h{five} 7d{week}"
     five = fmt_window(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
     week = fmt_window(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
     return f"🤖 {model} · 5h {five} · 7d {week}"
@@ -328,7 +323,7 @@ def agy_segment(compact=False):
         except (TypeError, ValueError):
             pass
     tier = data.get("plan_tier")
-    head = "AgyG" if compact else (f"Agy Gemini [{tier}]" if tier else "Agy Gemini")
+    head = "agy" if compact else (f"Agy Gemini [{tier}]" if tier else "Agy Gemini")
     if compact:
         return f"{head} 5h{five} 7d{week} {shown_age}"
     return f"{head} · 5h {five} · 7d {week} · {shown_age}"
@@ -513,7 +508,8 @@ def codex_segment(compact=False):
     else:
         segs.append("age ?" if age is None else fmt_age(age))
     meter = codex_meter_label(rl)
-    head = f"Codex [{meter}]" if meter else "Codex"
+    label = "gpt" if compact else "Codex"
+    head = f"{label} [{meter}]" if meter else label
     return head + " " + (" ".join(segs) if compact else " · ".join(segs))
 
 
@@ -528,10 +524,10 @@ def main():
     line = claude_segment(data, compact=True)
     cx = codex_segment(compact=True)
     if cx:
-        line += "|" + cx
+        line += " | " + cx
     agy = agy_segment(compact=True)
     if agy:
-        line += "|" + agy
+        line += " | " + agy
     sys.stdout.write(line + "\n")
 
 

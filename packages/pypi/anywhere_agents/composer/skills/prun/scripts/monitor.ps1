@@ -81,10 +81,12 @@ while ($true) {
             $rmt = Get-FileMtime $rf
             if (($now - $rmt) -ge $stableWindow) {
                 $terminal = $true
-                # FALLBACK only when the dispatch-task backstop HEADER is on line 1,
-                # never merely the word appearing inside a real worker's result body.
+                # FALLBACK only when line 1 IS a FALLBACK-producer HEADER (dispatch-task's
+                # backstop, or the Agy dispatcher's own fallback): "# <unit-id> result
+                # (FALLBACK, ...", anchored and case-sensitive, so a real result whose
+                # first line merely quotes that text, or whose body mentions it, is done.
                 $firstLine = (Get-Content -LiteralPath $rf -TotalCount 1 -ErrorAction SilentlyContinue)
-                if ($firstLine -and ($firstLine -match 'result \(FALLBACK, worker wrote no result file\)')) {
+                if ($firstLine -and ($firstLine -cmatch '^# [A-Za-z0-9_-]+ result \(FALLBACK, ')) {
                     $status[$i] = 'failed(fallback)'; $hasFail = $true
                 } else {
                     $status[$i] = 'done'

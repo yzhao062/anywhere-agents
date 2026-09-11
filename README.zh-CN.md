@@ -90,10 +90,10 @@ your-project/
 `bootstrap` 之后，每个 Claude Code session 都会在终端底部常驻显示 Claude、Codex、Agy 最近一次额度读数。为了同时放下三家，状态行使用紧凑格式：
 
 ```text
-🤖 Opus 5h82%(3h4m) 7d38%(2d17h)|Codex 7d75%(6d3h) @now|AgyG 5h100%(4h59m) 7d100%(6d23h) @now
+cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100% (6d23h) @now
 ```
 
-Claude 那段从 statusLine stdin 拿；Codex 那段读最近的 `~/.codex/sessions/**/rollout-*.jsonl`；`AgyG` 表示 `agy -p "/usage" --output-format json` 返回的 `Gemini Models` 额度组。百分比表示剩余额度，括号里是距窗口重置的时间，`(reset)` 表示窗口已重置但新读数尚未到，`@2m` 表示磁盘快照是两分钟前的。这个零 turn 查询从用户主目录在隐藏且有超时上限的后台 helper 中运行，每五分钟最多一次，所以状态行不等网络，也不会打开项目级 Agy workspace；lock 和失败冷却避免重复刷新。为了紧凑，statusline 只显示默认的 Gemini 池。独立的 `agent-quota.py` 会同时列出另一个 `Claude/GPT` 池，可通过 `claude-sonnet-4-6`、`claude-opus-4-6-thinking` 或 `gpt-oss-120b-medium` 使用。
+`cc` 是 Claude 那段，从 statusLine stdin 拿；`gpt` 是 Codex，读最近的 `~/.codex/sessions/**/rollout-*.jsonl`；`agy` 表示 `agy -p "/usage" --output-format json` 返回的 `Gemini Models` 额度组。百分比表示剩余额度，括号里是距窗口重置的时间，`(reset)` 表示窗口已重置但新读数尚未到，`@2m` 表示磁盘快照是两分钟前的。这个零 turn 查询从用户主目录在隐藏且有超时上限的后台 helper 中运行，每五分钟最多一次，所以状态行不等网络，也不会打开项目级 Agy workspace；lock 和失败冷却避免重复刷新。为了紧凑，statusline 只显示默认的 Gemini 池。独立的 `agent-quota.py` 会同时列出另一个 `Claude/GPT` 池，可通过 `claude-sonnet-4-6`、`claude-opus-4-6-thinking` 或 `gpt-oss-120b-medium` 使用。
 
 ### 用 `/vet` 选择 reviewer
 
@@ -109,7 +109,7 @@ Claude 那段从 statusLine stdin 拿；Codex 那段读最近的 `~/.codex/sessi
 
 如果没有设置用户级 Auto-terminal 默认，就显式写一次 channel：`/vet auto agy`。Agy backend 使用已安装 `agy` CLI 上登录的 Google AI plan，不另要 Gemini API key。它在 staged Git index 的隔离导出中以 `accept-edits` 加自动批准工具权限运行，因此能实际跑实验，同时不会把生成物写进原工作树。完成后原子发布 `Review-Antigravity.md`。需要临时换模型时设 `ANTIGRAVITY_DISPATCH_MODEL`，需要换 effort 时设 `ANTIGRAVITY_DISPATCH_EFFORT`。
 
-`/prun` 采用另一套成本分工：Sonnet 是 session 内默认 worker，Agy 是外部并行池。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 同样默认 Gemini 3.8 Flash High / `high`；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
+`/prun` 采用另一套成本分工：需要 session 内工具的单元交给 Sonnet，其余大部分交给 Agy：它在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 同样默认 Gemini 3.8 Flash High / `high`；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
 
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
@@ -301,7 +301,7 @@ rule_packs:
 
 ## 下一步
 
-`v0.5.0` 发的是 direct-URL pack fetch、4-method auth chain（SSH agent、`gh` CLI token、`GITHUB_TOKEN`、匿名 fallback）、信任模型转向（`update_policy` 默认从 `locked` 改成 `prompt`），加上 `pack update` + `pack list --drift` 这两个 CLI 命令。`v0.5.2` 发的是端到端 pack 管理：`pack add` 一步到位（写用户级行、跑 composer、部署）、AC→AA 迁移自动检测。`v0.6.0` 把日常更新流合并成一个动词：裸 `anywhere-agents` 是规范 apply 路径；`pack verify --fix` 和 `pack update` 在所有 v0.x 中作为兼容别名继续可用；mutable ref 上的 prompt-policy drift 默认 inline 应用并打 stderr 摘要行；每次跑要跳过用 `ANYWHERE_AGENTS_UPDATE=skip` 或 `--no-apply-drift`。active entry 上的 `update_policy: auto` 在 parse 时被拒，带可执行的错误消息。`v0.7.x` 把发布移到 OIDC Trusted Publishing：`gh release create <tag>` 触发 `publish.yml`，由 workflow 构建并发布到 PyPI 和 npm；手动 `twine upload` / `npm publish` 只是 fallback。`v0.7.7` 把 `prun` 注册进 `aa-core-skills`：Opus session 负责协调，Codex 和 Sonnet worker 并行跑任务；worker 不 commit、不 push，写代码的单元跑在 throwaway clone 里，最后仍由 Opus 和用户做 integration gate。发布状态详情在 [changelog](CHANGELOG.md)。
+`v0.5.0` 发的是 direct-URL pack fetch、4-method auth chain（SSH agent、`gh` CLI token、`GITHUB_TOKEN`、匿名 fallback）、信任模型转向（`update_policy` 默认从 `locked` 改成 `prompt`），加上 `pack update` + `pack list --drift` 这两个 CLI 命令。`v0.5.2` 发的是端到端 pack 管理：`pack add` 一步到位（写用户级行、跑 composer、部署）、AC→AA 迁移自动检测。`v0.6.0` 把日常更新流合并成一个动词：裸 `anywhere-agents` 是规范 apply 路径；`pack verify --fix` 和 `pack update` 在所有 v0.x 中作为兼容别名继续可用；mutable ref 上的 prompt-policy drift 默认 inline 应用并打 stderr 摘要行；每次跑要跳过用 `ANYWHERE_AGENTS_UPDATE=skip` 或 `--no-apply-drift`。active entry 上的 `update_policy: auto` 在 parse 时被拒，带可执行的错误消息。`v0.7.x` 把发布移到 OIDC Trusted Publishing：`gh release create <tag>` 触发 `publish.yml`，由 workflow 构建并发布到 PyPI 和 npm；手动 `twine upload` / `npm publish` 只是 fallback。`v0.7.7` 把 `prun` 注册进 `aa-core-skills`：Opus session 负责协调，Codex 和 Sonnet worker 并行跑任务；worker 不 commit、不 push，写代码的单元跑在 throwaway clone 里，最后仍由 Opus 和用户做 integration gate。`v0.8.0` 把 Codex 完全从 `prun` 移出。Sonnet 仍是 session 内默认 worker，Agy（通过 Antigravity CLI 跑 Gemini）取代 Codex 成为第二个 worker 池，Codex 的额度改为专供 `/vet` 使用。发布状态详情在 [changelog](CHANGELOG.md)。
 
 [`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 作者的**蓝本**：profile、paper workflow 约定、团队约定、自定义 skill，所有你想跨项目复用的 personalization 都按这个形状来。v2 manifest schema 在那里以可工作的形态摆着。fork ap，把它的三个 pack（`profile`、`paper-workflow`、`acad-skills`）换成你自己的内容，打 tag 发布，然后用 `anywhere-agents pack add https://github.com/<your-user>/<your-repo> --ref <tag>`。从 v0.5.2 起这是一步到位：CLI 写用户级配置行 + 跑 composer 在一个命令里完成部署。
 

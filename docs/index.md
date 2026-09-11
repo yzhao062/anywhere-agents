@@ -37,15 +37,15 @@ With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` u
 
 The Agy dispatcher reviews an isolated export of the staged Git index with unattended execution permission, then atomically publishes `Review-Antigravity.md`. It can run tests and experiments, including generated-file writes inside the disposable snapshot, without touching the original worktree. The same validation-capability contract applies to every automated `/vet` backend. See [implement-review](skills/implement-review.md) for backend selection, preflight, model overrides, self-review guards, and failure handling.
 
-For parallel execution, `/prun` uses Sonnet plus Agy rather than Codex. Sonnet is the in-session default; Agy is the external Google-model pool. Codex quota stays reserved for `/vet`, and fan-out width follows the task's independent units rather than a fixed small cap.
+For parallel execution, `/prun` uses Sonnet plus Agy rather than Codex. Sonnet takes the units that need session tools; Agy takes the larger share of the rest and runs unattended in a scratch directory or throwaway clone. Codex quota stays reserved for `/vet`, and fan-out width follows the task's independent units rather than a fixed small cap.
 
 The installed Claude Code status line also shows all three quota sources in a compact row:
 
 ```text
-🤖 Opus 5h82%(3h4m) 7d38%(2d17h)|Codex 7d75%(6d3h) @now|AgyG 5h100%(4h59m) 7d100%(6d23h) @now
+cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100% (6d23h) @now
 ```
 
-Agy quota is cached from its zero-turn `/usage` metadata command. `AgyG` is the Gemini pool used by the default Agy reviewer and worker. A bounded background helper refreshes it at most once per five minutes, so rendering the status line does not wait on a network request. Run `agent-quota.py` for the expanded view, which also shows Agy's separate Claude/GPT pool.
+Agy quota is cached from its zero-turn `/usage` metadata command. `agy` is the Gemini pool used by the default Agy reviewer and worker. A bounded background helper refreshes it at most once per five minutes, so rendering the status line does not wait on a network request. Run `agent-quota.py` for the expanded view, which also shows Agy's separate Claude/GPT pool.
 
 ## Quick Install
 

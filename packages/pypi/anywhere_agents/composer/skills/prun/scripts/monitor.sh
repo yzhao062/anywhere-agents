@@ -142,9 +142,11 @@ while :; do
             rmt=$(_mtime "$rf")
             if [ $((now - rmt)) -ge "$STABLE_WINDOW" ]; then
                 terminal=1
-                # FALLBACK only when the dispatch-task backstop HEADER is on line 1,
-                # never merely the word appearing inside a real worker's result body.
-                if head -n 1 "$rf" 2>/dev/null | grep -q 'result (FALLBACK, worker wrote no result file)'; then
+                # FALLBACK only when line 1 IS a FALLBACK-producer HEADER (dispatch-task's
+                # backstop, or the Agy dispatcher's own fallback): "# <unit-id> result
+                # (FALLBACK, ...", anchored and case-sensitive, so a real result whose
+                # first line merely quotes that text, or whose body mentions it, is done.
+                if head -n 1 "$rf" 2>/dev/null | grep -Eq '^# [A-Za-z0-9_-]+ result \(FALLBACK, '; then
                     STATUS[$i]="failed(fallback)"; has_fail=1
                 else
                     STATUS[$i]="done"

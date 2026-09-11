@@ -578,10 +578,15 @@ def codex_row():
     return f"Codex    {model:<12}  {body}  [{shown}]"
 
 
-def agy_row(refresh_started=False):
+def agy_row(refresh_started=False, installed=True):
     data = _read_agy_cache()
     if data is None:
-        state = "refresh started" if refresh_started else "quota cache unavailable"
+        if not installed:
+            state = "agy not installed; install the Antigravity CLI or set ANTIGRAVITY_BIN"
+        elif refresh_started:
+            state = "refresh started"
+        else:
+            state = "quota cache unavailable"
         return f"Agy      ({state})"
     tier = data.get("plan_tier")
     specs = [
@@ -605,10 +610,14 @@ def agy_row(refresh_started=False):
 def main():
     if sys.argv[1:] == ["--refresh-agy"]:
         return _refresh_agy_cache()
-    refresh_started = _start_agy_refresh()
+    installed = _agy_binary() is not None
+    # Without a binary the helper would only exit 1 in the background, so the
+    # plain readout names the missing install instead of a refresh that
+    # never lands.
+    refresh_started = _start_agy_refresh() if installed else False
     print(claude_row())
     print(codex_row())
-    print(agy_row(refresh_started))
+    print(agy_row(refresh_started, installed=installed))
     return 0
 
 
