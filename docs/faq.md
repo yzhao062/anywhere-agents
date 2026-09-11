@@ -25,7 +25,17 @@
     The error message names the pack, the active entry's `files[].to` path, the offending policy literal, and the required rewrite. Maintainer-project scan ahead of the v0.6.0 release found zero hits, so no real consumer is expected to be caught by the rejection.
 
 ??? question "Does this work with [agent X]?"
-    Primary support is **Claude Code + Codex**. The `AGENTS.md` convention is standardized enough that other agents (Cursor, Aider, Gemini CLI) may read it and pick up writing defaults. Skill routing and guard hooks are tuned for Claude Code specifically. Forks can extend support to other agents.
+    Primary coordination support is **Claude Code + Codex**. Agy is also a supported headless backend for Gemini review and `prun` workers. The `AGENTS.md` convention is standardized enough that other agents (Cursor, Aider, Gemini CLI) may read it and pick up writing defaults. Skill routing and guard hooks are tuned for Claude Code specifically. Forks can extend support to other agents.
+
+??? question "How do I use Gemini as the `/vet` reviewer?"
+    Install and authenticate Google's Antigravity CLI (`agy`), then verify its [headless mode](https://antigravity.google/docs/cli/headless/). If your user-level `IMPLEMENT_REVIEW_DEFAULT_CHANNEL` is `auto`, run `/vet agy`; otherwise run `/vet auto agy`. The longer tokens `/vet gemini` and `/vet antigravity` are aliases. Bare `/vet` still selects Codex.
+
+    The shipped default is `gemini-3.8-flash-high` with `effort=high`. Override a round with `ANTIGRAVITY_DISPATCH_MODEL` or `ANTIGRAVITY_DISPATCH_EFFORT`. The dispatcher verifies the exact model before the review request and publishes `Review-Antigravity.md`. It uses `accept-edits` plus unattended tool approval inside a disposable staged snapshot, so it can run experiments rather than merely read files.
+
+??? question "Why can the Agy quota be a few minutes old?"
+    Antigravity's [`/usage` command](https://antigravity.google/docs/cli/commands/usage) refreshes quota metadata from the backend. `agy -p "/usage" --output-format json` starts no agent turn and reports zero tokens, but it is still a network request. Running it synchronously would add several seconds to every Claude Code status render. `statusline.py` therefore reads `~/.claude/agy-quota-cache.json` and starts one bounded background refresh at most every five minutes. `@2m` means the cache was written two minutes ago. `AgyG` is the compact Gemini-pool reading; the standalone `agent-quota.py` command also shows the separate Claude/GPT pool. The lock and last-attempt timestamp prevent concurrent queries and retry storms after a failure.
+
+    Set `AGY_QUOTA_TTL_SECONDS` to change the refresh interval, `AGY_QUOTA_TIMEOUT_SECONDS` to change the query timeout, or `AGY_QUOTA_CACHE` to move the cache. These affect quota display only; they never stop or modify an existing Agy session.
 
 ??? question "What is the difference between `AGENTS.md` and `AGENTS.local.md`?"
     `AGENTS.md` is the shared config synced from upstream. Bootstrap overwrites it on every run — never edit it in a consuming project, or your changes will be lost on the next session.

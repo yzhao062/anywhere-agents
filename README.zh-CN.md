@@ -39,7 +39,7 @@
 
 **你在好几个 repo 之间跳。** 每开一个新项目都得重复同一套仪式：写作规则、权限策略、自定义 skill。手动复制粘贴以后看着它们一点一点走样，累积起来很烦人。`bootstrap` 把共享默认拉下来，再在上面叠你这个项目自己的改动。
 
-**你想在 push 之前先有人看一眼。** `anywhere-agents` 自带 `/implement-review` 这个 skill：把 staged diff 递给第二个 reviewer（Codex / GitHub Copilot / 无头 Claude Code / 你配的任何一个），收反馈、改、再来一轮，直到没意见。不用它的话，你每个项目单独接 reviewer API；用了，第一次 bootstrap 就有了。
+**你想在 push 之前先让另一个模型家族看一眼。** `anywhere-agents` 自带 `/implement-review` 和短别名 `/vet`。不加 reviewer token 时仍由 Codex 审；`/vet agy` 走官方 Antigravity CLI 调 Gemini，另外也支持 GitHub Copilot 和无头 Claude Code。所有自动 backend 都能在无需交互批准的情况下运行测试、实验、shell 命令和网络核验。它们看 staged diff、给反馈、再迭代，不需要每个项目各接一套 reviewer API。
 
 **你想 agent 写东西自动不带 AI 味儿。** 默认的 `agent-style` rule pack 禁了 ~45 个典型 AI-tell 词和格式（em-dash 当随手用、散文被切成 bullet 之类），再加一个 PreToolUse `guard`，任何 `.md` / `.tex` / `.rst` 的 tool 调用只要 outgoing 里撞上这些词，`guard` 直接 deny。没它，那些词就进你文件了；有它，写入在落盘前就被拦下来。
 
@@ -85,15 +85,31 @@ your-project/
 └── skills/                # (optional) repo-local skill overrides
 ```
 
-`bootstrap` 还会把 `guard.py` 和 `session_bootstrap.py` 放到 `~/.claude/hooks/`、`statusline.py` 放到 `~/.claude/statusline.py`（Claude Max + Codex 5h / 周用量在 Claude Code 状态行常驻显示），以及把共享 key 合并到 `~/.claude/settings.json`。以上都是一次 `bootstrap` 的结果；再跑一遍，这些文件都跟上游同步。
+`bootstrap` 还会把 `guard.py` 和 `session_bootstrap.py` 放到 `~/.claude/hooks/`，把 `statusline.py` 和 `agent-quota.py` 装到 `~/.claude/`，再把共享 key 合并到 `~/.claude/settings.json`。状态行和独立命令现在都覆盖 Claude、Codex、Agy 三套额度。以上都是一次 `bootstrap` 的结果；再跑一遍，这些文件都跟上游同步。
 
-`bootstrap` 之后，每个 Claude Code session 都会在终端底部常驻显示 Claude Max + Codex 实时用量 —— 不用 API key、不用轮询、不用额外配置：
+`bootstrap` 之后，每个 Claude Code session 都会在终端底部常驻显示 Claude、Codex、Agy 最近一次额度读数。为了同时放下三家，状态行使用紧凑格式：
 
 ```text
-🤖 Opus 4.8 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+🤖 Opus 5h82%(3h4m) 7d38%(2d17h)|Codex 7d75%(6d3h) @now|AgyG 5h100%(4h59m) 7d100%(6d23h) @now
 ```
 
-Claude 那段从 statusLine stdin 拿（Claude Code v2.1.80+ 为 Pro/Max 订阅注入 `rate_limits` 字段）。Codex 那段读最新的 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。已 reset 的窗口标 `(stale)`；没有数据时显示 `—`。
+Claude 那段从 statusLine stdin 拿；Codex 那段读最近的 `~/.codex/sessions/**/rollout-*.jsonl`；`AgyG` 表示 `agy -p "/usage" --output-format json` 返回的 `Gemini Models` 额度组。百分比表示剩余额度，括号里是距窗口重置的时间，`(reset)` 表示窗口已重置但新读数尚未到，`@2m` 表示磁盘快照是两分钟前的。这个零 turn 查询从用户主目录在隐藏且有超时上限的后台 helper 中运行，每五分钟最多一次，所以状态行不等网络，也不会打开项目级 Agy workspace；lock 和失败冷却避免重复刷新。为了紧凑，statusline 只显示默认的 Gemini 池。独立的 `agent-quota.py` 会同时列出另一个 `Claude/GPT` 池，可通过 `claude-sonnet-4-6`、`claude-opus-4-6-thinking` 或 `gpt-oss-120b-medium` 使用。
+
+### 用 `/vet` 选择 reviewer
+
+如果你把用户级 `IMPLEMENT_REVIEW_DEFAULT_CHANNEL` 设成了 `auto`，reviewer token 就是完整调用：
+
+| 命令 | Reviewer |
+|---|---|
+| `/vet` | Codex，不加 token 时的默认 reviewer |
+| `/vet agy` | Antigravity 里的 Gemini 3.8 Flash High，`effort=high` |
+| `/vet gemini` 或 `/vet antigravity` | `/vet agy` 的兼容别名 |
+| `/vet copilot` | GitHub Copilot CLI |
+| `/vet claude` | 无头 Claude Code；如果主 agent 本来就是 Claude Code，自审 guard 会改走别家 |
+
+如果没有设置用户级 Auto-terminal 默认，就显式写一次 channel：`/vet auto agy`。Agy backend 使用已安装 `agy` CLI 上登录的 Google AI plan，不另要 Gemini API key。它在 staged Git index 的隔离导出中以 `accept-edits` 加自动批准工具权限运行，因此能实际跑实验，同时不会把生成物写进原工作树。完成后原子发布 `Review-Antigravity.md`。需要临时换模型时设 `ANTIGRAVITY_DISPATCH_MODEL`，需要换 effort 时设 `ANTIGRAVITY_DISPATCH_EFFORT`。
+
+`/prun` 采用另一套成本分工：Sonnet 是 session 内默认 worker，Agy 是外部并行池。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 同样默认 Gemini 3.8 Flash High / `high`；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
 
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
@@ -363,7 +379,8 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
-│   ├── statusline.py              # statusLine renderer: Claude Max + Codex 5h / 周用量
+│   ├── statusline.py              # 紧凑显示 Claude + Codex + Agy 额度
+│   ├── agent-quota.py             # 三家额度详情 + Agy cache 刷新
 │   ├── compose_packs.py           # v2 composer: bundled pack、direct URL、drift prompt、locks、state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack 模块: auth、config、source fetch、state、locks、transaction、handlers
@@ -372,9 +389,9 @@ anywhere-agents/
 ├── skills/
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # 为论文/proposal/README 生成原生可编辑 PowerPoint 图
-│   ├── implement-review/          # dual-agent review loop with Phase 0 plan-review (signature skill)
+│   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
-│   ├── prun/                      # Codex/Sonnet worker 并行委派 fan-out
+│   ├── prun/                      # Sonnet/Agy worker 并行委派 fan-out
 │   └── readme-polish/             # audit + rewrite GitHub READMEs with modern patterns
 ├── packages/
 │   ├── pypi/                      # anywhere-agents PyPI CLI (pipx run anywhere-agents)
@@ -421,7 +438,7 @@ anywhere-agents/
 <summary><b>What This Is Not（不是什么）</b></summary>
 
 - 不是通用的 framework 或 plugin host。`anywhere-agents` CLI 很窄：bootstrap 一个项目（`pipx run` / `npx` 零安装），以及管用户级 pack 选项（`pack add | remove | list | uninstall`）。除此没别的。
-- 不是通用的多 agent 同步工具。支持的是 Claude Code + Codex 这套。其他 agent（Cursor、Aider、Gemini CLI）可能通过 `AGENTS.md` 约定工作，但没测过。
+- 不是通用的多 agent 同步工具。Claude Code 和 Codex 是支持的 coordinator；Agy 是经过测试的 Gemini review 与 `prun` headless backend。其他 agent（Cursor、Aider、Gemini CLI）可能通过 `AGENTS.md` 约定工作，但没测过。
 - 不是 marketplace 或 registry。一份精选配置，两个官方 pack（`agent-style`、`aa-core-skills`），一个维护者。第三方任意 GitHub URL 来源的 pack 走 v0.5.0 的 direct-URL flow。
 
 </details>

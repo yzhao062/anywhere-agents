@@ -1,28 +1,24 @@
 ---
 name: prun
-description: Parallel delegation fan-out. The Claude session coordinates (on whatever Claude model is currently selected, e.g. Opus or Fable) while task units run in parallel on workers (never on the coordinator). Sonnet is the prioritized default; Codex (`codex exec`, gpt-6 tier) is reserved for units that earn it, meaning adversarial reasoning, genuinely hard analysis, or the pages its local-network path reaches. The orchestrator decides per unit. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
+description: Parallel delegation fan-out. The coordinating session decomposes and integrates while task units run in parallel on workers, never on the coordinator. Sonnet is the in-session default and Agy (Gemini through Antigravity CLI) is the external second pool. Codex is not a prun executor. Unit count follows the dependency graph rather than a small fixed cap. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
 ---
 
 # prun (parallel run)
 
 ## Overview
 
-`prun` fans a task out into independent units that run in parallel on separate-quota or in-session
-workers, while the Claude session only coordinates. Workers are **Sonnet** subagents (inside the
-Claude session) and **Codex** (`codex exec`, a separately authenticated account, frontier model).
-**Sonnet is the prioritized default**, so most units go there. **Codex is reserved** for units that
-earn it: adversarial or genuinely hard reasoning, a page its local-network path reaches and a cloud
-fetcher cannot, or a deliberate second vendor's read (see the Executors rule). The coordinator
-decomposes the task, dispatches the units, gathers their results, reviews their diffs, and
-integrates. It never runs a unit itself.
+`prun` fans a task out into independent units that run in parallel while the current session only
+coordinates. Workers are **Sonnet** subagents inside a Claude session and **Agy** processes running
+Gemini through the Antigravity CLI. Sonnet remains the in-session default. Agy supplies the
+independent Google model family and a separate subscription pool. **Codex is not a prun executor**;
+reserve its higher-cost quota for the default `/vet` gatekeeper role. The coordinator decomposes the
+task, dispatches the units, gathers their results, reviews their diffs, and integrates. It never
+runs a unit itself.
 
-The orchestrator picks the executor per unit; when in doubt, Sonnet. A Sonnet unit and the Claude
-coordinator both consume the current Claude account's quota; the exact split across models and
-weekly buckets depends on the plan and on active promotions and shifts over time, so check
-Settings > Usage before relying on any model-specific split. A Codex unit runs through the separate
-Codex/OpenAI account and does not draw on the Claude plan at all. That alone is not a reason to
-prefer it, since the same account also funds Codex-backed `/implement-review` rounds. Route to it
-deliberately, under the Executors rule, rather than by default.
+The orchestrator picks the executor per unit; when in doubt, use Sonnet. Sonnet units share the
+current Claude account. Agy units use the Google AI plan authenticated in `agy`. Exact plan buckets
+can change, so inspect current quota before a large batch. An explicit user instruction or
+project-local routing policy may prefer Agy for ordinary units.
 
 ## Relationship to the native Workflow tool
 
@@ -31,24 +27,21 @@ with structured output, judge panels, and resume. A Workflow run counts against 
 usage and rate limits, and its agents use the session model unless the script routes a stage to a
 different Claude model.
 
-`prun` supports two account paths. A **Codex** unit runs through a shell call to `codex exec` and
-uses the separately authenticated Codex/OpenAI account. A **Sonnet** unit shares the current Claude
-account with the coordinating session. Use the Executors rule below to choose each unit's executor;
+`prun` supports two account paths. A **Sonnet** unit shares the current Claude account with the
+coordinating session. An **Agy** unit runs Gemini through an authenticated Antigravity CLI and uses
+the Google AI plan attached to it. Use the Executors rule below to choose each unit's executor;
 Sonnet is the default. The coordinating session also spends a small Anthropic amount while it
 decomposes, dispatches, reads results, and integrates.
 
 The two relate in two ways, both with the current session as the orchestrator:
 
 - **Substitute (quota).** Read both pools with `agent-quota`, including snapshot age and reset
-  times. If Claude cannot accommodate the next batch, reduce or defer ordinary units. Use Codex for
-  units that meet the Executors rule. A broader substitution requires an explicit user instruction
-  or a project-local routing policy based on that consumer's capacity. A quota reading alone does
-  not override the mechanical-work exclusion, and it does not establish that the other account has
-  enough capacity for the batch.
+  times. If Claude cannot accommodate the next batch, route suitable units to Agy or defer them.
+  Do not silently shrink a genuinely parallel task to an arbitrary two or three workers. A quota
+  reading does not establish that the other account can finish the batch.
 - **Complement (diversity).** When a Workflow is affordable and the user's request or an
   applicable project requirement calls for a cross-vendor perspective, run a Claude panel through
-  the Workflow and a Codex panel through prun, with the Codex units routed under the Executors
-  rule. Use the same structured
+  the Workflow and a Gemini panel through Agy. Use the same structured
   contract and the same question on both sides, then cross-check. Agreement across vendors is usually
   a stronger signal than agreement inside one model family, because shared model lineage and tools
   can share blind spots. Invoke them together in one natural-language request; no special mode is
@@ -68,53 +61,33 @@ or a unit's result cannot be checked without redoing it.
 
 | Executor | Quota | Notes |
 |---|---|---|
-| Sonnet subagent | Current Claude account; check Settings > Usage for the applicable limits or credits | **Prioritized default.** Capable across ordinary units, and it alone reaches session-internal tools (MCP / email / Artifacts) that Codex cannot. |
-| Codex (`codex exec`) | Separately authenticated Codex/OpenAI account; also funds Codex-backed review rounds | **Reserved.** Frontier model (gpt-6 tier), strongest available on adversarial and genuinely hard reasoning. Dispatch one only against a reason recorded under the rule below. |
+| Sonnet subagent | Current Claude account; check Settings > Usage for the applicable limits or credits | **Prioritized default.** Capable across ordinary units, and it reaches session-internal tools (MCP / email / Artifacts) that an external Agy worker cannot. |
+| Agy (`agy`) | Google AI plan authenticated in Antigravity | **External second pool.** Defaults to Gemini 3.8 Flash High at `high` effort; use it for explicit Gemini work, cross-vendor diversity, quota substitution, or its local CLI path. |
 | Claude session (this session) | Current Claude account; check Settings > Usage for the applicable limits or credits | Coordinator and integrator only, on whatever model is selected. Never a unit. |
 
 Rule: **units never run on the coordinator (the Claude session itself).** The orchestrator picks the
 executor per unit, defaulting to Sonnet:
 
-- **Sonnet is the default for almost every unit** (code, research, analysis, web work). A normal
-  Sonnet subagent inherits the session's available tools but **starts with fresh, isolated context**
-  (it does not see the conversation history), so put any needed state in its unit prompt. If a task
-  truly needs the full live conversation, keep it in the coordinator; an explicit fork inherits that
-  context but also the coordinator's model, so it is not a Sonnet worker. Start here.
-- **Sonnet is also the only executor for a session-internal tool.** Codex is an external process, so
-  a unit needing an MCP / email connector (Gmail, Calendar, Drive, Slack) or the Artifact tool has
-  to be a Sonnet unit. That is a capability fact, unchanged by any quota argument.
-- **Reserve Codex for an evidenced exception.** Before dispatch, record one of these reasons in
-  the ledger, with its supporting artifact:
-  1. The user's request or an applicable project requirement calls for an adversarial review,
-     audit, or proof check. Cite that requirement, then name the claim or invariant to challenge
-     and the consequence of an incorrect result. The orchestrator may decompose that review but
-     may not add one solely to qualify for Codex. Routine execution of known checks does not
-     qualify.
-  2. A Sonnet attempt failed a stated acceptance check because of an unresolved reasoning problem.
-     Link the attempt and name the remaining problem. Length, unfamiliarity, and interacting
-     requirements alone do not qualify.
-  3. A required page is inaccessible through the Sonnet worker's permitted web and local-shell
-     tools, and a specific Codex access path is available. Record the failed path or prior host
-     evidence; follow "Web access" below.
-  4. The user or the task's acceptance criteria explicitly require an independent second-vendor
-     check of a consequential claim. Name the claim and the first read.
-- **Keep mechanical work off Codex.** Use Sonnet or an existing script when the method is fully
-  specified: bulk renames, format conversion, boilerplate, straightforward extraction or summaries,
-  and running known commands. Split such work out of a qualifying reasoning unit when it is
-  independently runnable. Fan-out width, and the ability to label a task an audit, do not create an
-  exception.
-- **When in doubt, Sonnet.** A Codex dispatch needs the evidence above, unless an explicit user
-  instruction or a project-local routing policy overrides this default.
-- **The Claude session stays the coordinator, never a unit.** A single small session-tool task the coordinator can
-  do inline; reach for Sonnet when you need to run *many* such units in parallel.
+- **Sonnet is the in-session default** for code, research, analysis, and ordinary web work. A
+  subagent inherits the session's available tools but starts with fresh context, so put all needed
+  state in its unit prompt.
+- **Use Agy as the external pool** when the user requests Gemini, Claude quota is the limiting
+  pool, a local CLI path is useful, or the task benefits from an independent Google-model read.
+  Agy defaults to `gemini-3.8-flash-high` at the CLI's maximum `high` effort.
+- **Session-internal tools stay on Sonnet.** An external Agy process cannot use the coordinator's
+  MCP, email connectors, or Artifact tool. That capability boundary is independent of quota.
+- **Codex is excluded from prun.** Its quota is intentionally reserved for the `/vet` reviewer
+  role. Do not route a prun unit to `codex exec`, even if a legacy dispatcher remains on disk for
+  compatibility with old state directories.
+- **When in doubt, Sonnet.** An explicit user instruction or project-local routing policy may make
+  Agy the default for a run.
+- **The Claude session stays the coordinator, never a unit.** A single small session-tool action
+  may stay inline; independent substantive work belongs in workers.
 
-**Why the default points at Sonnet.** Sonnet is the default for ordinary units. Reserve Codex
-capacity for the exceptions above and for Codex-backed review rounds. This is a claim about how to
-spend a reserved account, not about which model is stronger. Account capacity varies by consumer,
-so an explicit user instruction or a project-local routing policy may override this default after
-checking current usage and reset times; prefer a declared policy over re-reading two meters per
-run, since the meters report different windows, reset times, and snapshot ages and neither
-estimates how many comparable units an account can finish.
+**Why the split is Sonnet plus Agy.** They draw on separate subscription pools and provide model-
+family diversity without spending the higher-cost Codex pool used by `/vet`. This is a routing and
+cost decision, not a universal quality ranking. Check current quota before a large batch, but do
+not convert changing meter readings into an arbitrary low worker cap.
 
 ## Concurrency
 
@@ -124,9 +97,9 @@ structure** (split only along genuinely independent boundaries) and **balanced w
 target a fixed number, and do not cap artificially. A dozen-plus in parallel is fine when the
 task genuinely decomposes that way.
 
-Two soft bounds, not hard rules: local CPU/RAM (heavy Codex workers contend past roughly a
-handful at once, and the excess just queues) and the headroom of whichever pool the units are
-routed to, which the default makes the Claude one. `agent-quota` reads both off disk. The usual real ceiling is
+Two soft bounds, not hard rules: local CPU/RAM (enough concurrent workers eventually contend and
+the excess queues) and the headroom of the Claude and Agy pools. `agent-quota` reads current
+snapshots for both. The usual real ceiling is
 **integration bandwidth**, since the orchestrator must read and reconcile every result, so
 prefer fewer well-scoped units over many tiny ones. Over-splitting into trivial units wastes
 worker startup and tends to produce thin results. Dispatch in batches that fit the runtime's
@@ -163,36 +136,36 @@ real remotes, and the Claude session plus the user are the integration gate. Tha
 2. **Decompose**: write one prompt per unit. State the task; for a code-writing unit, that the
    working dir is a throwaway clone to edit freely but **not** commit or push; that the unit writes
    a result summary to its result file (a fresh path, in one write).
-3. **Assign**: default each unit to Sonnet. Apply the Executors rule to any Codex exception and
-   record the qualifying reason in the ledger. Also pick read-only (scratch) or code-writing
+3. **Assign**: default each unit to Sonnet. Apply the Executors rule to any Agy unit and record the
+   routing reason in the ledger. Also pick read-only (scratch) or code-writing
    (clone) mode. For a web-heavy unit, "Web access" below covers which executor fits.
 4. **Dispatch in parallel**:
-   - Codex unit: run `scripts/dispatch-task.{sh,ps1}` in the background (Bash tool,
-     `run_in_background=true`). For a code-writing unit, pass the clone dir via `PRUN_SCRATCH_CWD`.
+   - Agy unit: run `<python> scripts/dispatch-task-agy.py` in the background. Pass `--mode plan`
+     for read-only work or `--mode accept-edits` only with a throwaway clone in
+     `PRUN_SCRATCH_CWD`.
    - Sonnet unit: spawn a background Agent subagent with `model: sonnet`. It inherits the session's
      available tools, including MCP and connector tools; if you set a `tools` allowlist, include every
      connector, Artifact, file, shell, and web tool the unit needs. The subagent starts with fresh
      context, so put any needed state in its prompt. For code-writing it works in a clone too, under
      Claude's `guard.py`, which already gates commit/push.
-5. **Monitor (do not go idle)**: the shell monitor covers **Codex** units only. It reads the
-   `dispatch-task` state markers (`tail`, `dispatch-pid`, `result-file`) that a Sonnet Agent
+5. **Monitor (do not go idle)**: the shell monitor covers **Agy** units only. It reads the
+   `dispatch-task-agy` state markers (`tail`, `dispatch-pid`, `result-file`) that a Sonnet Agent
    invocation never writes, and it takes no Agent identifier. For **Sonnet** units, track the Agent
    identifiers recorded in the ledger and use the runtime's own task-status and completion tools,
    checking again on a schedule while any unit is outstanding. Result-file validation and the
-   step-6 reconciliation are common to both; the stall and reap guarantees described here are
-   Codex-specific. For the Codex units, launch `scripts/monitor.{sh,ps1} <state-dir> ...` in the background
+   step-6 reconciliation are common to both. For the Agy units, launch
+   `scripts/monitor.{sh,ps1} <state-dir> ...` in the background
    (`run_in_background=true`) and wait on its completion. It wakes you on the first actionable event:
    all done, any unit **stalled** (tail no-growth for `PRUN_STALL_THRESHOLD`, default 10 min), or any
    unit **failed** (`FALLBACK` result or dead dispatch), printing a per-unit digest. On a stall,
    surface it to the user with a likely cause (capacity or concurrency pressure; suggest lowering the
-   worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on the
-   still-running units until all are done. `monitor` only observes; the unit's own `dispatch-task`
-   reaps a worker idle past `PRUN_STALL_THRESHOLD` at the same threshold, so a persistent stall
-   surfaces as a `FALLBACK` to re-dispatch rather than a leaked zombie. (`gather.{sh,ps1}` remains for
-   the plain wait-for-all case.)
+   worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on
+   the still-running units until all are done. `monitor` only observes. The Agy dispatcher relies on
+   the CLI's bounded `--print-timeout`; it does not scan for or terminate unrelated agent processes.
+   (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
 6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
-   recover a Codex worker's output from its `<state-dir>/tail` (dispatch-task also salvages the
+   recover an Agy worker's output from its `<state-dir>/tail` (dispatch-task-agy also salvages the
    tail into the result file automatically under a `FALLBACK` header), or retrieve a Sonnet
    worker's returned output through its recorded Agent identifier using the runtime's
    completion/output tools. If no usable result can be recovered, re-dispatch that unit or flag the
@@ -202,35 +175,29 @@ real remotes, and the Claude session plus the user are the integration gate. Tha
 Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
 `.claude/skills/prun/scripts/`, then `.agent-config/repo/skills/prun/scripts/`.
 
-## dispatch-task usage (Codex)
+## dispatch-task usage (Agy)
 
 ```
-scripts/dispatch-task.sh --prompt-file <prompt> --result-file <abs result> --unit-id <id>
+<python> scripts/dispatch-task-agy.py --prompt-file <prompt> --result-file <fresh abs result> --unit-id <id> --mode plan
 ```
 
-- Emits exactly one stdout line `STATE-DIR <abs-path>`; codex stdout+stderr land in `<state-dir>/tail`.
-- If the worker exits without writing a non-empty result file, dispatch-task salvages its captured
-  `<state-dir>/tail` into the result file under a `FALLBACK` header, so a failed result-write never
-  makes the unit silently vanish at gather. Treat a `FALLBACK` result as "review or re-dispatch."
-- Self-heals a hung worker: if the tail stops growing for `PRUN_STALL_THRESHOLD` seconds (default
-  `600`; the same idle signal `monitor` reports) or the run exceeds `CODEX_DISPATCH_TIMEOUT` seconds
-  (default `0` = hard cap off, so the idle signal stays primary and an actively streaming long run is
-  not killed), dispatch-task kills the worker's whole process tree, exits `124`, and writes the
-  `FALLBACK` above naming `idle-stall` or `hard-timeout`. A non-empty result the worker already wrote
-  is preserved, never clobbered. On Windows the watch+kill runs in the sibling `reap-watch.ps1` (an
-  AMSI-safe split of launch from watch+kill; the `.sh` does it inline).
-- Runs codex from a per-unit working dir: a scratch dir by default (read-only units), or the path in
-  `PRUN_SCRATCH_CWD` (point this at a throwaway clone for code-writing units).
-- Re-executes from a private temp copy before it does any work, so the deployed
-  `dispatch-task.sh` is not held open while the worker runs. A shell keeps a script open for as
-  long as it is executing it. On Windows that refuses any rename over the file, which used to
-  abort a whole compose transaction mid-fan-out (anywhere-agents#43). `PRUN_DISPATCH_REEXEC` is
-  the internal loop guard, cleared before the worker starts. The `.ps1` needs none of this,
-  because PowerShell releases a parsed script file.
-- Env: `CODEX_DISPATCH_SANDBOX` (default `danger-full-access`), `CODEX_DISPATCH_REASONING` (default
-  `xhigh`), `CODEX_DISPATCH_ISOLATE_MCP=off` to drop MCP isolation, `PRUN_SCRATCH_CWD` to set the cwd,
-  `PRUN_STALL_THRESHOLD` (default `600`) for the idle-reap threshold, `CODEX_DISPATCH_TIMEOUT`
-  (default `0` = disabled) for an optional hard wall-clock cap.
+- Emits exactly one stdout line `STATE-DIR <abs-path>`; Agy stream events and stderr land in the
+  state directory while the final response is published atomically to the result path.
+- Defaults to `gemini-3.8-flash-high` at `high` effort. Override with
+  `ANTIGRAVITY_DISPATCH_MODEL` and `ANTIGRAVITY_DISPATCH_EFFORT`.
+- Agy Ultra exposes a second quota group for `claude-sonnet-4-6`,
+  `claude-opus-4-6-thinking`, and `gpt-oss-120b-medium`. Keep Gemini as the
+  default because it adds an independent model family to the Sonnet fan-out.
+  The second group is an explicit overflow option through
+  `ANTIGRAVITY_DISPATCH_MODEL`; it adds quota, not reviewer-family diversity.
+- Runs in a new per-unit scratch directory by default. For code-writing units, create a throwaway
+  clone, set `PRUN_SCRATCH_CWD` to it, and pass `--mode accept-edits`. Plan mode remains read-only.
+- Requires a fresh result path and refuses to overwrite an existing result. A failed preflight,
+  launch, timeout, or missing final event produces an atomic `FALLBACK` result with captured tails.
+- `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` defaults to 2700 and is passed to Agy's bounded
+  `--print-timeout`. The dispatcher never enumerates or terminates another agent process.
+- The legacy `dispatch-task.{sh,ps1}` Codex scripts remain shipped only so older deployments and
+  state directories retain their recovery tooling. Current `prun` routing never selects them.
 
 ## Sonnet usage
 
@@ -449,9 +416,9 @@ Verification: <what was run/checked/searched, or "none">
 
 Keep a simple run ledger (a file in a scratch area) recording each unit: id, executor, mode, prompt
 file, clone-dir, result file, status (dispatched / done / failed), start/end, and the handle the
-unit is tracked by, meaning its state-dir for a Codex unit and its Agent identifier for a Sonnet
-one. A Codex unit also records the routing reason from the Executors rule and the evidence behind
-it, which is what makes the choice reviewable afterwards. Use the ledger to report progress and to
+unit is tracked by, meaning its state-dir for an Agy unit and its Agent identifier for a Sonnet
+one. An Agy unit also records the routing reason from the Executors rule, which makes the choice
+reviewable afterwards. Use the ledger to report progress and to
 relaunch only units whose result is missing or fails validation.
 
 **Where a unit's own files go**: four kinds of file belong under an `agent-io` directory inside the scratch area. They are the per-unit prompt, the result file, the shared-context file every worker reads, and the run ledger. The directory name tells the writing-style hook to skip them, because none of that text is the coordinator's prose to rewrite. A unit prompt is an instruction to a worker, and a result file holds what the worker sent back. Anything the fan-out produces for a human reader stays outside `agent-io`.
@@ -460,31 +427,30 @@ relaunch only units whose result is missing or fails validation.
 
 Both executors reach the web by different paths, each with its own strengths, so assign per unit.
 
-**Codex** runs on the user's local machine, so its requests leave from the user's local network
+**Agy** runs on the user's local machine, so its requests leave from the user's local network
 rather than the cloud fetcher's egress IP, often a residential IP. That can reach some pages a cloud
 fetcher gets `403` on, though a hardened site can still block on bot score, fingerprint, or rate. It
-also surfaces pages a cloud fetch would miss. Web access comes from `--sandbox danger-full-access`
-(built-in browser path, confirmed under MCP isolation). A Codex worker can try a local-shell fetch
-where its environment permits one.
+also surfaces pages a cloud fetch would miss. The dispatcher enables Agy's sandbox and a worker can
+try a local-shell fetch where its environment permits one.
 
 **Sonnet** units get web from an `agentType` granting built-in `WebSearch` and `WebFetch`, and,
 where the session permits it, the same local shell the curl recipe below uses. Claude's `WebSearch`
 is strong at broad discovery, finding the right page when the URL is unknown, which makes it the
 right default for ordinary web work. A Sonnet worker with local shell access leaves from the same
-local network a Codex worker does, so a cloud `WebFetch` returning `403` does not on its own buy a
+local network an Agy worker does, so a cloud `WebFetch` returning `403` does not on its own buy a
 second model run.
 
 Routing heuristic (apply the Executors rule; when in doubt, Sonnet):
 
 - **Discover or fetch an ordinary page**: use a **Sonnet** unit, whether or not the URL is known.
 - **A page the Sonnet worker's `WebFetch` is blocked on**: have that same unit retry through its
-  permitted local shell first. Escalate to **Codex** only when the Sonnet worker has no local-shell
-  route, or when the host is one a documented Codex-specific path has already reached, and record
+  permitted local shell first. Escalate to **Agy** only when the Sonnet worker has no local-shell
+  route, or when the host is one a documented Agy-specific path has already reached, and record
   which path failed.
-- **A high-stakes fact that might be stale or blocked**: run Sonnet first, then add a Codex
+- **A high-stakes fact that might be stale or blocked**: run Sonnet first, then add an Agy
   cross-check when the task explicitly calls for a second vendor's read on that claim.
 
-A Codex web-fetch unit can use curl. Report the HTTP status per URL so a cloud-vs-local block shows
+An Agy web-fetch unit can use curl. Report the HTTP status per URL so a cloud-vs-local block shows
 up in the result. In Windows PowerShell, name the binary `curl.exe`, since a bare `curl` can resolve
 to the `Invoke-WebRequest` alias instead:
 

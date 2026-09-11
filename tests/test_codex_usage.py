@@ -47,6 +47,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import time
 import unittest
@@ -755,6 +756,166 @@ class TestNoRollouts(unittest.TestCase):
         seg, row = _render_rollouts([])
         self.assertIsNone(seg)
         self.assertIn("no session rollout found", row)
+
+
+def _agy_payload(five=0.75, weekly=0.40, third_five=0.90, third_weekly=0.80):
+    reset = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+    return {
+        "status": "SUCCESS",
+        "num_turns": 0,
+        "usage": {"total_tokens": 0},
+        "command": {
+            "name": "usage",
+            "data": {
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {
+                                "id": "gemini-weekly",
+                                "window": "weekly",
+                                "remaining_fraction": weekly,
+                                "reset_time": reset,
+                            },
+                            {
+                                "id": "gemini-5h",
+                                "window": "5h",
+                                "remaining_fraction": five,
+                                "reset_time": reset,
+                            },
+                        ],
+                    },
+                    {
+                        "name": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "id": "3p-weekly",
+                                "window": "weekly",
+                                "remaining_fraction": third_weekly,
+                            },
+                            {
+                                "id": "3p-5h",
+                                "window": "5h",
+                                "remaining_fraction": third_five,
+                            },
+                        ],
+                    },
+                ]
+            },
+        },
+    }
+
+
+class TestAgyQuota(unittest.TestCase):
+    def _paths(self, tmp):
+        cache = os.path.join(tmp, "agy-quota-cache.json")
+        return cache, cache + ".last-attempt", cache + ".refresh.lock"
+
+    def test_detailed_quota_shows_both_agy_pools_but_statusline_stays_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, attempt, lock = self._paths(tmp)
+            result = subprocess.CompletedProcess(
+                [], 0, json.dumps(_agy_payload()), ""
+            )
+            with mock.patch.object(agent_quota, "AGY_QUOTA_CACHE", cache), \
+                    mock.patch.object(agent_quota, "AGY_QUOTA_ATTEMPT", attempt), \
+                    mock.patch.object(agent_quota, "AGY_QUOTA_LOCK", lock), \
+                    mock.patch.object(agent_quota, "_agy_binary", return_value="agy"), \
+                    mock.patch.object(
+                        agent_quota.subprocess, "run", return_value=result
+                    ) as run:
+                self.assertEqual(agent_quota._refresh_agy_cache(), 0)
+                row = agent_quota.agy_row()
+            with mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache):
+                segment = statusline.agy_segment()
+
+        self.assertIn("Agy", row)
+        self.assertIn("Gemini", row)
+        self.assertIn("5h 75% left", row)
+        self.assertIn("7d 40% left", row)
+        self.assertIn("Claude/GPT", row)
+        self.assertIn("5h 90% left", row)
+        self.assertIn("7d 80% left", row)
+        self.assertIn("Agy Gemini", segment)
+        self.assertIn("5h 75%", segment)
+        self.assertIn("7d 40%", segment)
+        self.assertNotIn("90%", segment)
+        self.assertNotIn("80%", segment)
+        self.assertEqual(run.call_args.kwargs["cwd"], os.path.expanduser("~"))
+        if os.name == "nt":
+            self.assertEqual(
+                run.call_args.kwargs["creationflags"],
+                getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+    def test_failed_refresh_is_throttled_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, attempt, lock = self._paths(tmp)
+            with mock.patch.object(agent_quota, "AGY_QUOTA_CACHE", cache), \
+                    mock.patch.object(agent_quota, "AGY_QUOTA_ATTEMPT", attempt), \
+                    mock.patch.object(agent_quota, "AGY_QUOTA_LOCK", lock), \
+                    mock.patch.object(agent_quota, "_agy_binary", return_value="agy"), \
+                    mock.patch.object(
+                        agent_quota.subprocess,
+                        "run",
+                        side_effect=subprocess.TimeoutExpired("agy", 5),
+                    ) as run:
+                self.assertEqual(agent_quota._refresh_agy_cache(), 1)
+                self.assertEqual(agent_quota._refresh_agy_cache(), 0)
+                self.assertEqual(run.call_count, 1)
+                self.assertTrue(os.path.isfile(attempt))
+                self.assertFalse(os.path.exists(lock))
+
+    def test_fresh_cache_does_not_start_background_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, attempt, _ = self._paths(tmp)
+            pathlib.Path(cache).write_text("{}", encoding="utf-8")
+            with mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache), \
+                    mock.patch.object(statusline, "AGY_QUOTA_ATTEMPT", attempt), \
+                    mock.patch.object(statusline.subprocess, "Popen") as popen:
+                self.assertFalse(statusline.start_agy_refresh())
+                popen.assert_not_called()
+
+    def test_compact_statusline_removes_padding_but_keeps_resets_and_age(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache, _, _ = self._paths(tmp)
+            payload = _agy_payload()
+            pathlib.Path(cache).write_text(
+                json.dumps(
+                    {
+                        "cached_at": time.time() - 120,
+                        "plan_tier": "ULTRA",
+                        "usage": payload["command"]["data"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            claude = statusline.claude_segment(
+                {
+                    "model": {"display_name": "Opus 5 (1M context)"},
+                    "rate_limits": {
+                        "five_hour": {"used_percentage": 18},
+                        "seven_day": {"used_percentage": 62},
+                    },
+                },
+                compact=True,
+            )
+            with mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache):
+                agy = statusline.agy_segment(compact=True)
+
+        self.assertEqual(claude, "🤖 Opus 5h82% 7d38%")
+        self.assertIn("AgyG 5h75%(", agy)
+        self.assertIn("7d40%(", agy)
+        self.assertIn("@2m", agy)
+        self.assertNotIn("ULTRA", agy)
+        self.assertNotIn(" · ", agy)
+
+    def test_compact_expired_window_uses_named_reset_marker(self):
+        shown = statusline.fmt_window_compact(
+            {"used_percentage": 10, "resets_at": time.time() - 1},
+            statusline.CLAUDE_PCT_FIELD,
+        )
+        self.assertEqual(shown, "90%(reset)")
 
 
 if __name__ == "__main__":

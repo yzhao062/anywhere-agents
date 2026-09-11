@@ -39,7 +39,7 @@ Four problems this fixes:
 
 **You work across many repos.** Every new project repeats the same setup ritual: writing-style rules, permission policies, custom skills. Without `anywhere-agents`, you copy-paste between repos and watch them drift. With it, `bootstrap` pulls shared defaults and layers repo-local overrides on top.
 
-**You want a review loop before you push.** `anywhere-agents` ships `/implement-review`, a skill that hands your staged diff to a second reviewer (Codex, GitHub Copilot, headless Claude Code, or whichever you configure), converges on feedback, and revises. Without it, you wire reviewer APIs per project. With it, the skill is present the first time you bootstrap.
+**You want a review loop before you push.** `anywhere-agents` ships `/implement-review` and its short alias `/vet`, which hand your staged diff to a second reviewer from another model family. Codex stays the no-argument default; `/vet agy` selects Gemini through the official Antigravity CLI, with Copilot and headless Claude Code also available. Every automated backend can run tests, experiments, shell commands, and network verification without interactive permission gates. Without it, you wire reviewer CLIs per project. With it, the skill is present the first time you bootstrap.
 
 **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one. Without `anywhere-agents`, the banned words land in your files. With it, the guard blocks the write.
 
@@ -85,15 +85,31 @@ your-project/
 └── skills/                # (optional) repo-local skill overrides
 ```
 
-Bootstrap also drops `guard.py` and `session_bootstrap.py` into `~/.claude/hooks/`, `statusline.py` into `~/.claude/statusline.py` (Claude Max + Codex 5h / weekly quota readout in the Claude Code status row), and merges shared keys into `~/.claude/settings.json`. Everything above comes from one `bootstrap` run; re-running it keeps these files in sync with upstream.
+Bootstrap also drops `guard.py` and `session_bootstrap.py` into `~/.claude/hooks/`, installs `statusline.py` and `agent-quota.py` under `~/.claude/`, and merges shared keys into `~/.claude/settings.json`. The status row and standalone readout cover Claude, Codex, and Agy quota. Everything above comes from one `bootstrap` run; re-running it keeps these files in sync with upstream.
 
-After bootstrap, every Claude Code session shows your live Claude Max + Codex quota at the bottom of the terminal — no API key, no polling, no extra setup:
+After bootstrap, every Claude Code session shows recent Claude, Codex, and Agy quota at the bottom of the terminal. The row is compact enough to keep all three visible:
 
 ```text
-🤖 Opus 4.8 · 5h 78% (3h 4m) · 7d 51% (15h 4m)  |  Codex 5h 89% (3h 25m) · 7d 90% (4d 23h)
+🤖 Opus 5h82%(3h4m) 7d38%(2d17h)|Codex 7d75%(6d3h) @now|AgyG 5h100%(4h59m) 7d100%(6d23h) @now
 ```
 
-The Claude side reads from the statusLine stdin (Claude Code v2.1.80+ injects `rate_limits` for Pro/Max subscribers). The Codex side tails the most recent `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Windows that already reset are flagged `(stale)`; missing data renders as `—`.
+Claude comes from statusLine stdin. Codex comes from recent `~/.codex/sessions/**/rollout-*.jsonl` records. `AgyG` is the `Gemini Models` quota group returned by `agy -p "/usage" --output-format json`. Each percentage is quota remaining; the parenthesized value is time until reset, `(reset)` means the window rolled over and awaits a new reading, and `@2m` means the disk snapshot is two minutes old. The zero-turn Agy query runs from the home directory in a hidden, bounded background helper at most once per five minutes, so a status render never waits on the network or opens a project-scoped Agy workspace. The lock and failure cooldown prevent duplicate refreshes. To keep the status row compact, it shows only the default Gemini pool. The standalone `agent-quota.py` shows both Agy pools, including the separate `Claude/GPT` allowance usable through `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, or `gpt-oss-120b-medium`.
+
+### Pick the Reviewer With `/vet`
+
+Set `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto` in your user-level Claude Code environment when CLI review should be the default. Then the reviewer token is the whole command:
+
+| Command | Reviewer |
+|---|---|
+| `/vet` | Codex, the no-argument default |
+| `/vet agy` | Gemini 3.8 Flash High through Antigravity, at `high` effort |
+| `/vet gemini` or `/vet antigravity` | Aliases for `/vet agy` |
+| `/vet copilot` | GitHub Copilot CLI |
+| `/vet claude` | Headless Claude Code, except inside Claude Code itself where the self-review guard reroutes |
+
+Without the user-level Auto-terminal default, add the channel once: `/vet auto agy`. The Agy backend authenticates through the installed `agy` CLI and the Google AI plan attached to it; it does not require a separate Gemini API key. It reviews an isolated export of the staged Git index with `accept-edits` and unattended tool approval, so it can run real experiments while generated artifacts stay out of the source checkout. It publishes `Review-Antigravity.md` atomically. Override the model only when needed with `ANTIGRAVITY_DISPATCH_MODEL`; override effort with `ANTIGRAVITY_DISPATCH_EFFORT`.
+
+`/prun` uses a different cost split: Sonnet is the in-session default and Agy is the external pool. Codex is deliberately excluded from bulk fan-out and reserved for `/vet`. Agy units use the same Gemini 3.8 Flash High / `high` default, and the coordinator chooses as many independent units as the task supports rather than imposing a two- or three-worker cap.
 
 ### One `AGENTS.md`, Rules for Every Agent
 
@@ -361,7 +377,8 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
-│   ├── statusline.py              # statusLine renderer: Claude Max + Codex 5h / weekly quota
+│   ├── statusline.py              # compact Claude + Codex + Agy quota row
+│   ├── agent-quota.py             # expanded three-agent quota readout + Agy cache refresh
 │   ├── compose_packs.py           # v2 composer: bundled packs, direct URLs, drift prompt, locks, state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack modules: auth, config, source fetch, state, locks, transaction, handlers
@@ -370,9 +387,9 @@ anywhere-agents/
 ├── skills/
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # native editable PowerPoint figures for papers, proposals, READMEs
-│   ├── implement-review/          # dual-agent review loop with Phase 0 plan-review (signature skill)
+│   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
-│   ├── prun/                      # parallel delegation fan-out across Codex/Sonnet workers
+│   ├── prun/                      # parallel fan-out across Sonnet/Agy workers
 │   └── readme-polish/             # audit + rewrite GitHub READMEs with modern patterns
 ├── packages/
 │   ├── pypi/                      # anywhere-agents PyPI CLI (pipx run anywhere-agents)
@@ -419,7 +436,7 @@ anywhere-agents/
 <summary><b>What This Is Not</b></summary>
 
 - Not a general-purpose framework or plugin host. The `anywhere-agents` CLI is narrow: it bootstraps a project (zero-install via `pipx run` / `npx`) and manages user-level pack selections (`pack add | remove | list | uninstall`). Nothing more.
-- Not a universal multi-agent sync tool. Claude Code + Codex is the supported set. Other agents (Cursor, Aider, Gemini CLI) may work via the `AGENTS.md` convention but are not tested here.
+- Not a universal multi-agent sync tool. Claude Code and Codex are supported coordinators; Agy is a tested headless backend for Gemini review and `prun` workers. Other agents (Cursor, Aider, Gemini CLI) may work via the `AGENTS.md` convention but are not tested here.
 - Not a marketplace or registry. One curated configuration, two first-party packs (`agent-style`, `aa-core-skills`), one maintainer. Third-party packs from arbitrary GitHub URLs work via the v0.5.0 direct-URL flow.
 
 </details>

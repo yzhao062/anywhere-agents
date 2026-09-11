@@ -16,7 +16,7 @@ Four problems this fixes:
 
 - **You use more than one agent.** Claude Code at work, Codex on personal projects, Cursor on the side. One `AGENTS.md` drives all three.
 - **You work across many repos.** Every new project repeats the same setup ritual. `bootstrap` pulls shared defaults and layers repo-local overrides on top.
-- **You want a review loop before you push.** `/implement-review` hands your staged diff to a second reviewer, converges on feedback, and revises. Present the first time you `bootstrap`.
+- **You want a review loop before you push.** `/implement-review`, or its short alias `/vet`, hands your staged diff to Codex by default or to Agy, Copilot, or headless Claude Code when named. The loop converges on feedback and revises.
 - **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one.
 
 As of v0.6.0, bare `anywhere-agents` is the canonical apply command. One verb runs bootstrap, deploys declared state, applies prompt-policy drift on mutable refs, and regenerates `CLAUDE.md` / `agents/codex.md`. Direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback) handles public and private repos.
@@ -30,6 +30,22 @@ A **pack** is a small bundle (a rule set, a skill, or a permission policy) that 
 The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows). As of v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command. Bundled-default policy (v0.6.0): `agent-style` (passive) → `auto`; `aa-core-skills` (active) → `prompt`; third-party packs default to `prompt`.
 
 `anywhere-agents` is the sync step. Re-run it on any machine or repo, and the same command reproduces shipped defaults plus project-level selections, applies any drift, and refreshes generated files. The legacy aliases `pack verify --fix` and `pack update` continue to work through all v0.x; each prints a one-line stderr notice and dispatches to the canonical apply path.
+
+## Review With a Second Model Family
+
+With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses Gemini 3.8 Flash High at `high` effort through the official Antigravity CLI. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
+
+The Agy dispatcher reviews an isolated export of the staged Git index with unattended execution permission, then atomically publishes `Review-Antigravity.md`. It can run tests and experiments, including generated-file writes inside the disposable snapshot, without touching the original worktree. The same validation-capability contract applies to every automated `/vet` backend. See [implement-review](skills/implement-review.md) for backend selection, preflight, model overrides, self-review guards, and failure handling.
+
+For parallel execution, `/prun` uses Sonnet plus Agy rather than Codex. Sonnet is the in-session default; Agy is the external Google-model pool. Codex quota stays reserved for `/vet`, and fan-out width follows the task's independent units rather than a fixed small cap.
+
+The installed Claude Code status line also shows all three quota sources in a compact row:
+
+```text
+🤖 Opus 5h82%(3h4m) 7d38%(2d17h)|Codex 7d75%(6d3h) @now|AgyG 5h100%(4h59m) 7d100%(6d23h) @now
+```
+
+Agy quota is cached from its zero-turn `/usage` metadata command. `AgyG` is the Gemini pool used by the default Agy reviewer and worker. A bounded background helper refreshes it at most once per five minutes, so rendering the status line does not wait on a network request. Run `agent-quota.py` for the expanded view, which also shows Agy's separate Claude/GPT pool.
 
 ## Quick Install
 

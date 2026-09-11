@@ -13,8 +13,8 @@ code, so we verify the dispatch wiring end-to-end without invoking copilot.
 Copilot-specific contract (vs Codex):
   * prompt is referenced as a FILE via `-p "@<prompt>"`, never on stdin and
     never as a long literal -p argument;
-  * a narrow allow-list (read + write + shell(git:*)) plus --add-dir reaches the
-    binary, and NO --sandbox flag is passed (that is Codex-only);
+  * `--allow-all` reaches the binary so experiments do not hit permission
+    prompts, and NO --sandbox flag is passed (that is Codex-only);
   * when standalone `copilot` is absent, the dispatcher falls back to `gh copilot`.
 
 The bash class and the powershell class share a mixin and each skips when its
@@ -432,8 +432,8 @@ class _DispatchContractMixin:
                     f"prompt body must not be passed as a literal arg: {a!r}",
                 )
 
-    def test_copilot_invoked_with_allow_list_and_no_sandbox(self) -> None:
-        """The narrow review allow-list reaches copilot; no --sandbox leaks in."""
+    def test_copilot_invoked_with_full_permissions_and_no_sandbox(self) -> None:
+        """The reviewer can run experiments without approval prompts."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             copilot, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -442,14 +442,8 @@ class _DispatchContractMixin:
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             args = self._read_args(log_dir)
-            self.assertIn("--allow-tool=read", args,
-                          f"copilot must be granted read: {args}")
-            self.assertIn("--allow-tool=write", args,
-                          f"copilot must be granted write (writes the review): {args}")
-            self.assertIn("--allow-tool=shell(git:*)", args,
-                          f"copilot must be granted git shell access: {args}")
-            self.assertIn("--add-dir", args,
-                          f"copilot must be granted repo dir access: {args}")
+            self.assertIn("--allow-all", args,
+                          f"copilot must receive full unattended permissions: {args}")
             self.assertIn("--no-ask-user", args,
                           f"copilot must run non-interactively: {args}")
             self.assertNotIn("--sandbox", args,
@@ -743,7 +737,7 @@ class DispatchScriptsTracked(unittest.TestCase):
 
 class DispatchCopilotFlagContract(unittest.TestCase):
     """Static contract: both dispatchers reference the prompt as a file via
-    `-p "@..."`, pass the narrow review allow-list, set GIT_PAGER, run
+    `-p "@..."`, pass `--allow-all`, set GIT_PAGER, run
     non-interactively, and never pass Codex's --sandbox flag. Freezes the
     contract so a future edit cannot silently drop a flag while leaving runtime
     behavior plausible-looking.
@@ -760,12 +754,9 @@ class DispatchCopilotFlagContract(unittest.TestCase):
             self.assertIn("-p ", text, "dispatcher must pass -p")
             self.assertIn('"@', text, "dispatcher must reference the prompt as @<file>")
 
-    def test_allow_list_present(self) -> None:
+    def test_allow_all_present(self) -> None:
         for text in self._both():
-            self.assertIn("--allow-tool=read", text)
-            self.assertIn("--allow-tool=write", text)
-            self.assertIn("shell(git:*)", text)
-            self.assertIn("--add-dir", text)
+            self.assertIn("--allow-all", text)
             self.assertIn("--no-ask-user", text)
 
     def test_live_json_stream_disables_hot_auto_update(self) -> None:
@@ -796,18 +787,10 @@ class DispatchCopilotFlagContract(unittest.TestCase):
             self.assertRegex(text, r"(?i)(mtime|LastWriteTimeUtc)")
             self.assertIn("70", text)
 
-    def test_copilot_stays_offline(self) -> None:
-        """The Copilot fallback backend has no web access: URL permission is
-        all-or-nothing via url(), too broad for an auto-launched reviewer, so it
-        is withheld. Pin the offline contract so a future edit does not silently
-        grant network access to this backend."""
+    def test_copilot_can_use_tools_paths_and_urls(self) -> None:
+        """`--allow-all` is the documented all-tools, paths, and URLs switch."""
         for text in self._both():
-            self.assertNotIn("url(", text,
-                             "dispatch-copilot must not grant url() web access")
-            self.assertNotIn("--allow-all-tools", text,
-                             "dispatch-copilot must not grant all tools")
-            self.assertNotIn("--allow-all-urls", text,
-                             "dispatch-copilot must not grant all URLs")
+            self.assertIn("--allow-all", text)
 
     def test_git_pager_neutralized(self) -> None:
         for text in self._both():

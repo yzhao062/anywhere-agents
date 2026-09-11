@@ -14,7 +14,7 @@ wiring end-to-end without invoking the real claude.
 Claude-specific contract (vs Codex / Copilot):
   * a relay prompt is delivered via STDIN (mirrors Codex `< prompt-file>`),
     NOT `-p "@<file>"` like Copilot, NOT as a long literal argument;
-  * flags: `--permission-mode bypassPermissions --tools "Read,Bash,WebSearch,WebFetch"
+  * flags: `--permission-mode bypassPermissions --tools default
     --add-dir <staged-snapshot> --output-format text`, with `--bare` opt-in
     via `CLAUDE_DISPATCH_BARE=1`;
   * Claude prints the complete review to stdout; dispatch-claude writes that
@@ -476,9 +476,7 @@ class _DispatchContractMixin:
             self.assertIn("-p", args, f"claude must receive -p: {args}")
 
     def test_claude_invoked_with_permission_mode_bypass(self) -> None:
-        """`bypassPermissions` is used with `--tools Read,Bash,WebSearch,WebFetch`
-        so Claude can run verification commands and check external facts while
-        Write/Edit tools remain unavailable."""
+        """`bypassPermissions` removes interactive approval gates."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -493,10 +491,8 @@ class _DispatchContractMixin:
             self.assertGreater(len(args), pm_idx + 1)
             self.assertEqual(args[pm_idx + 1], "bypassPermissions")
 
-    def test_claude_invoked_with_read_bash_and_web_tools(self) -> None:
-        """Claude gets Read, Bash, and the built-in web tools (WebSearch,
-        WebFetch) for factual verification. Write/Edit stay unavailable; the
-        wrapper writes the review file."""
+    def test_claude_invoked_with_all_default_tools(self) -> None:
+        """Claude gets all built-in tools so reviews can run experiments."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -511,8 +507,8 @@ class _DispatchContractMixin:
                           f"claude must receive --tools: {args}")
             tools_idx = args.index("--tools")
             self.assertGreater(len(args), tools_idx + 1)
-            self.assertEqual(args[tools_idx + 1], "Read,Bash,WebSearch,WebFetch",
-                             f"Claude backend must grant Read, Bash, and web tools: {args}")
+            self.assertEqual(args[tools_idx + 1], "default",
+                             f"Claude backend must grant all default tools: {args}")
 
     def test_claude_invoked_without_bare_by_default(self) -> None:
         """`--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153
@@ -901,7 +897,7 @@ class DispatchScriptsTracked(unittest.TestCase):
 
 class DispatchClaudeFlagContract(unittest.TestCase):
     """Static contract: both dispatchers feed a relay prompt via stdin (`<`),
-    pass a Read+Bash-only tool list, use `--permission-mode bypassPermissions`,
+    pass the full default tool list, use `--permission-mode bypassPermissions`,
     keep `--bare` opt-in, set GIT_PAGER, and never pass Codex's --sandbox flag.
     """
 
@@ -958,15 +954,14 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             "dispatch-claude.ps1 must use bypassPermissions, inline or split",
         )
 
-    def test_read_bash_and_web_tools_present(self) -> None:
+    def test_all_default_tools_present(self) -> None:
         sh_text = DISPATCH_SH.read_text(encoding="utf-8")
         ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        self.assertIn('--tools "Read,Bash,WebSearch,WebFetch"', sh_text,
-                      "dispatch-claude.sh must grant Read, Bash, and the built-in web tools")
+        self.assertIn('--tools default', sh_text,
+                      "dispatch-claude.sh must grant all default tools")
         self.assertTrue(
-            ('--tools "Read,Bash,WebSearch,WebFetch"' in ps1_text)
-            or ("'Read' + ',' + 'Ba' + 'sh' + ',WebSearch,WebFetch'" in ps1_text),
-            "dispatch-claude.ps1 must grant Read, Bash, and web tools, inline or split",
+            ("$toolList = 'default'" in ps1_text),
+            "dispatch-claude.ps1 must grant all default tools",
         )
 
     def test_mcp_and_settings_isolation_preserved(self) -> None:

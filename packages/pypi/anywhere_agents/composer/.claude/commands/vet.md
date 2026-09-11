@@ -1,6 +1,6 @@
 ---
 description: "Vet the staged change: run the implement-review review loop (short alias)"
-argument-hint: "[auto|cli|auto-terminal|manual|plugin] [focus...]"
+argument-hint: "[agy|claude|copilot|codex] [auto|cli|auto-terminal|manual|plugin] [focus...]"
 alias-of: implement-review
 ---
 
@@ -11,5 +11,7 @@ Command arguments from the slash invocation: `$ARGUMENTS`
 Treat the command arguments as part of the user's current task.
 `auto`, `cli`, and `auto-terminal` opt into the Auto-terminal channel.
 `manual`, `back to manual`, and `use terminal-relay` force Terminal-relay.
+With Auto-terminal as the user default, `/vet agy` selects Antigravity directly;
+`gemini` and `antigravity` remain aliases. No reviewer token selects Codex.
 
 Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.

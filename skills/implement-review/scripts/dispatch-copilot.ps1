@@ -358,9 +358,10 @@ $ErrorActionPreference = 'Continue'
 # Copilot differs from Codex in HOW the prompt is delivered: `-p "@<prompt>"`
 # references the prompt FILE (a long literal -p argument fails), so there is no
 # stdin redirection. GIT_PAGER=cat keeps Copilot's own `git diff` from stalling
-# on a pager. The narrow allow-list (read + write + git, scoped to the repo via
-# --add-dir) is tighter than the Codex backend's danger-full-access; Copilot
-# writes Review-GitHub-Copilot.md itself per the prompt's save contract. JSON
+# on a pager. --allow-all gives Copilot the same unattended verification
+# capability as the other reviewer backends; the review prompt keeps
+# commit/push/publish/destructive operations out of scope. Copilot writes
+# Review-GitHub-Copilot.md itself per the prompt's save contract. JSON
 # streaming records reasoning and tool lifecycle events as they occur, so
 # stall-watch can observe progress and postflight can reject hidden tool denial.
 #
@@ -368,7 +369,7 @@ $ErrorActionPreference = 'Continue'
 # env-expand path values, and write the helper as UTF-8 (no BOM) with a
 # `chcp 65001` prefix so non-ASCII paths survive cmd's codepage layer.
 $cmdHelper = Join-Path $stateDir 'run-copilot.cmd'
-$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`nset GIT_PAGER=cat`r`n""$exeEsc"" ${ghPrefix}-C ""$repoEsc"" -p ""@$promptFileEsc"" --add-dir ""$repoEsc"" --allow-tool=read --allow-tool=write --allow-tool=""shell(git:*)"" --no-ask-user --no-auto-update --stream on --output-format json --no-color > ""$tailPathEsc"" 2>&1`r`n"
+$cmdBody = "@echo off`r`nchcp 65001 >NUL`r`nset GIT_PAGER=cat`r`n""$exeEsc"" ${ghPrefix}-C ""$repoEsc"" -p ""@$promptFileEsc"" --allow-all --no-ask-user --no-auto-update --stream on --output-format json --no-color > ""$tailPathEsc"" 2>&1`r`n"
 [System.IO.File]::WriteAllText($cmdHelper, $cmdBody, $utf8NoBom)
 
 & $cmdHelper

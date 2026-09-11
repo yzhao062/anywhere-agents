@@ -593,7 +593,7 @@ class StoppedTaskRuleTests(unittest.TestCase):
         para = self.text[index:index + 700]
         self.assertIn("Review-<Reviewer>.md", para)
         for name in ("Review-Codex.md", "Review-GitHub-Copilot.md",
-                     "Review-Claude-Code.md"):
+                     "Review-Claude-Code.md", "Review-Antigravity.md"):
             with self.subTest(name):
                 self.assertIn(name, para)
 

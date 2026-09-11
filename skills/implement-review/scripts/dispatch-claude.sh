@@ -348,11 +348,11 @@ fi
 
 {
     printf '%s\n' "Backend note for Auto-terminal Claude reviewer:"
-    printf '%s\n' "- Do not use Write or Edit tools. The dispatch wrapper saves your final answer to ${EXPECTED_REVIEW_FILE}."
-    printf '%s\n' "- You may run Bash verification commands, tests, grep/rg, and other read/validation tools in the current working directory."
+    printf '%s\n' "- The dispatch wrapper saves your final answer to ${EXPECTED_REVIEW_FILE}; do not write that review file yourself."
+    printf '%s\n' "- You have unattended tool permission. Run relevant tests, experiments, benchmarks, shell commands, and network verification needed to support the review."
     printf '%s\n' "- The current working directory is a disposable staged snapshot when git export succeeds: ${VALIDATION_DIR}"
-    printf '%s\n' "- You may use the built-in WebSearch and WebFetch tools to verify checkable external facts (citations, links, library or API behavior, versions)."
-    printf '%s\n' "- Do not run mutating, publishing, package-install, cleanup, or destructive commands, and do not make network calls through shell commands such as curl or wget; use WebFetch or WebSearch for any network lookup."
+    printf '%s\n' "- You may create or modify generated files inside the disposable snapshot as part of verification."
+    printf '%s\n' "- Do not commit, push, publish, alter external systems, or perform destructive cleanup."
     printf '%s\n' "- Return the complete review as your final answer, starting with the required Round marker."
     printf '\n%s\n\n' "Original review prompt:"
     cat "$PROMPT_FILE"
@@ -363,10 +363,10 @@ printf '%s\n' '{"mcpServers":{}}' > "$EMPTY_MCP_CONFIG_FILE"
 
 # Run claude -p with the relay prompt fed via stdin (mirrors Codex's
 # `< prompt-file` shape, avoiding ARG_MAX traps on long prompts). Claude gets
-# Read+Bash only; the wrapper handles the single review-file write. Claude runs
-# in a disposable staged snapshot when git export succeeds, so verification
-# tools can execute without touching the source checkout. No `--sandbox` flag
-# (that is Codex-only).
+# all built-in tools under bypassPermissions. The wrapper handles the review
+# file write. Claude runs in a disposable staged snapshot when git export
+# succeeds, so experiments can execute without touching the source checkout.
+# No `--sandbox` flag (that is Codex-only).
 #
 # `--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153 documents
 # bare mode as API-key/apiKeyHelper auth only: OAuth and keychain auth are
@@ -399,7 +399,7 @@ unset IMPLEMENT_REVIEW_DISPATCH_REEXEC IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR
     cd "$VALIDATION_DIR" || exit 2
     GIT_PAGER=cat "$CLAUDE_CMD" -p \
         --permission-mode bypassPermissions \
-        --tools "Read,Bash,WebSearch,WebFetch" \
+        --tools default \
         --add-dir "$VALIDATION_DIR" \
         --setting-sources project,local \
         --strict-mcp-config --mcp-config "$EMPTY_MCP_CONFIG_FILE" \

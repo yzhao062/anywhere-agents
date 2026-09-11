@@ -315,15 +315,14 @@ unset IMPLEMENT_REVIEW_DISPATCH_REEXEC IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR
 # stdin and NOT as a long literal argument (a large literal -p arg fails).
 # JSON streaming records reasoning and tool lifecycle events as they occur, so
 # stall-watch can observe progress and postflight can reject hidden tool denial.
-# GIT_PAGER=cat keeps Copilot's own `git diff` from stalling on a pager. The
-# narrow allow-list (read + write + git, scoped to the repo via --add-dir) is
-# tighter than the Codex backend's danger-full-access; Copilot writes
-# Review-GitHub-Copilot.md itself per the prompt's save contract.
+# GIT_PAGER=cat keeps Copilot's own `git diff` from stalling on a pager.
+# --allow-all gives the reviewer the same unattended verification capability as
+# the other backends; the review prompt keeps commit/push/publish/destructive
+# operations out of scope. Copilot writes Review-GitHub-Copilot.md itself.
 REPO="$(pwd)"
 GIT_PAGER=cat "$COPILOT_CMD" ${GH_PREFIX[@]+"${GH_PREFIX[@]}"} \
     -C "$REPO" -p "@$PROMPT_FILE" \
-    --add-dir "$REPO" \
-    --allow-tool=read --allow-tool=write --allow-tool='shell(git:*)' \
+    --allow-all \
     --no-ask-user --no-auto-update --stream on --output-format json --no-color \
     > "$STATE_DIR/tail" 2>&1
 COPILOT_EXIT=$?

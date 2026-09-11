@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code statusLine: show Claude Max + Codex 5h/weekly quota.
+"""Claude Code statusLine: show Claude, Codex, and Agy quota.
 
 Claude data: v2.1.80+ injects `rate_limits` into statusLine stdin JSON for
 Pro/Max subscribers. Field is absent for API-key sessions and before first
@@ -29,16 +29,22 @@ because nothing here can establish that a quiet-looking interval was
 quiet. The very reading the mtime bound excluded is proof that prompts ran
 and the percentage moved, so a threshold below which the age is hidden
 would only shorten the window in which the number misleads. Window resets
-are flagged `(stale)` separately, off `resets_at`.
+are flagged `(reset)` separately, off `resets_at`.
 
 Side effect: each render also persists the Claude `rate_limits` to
 ~/.claude/rate-limits-cache.json (best-effort, never fatal) so a Codex
 session or the standalone `agent-quota` command can read Claude's quota
 off disk without a live Claude statusLine render. Override the path with
 the CLAUDE_RL_CACHE env var.
+
+Agy data comes from ~/.claude/agy-quota-cache.json. When it is stale, the
+status line starts the sibling agent-quota.py in a hidden helper process.
+That helper performs one lock-protected, bounded, zero-turn `/usage` query;
+the current render never waits on the network.
 """
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -57,6 +63,22 @@ CODEX_FUTURE_TOLERANCE_SECONDS = 60
 CLAUDE_RL_CACHE = os.environ.get("CLAUDE_RL_CACHE") or os.path.join(
     os.path.expanduser("~"), ".claude", "rate-limits-cache.json"
 )
+AGY_QUOTA_CACHE = os.environ.get("AGY_QUOTA_CACHE") or os.path.join(
+    os.path.expanduser("~"), ".claude", "agy-quota-cache.json"
+)
+AGY_QUOTA_ATTEMPT = AGY_QUOTA_CACHE + ".last-attempt"
+
+
+def _positive_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
+AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
 
 
 def fmt_window(window, pct_field):
@@ -80,6 +102,28 @@ def fmt_window(window, pct_field):
     return out + " (<1m)"
 
 
+def fmt_window_compact(window, pct_field):
+    used = window.get(pct_field)
+    if used is None:
+        return "—"
+    out = f"{max(0.0, 100.0 - float(used)):.0f}%"
+    resets_at = window.get("resets_at")
+    if not resets_at:
+        return out
+    secs = int(float(resets_at) - time.time())
+    if secs <= 0:
+        return out + "(reset)"
+    if secs >= 86400:
+        reset = f"{secs // 86400}d{(secs % 86400) // 3600}h"
+    elif secs >= 3600:
+        reset = f"{secs // 3600}h{(secs % 3600) // 60}m"
+    elif secs >= 60:
+        reset = f"{secs // 60}m"
+    else:
+        reset = "<1m"
+    return f"{out}({reset})"
+
+
 def fmt_age(secs):
     """Compact snapshot age: just now, 35m ago, 4h ago, 2d ago.
 
@@ -93,6 +137,16 @@ def fmt_age(secs):
     if secs >= 3600:
         return "%dh ago" % (secs // 3600)
     return "%dm ago" % (secs // 60)
+
+
+def fmt_age_compact(secs):
+    if secs < 60:
+        return "now"
+    if secs >= 86400:
+        return "%dd" % (secs // 86400)
+    if secs >= 3600:
+        return "%dh" % (secs // 3600)
+    return "%dm" % (secs // 60)
 
 
 def codex_snapshot_age(ts):
@@ -158,12 +212,126 @@ def persist_claude(data):
         pass
 
 
-def claude_segment(data):
+def claude_segment(data, compact=False):
     model = (data.get("model") or {}).get("display_name") or "?"
     rl = data.get("rate_limits") or {}
+    if compact:
+        if model.endswith(" context)") and " (" in model:
+            model = model.rsplit(" (", 1)[0]
+        head, separator, tail = model.rpartition(" ")
+        if separator and tail.replace(".", "", 1).isdigit():
+            model = head
+        five = fmt_window_compact(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
+        week = fmt_window_compact(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
+        return f"🤖 {model} 5h{five} 7d{week}"
     five = fmt_window(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
     week = fmt_window(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
     return f"🤖 {model} · 5h {five} · 7d {week}"
+
+
+def _path_age(path):
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def start_agy_refresh():
+    """Start a bounded refresh without adding network latency to this render."""
+    cache_age = _path_age(AGY_QUOTA_CACHE)
+    if cache_age is not None and cache_age < AGY_QUOTA_TTL_SECONDS:
+        return False
+    attempt_age = _path_age(AGY_QUOTA_ATTEMPT)
+    if attempt_age is not None and attempt_age < AGY_QUOTA_TTL_SECONDS:
+        return False
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-quota.py")
+    if not os.path.isfile(helper):
+        return False
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "cwd": os.path.expanduser("~"),
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([sys.executable, helper, "--refresh-agy"], **kwargs)
+        return True
+    except OSError:
+        return False
+
+
+def _read_agy_cache():
+    try:
+        with open(AGY_QUOTA_CACHE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data.get("usage"), dict) else None
+
+
+def _agy_group(data, name="Gemini Models"):
+    for group in (data.get("usage") or {}).get("groups") or []:
+        if (group or {}).get("name") == name:
+            return group
+    return None
+
+
+def _agy_bucket(group, window):
+    for bucket in (group or {}).get("buckets") or []:
+        if (bucket or {}).get("window") == window:
+            return bucket
+    return {}
+
+
+def _agy_window(bucket):
+    try:
+        remaining = min(1.0, max(0.0, float(bucket.get("remaining_fraction"))))
+    except (TypeError, ValueError):
+        return {}
+    window = {CLAUDE_PCT_FIELD: (1.0 - remaining) * 100.0}
+    reset_time = bucket.get("reset_time")
+    if reset_time:
+        try:
+            from datetime import datetime
+            window["resets_at"] = datetime.fromisoformat(
+                str(reset_time).replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            pass
+    return window
+
+
+def agy_segment(compact=False):
+    data = _read_agy_cache()
+    if data is None:
+        return None
+    group = _agy_group(data)
+    five_window = _agy_window(_agy_bucket(group, "5h"))
+    week_window = _agy_window(_agy_bucket(group, "weekly"))
+    formatter = fmt_window_compact if compact else fmt_window
+    five = formatter(five_window, CLAUDE_PCT_FIELD)
+    week = formatter(week_window, CLAUDE_PCT_FIELD)
+    age = data.get("cached_at")
+    shown_age = "@?" if compact else "age ?"
+    if age not in (None, ""):
+        try:
+            age_seconds = max(0, int(time.time() - float(age)))
+            shown_age = (
+                "@" + fmt_age_compact(age_seconds)
+                if compact
+                else fmt_age(age_seconds)
+            )
+        except (TypeError, ValueError):
+            pass
+    tier = data.get("plan_tier")
+    head = "AgyG" if compact else (f"Agy Gemini [{tier}]" if tier else "Agy Gemini")
+    if compact:
+        return f"{head} 5h{five} 7d{week} {shown_age}"
+    return f"{head} · 5h {five} · 7d {week} · {shown_age}"
 
 
 def codex_is_main_meter(rate_limits):
@@ -313,7 +481,7 @@ def codex_rate_limits():
     return best_main or best_any
 
 
-def codex_segment():
+def codex_segment(compact=False):
     found = codex_rate_limits()
     if not found:
         return None
@@ -324,18 +492,29 @@ def codex_segment():
         if not w:
             continue
         label = codex_window_label(w) or key
-        segs.append(f"{label} {fmt_window(w, CODEX_PCT_FIELD)}")
+        shown = (
+            fmt_window_compact(w, CODEX_PCT_FIELD)
+            if compact
+            else fmt_window(w, CODEX_PCT_FIELD)
+        )
+        segs.append(f"{label}{shown}" if compact else f"{label} {shown}")
     credits = rl.get("credits") or {}
     bal = credits.get("balance")
     if credits.get("has_credits") or (bal not in (None, "", "0")):
-        segs.append(f"cr {bal}" if bal not in (None, "") else "cr")
+        if compact:
+            segs.append(f"cr{bal}" if bal not in (None, "") else "cr")
+        else:
+            segs.append(f"cr {bal}" if bal not in (None, "") else "cr")
     if not segs:
         return None
     age = codex_snapshot_age(found[1])
-    segs.append("age ?" if age is None else fmt_age(age))
+    if compact:
+        segs.append("@?" if age is None else "@" + fmt_age_compact(age))
+    else:
+        segs.append("age ?" if age is None else fmt_age(age))
     meter = codex_meter_label(rl)
     head = f"Codex [{meter}]" if meter else "Codex"
-    return head + " " + " · ".join(segs)
+    return head + " " + (" ".join(segs) if compact else " · ".join(segs))
 
 
 def main():
@@ -345,10 +524,14 @@ def main():
         sys.stdout.write("statusline: bad stdin\n")
         return
     persist_claude(data)
-    line = claude_segment(data)
-    cx = codex_segment()
+    start_agy_refresh()
+    line = claude_segment(data, compact=True)
+    cx = codex_segment(compact=True)
     if cx:
-        line += "  |  " + cx
+        line += "|" + cx
+    agy = agy_segment(compact=True)
+    if agy:
+        line += "|" + agy
     sys.stdout.write(line + "\n")
 
 

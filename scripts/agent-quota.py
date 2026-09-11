@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-agent quota: show Claude + Codex 5h / 7d remaining from disk.
+"""Cross-agent quota: show Claude + Codex + Agy 5h / 7d remaining.
 
 Runs in any terminal, in either agent's session. This is the symmetric,
 agent-independent view of usage that the Claude statusLine already shows
@@ -7,7 +7,7 @@ inside Claude Code, made readable from a Codex session (or a plain shell)
 too. See docs/followups/2026-05-16-agent-fungibility-refactor-plan.md
 Phase 9.
 
-Data sources (both on disk, no live render or API call needed):
+Data sources:
   - Claude: ~/.claude/rate-limits-cache.json, written by statusline.py on
     each Claude Code statusLine render (override via CLAUDE_RL_CACHE).
   - Codex:  ~/.codex/sessions/**/rollout-*.jsonl, field
@@ -25,12 +25,19 @@ Data sources (both on disk, no live render or API call needed):
     open. mtime still bounds which rollouts are opened, so the result is the
     freshest plan reading among those sampled rather than the newest on
     disk; the row's age bracket is what makes an old one visible.
+  - Agy: ~/.claude/agy-quota-cache.json, populated from the Antigravity
+    CLI's zero-turn `agy -p "/usage" --output-format json` metadata query.
+    A lock and attempt timestamp permit at most one bounded background
+    refresh per cache interval, including after failures.
 
 Each side is only as fresh as that agent's last activity; the age is shown
 in brackets so a stale snapshot is obvious.
 """
 import json
 import os
+import shutil
+import subprocess
+import sys
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
@@ -48,6 +55,228 @@ CODEX_FUTURE_TOLERANCE_SECONDS = 60
 CLAUDE_RL_CACHE = os.environ.get("CLAUDE_RL_CACHE") or os.path.join(
     os.path.expanduser("~"), ".claude", "rate-limits-cache.json"
 )
+AGY_QUOTA_CACHE = os.environ.get("AGY_QUOTA_CACHE") or os.path.join(
+    os.path.expanduser("~"), ".claude", "agy-quota-cache.json"
+)
+AGY_QUOTA_ATTEMPT = AGY_QUOTA_CACHE + ".last-attempt"
+AGY_QUOTA_LOCK = AGY_QUOTA_CACHE + ".refresh.lock"
+
+
+def _positive_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
+AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
+
+
+def _path_age(path):
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def _agy_binary():
+    configured = os.environ.get("ANTIGRAVITY_BIN") or "agy"
+    direct = os.path.expandvars(os.path.expanduser(configured))
+    if os.path.isfile(direct):
+        return os.path.abspath(direct)
+    found = shutil.which(configured)
+    if found:
+        return found
+    if os.name == "nt" and configured.lower() in {"agy", "agy.exe"}:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            fallback = os.path.join(local, "agy", "bin", "agy.exe")
+            if os.path.isfile(fallback):
+                return fallback
+    return None
+
+
+def _agy_usage(payload):
+    if payload.get("status") != "SUCCESS":
+        return None
+    command = payload.get("command") or {}
+    if command.get("name") not in {"usage", "quota"}:
+        return None
+    data = command.get("data") or {}
+    groups = data.get("groups")
+    if not isinstance(groups, list):
+        return None
+    if not any((g or {}).get("name") == "Gemini Models" for g in groups):
+        return None
+    return data
+
+
+def _write_json_atomic(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _refresh_agy_cache():
+    """Refresh the Agy cache synchronously in a bounded helper process."""
+    cache_age = _path_age(AGY_QUOTA_CACHE)
+    if cache_age is not None and cache_age < AGY_QUOTA_TTL_SECONDS:
+        return 0
+    attempt_age = _path_age(AGY_QUOTA_ATTEMPT)
+    if attempt_age is not None and attempt_age < AGY_QUOTA_TTL_SECONDS:
+        return 0
+
+    os.makedirs(os.path.dirname(AGY_QUOTA_CACHE), exist_ok=True)
+    try:
+        lock_fd = os.open(AGY_QUOTA_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(lock_fd)
+    except FileExistsError:
+        lock_age = _path_age(AGY_QUOTA_LOCK)
+        if lock_age is None or lock_age < AGY_QUOTA_TIMEOUT_SECONDS + 30:
+            return 0
+        try:
+            os.unlink(AGY_QUOTA_LOCK)
+        except OSError:
+            return 0
+        try:
+            lock_fd = os.open(AGY_QUOTA_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+        except OSError:
+            return 0
+    except OSError:
+        return 0
+
+    try:
+        _write_json_atomic(AGY_QUOTA_ATTEMPT, {"ts": time.time()})
+        executable = _agy_binary()
+        if not executable:
+            return 1
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    "-p",
+                    "/usage",
+                    "--output-format",
+                    "json",
+                    "--print-timeout",
+                    f"{AGY_QUOTA_TIMEOUT_SECONDS}s",
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                timeout=AGY_QUOTA_TIMEOUT_SECONDS + 5,
+                cwd=os.path.expanduser("~"),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if os.name == "nt"
+                    else 0
+                ),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return 1
+        if result.returncode != 0:
+            return 1
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError):
+            return 1
+        usage = _agy_usage(payload)
+        if usage is None:
+            return 1
+        cached = {
+            "cached_at": time.time(),
+            "usage": usage,
+        }
+        plan_tier = payload.get("plan_tier")
+        if plan_tier:
+            cached["plan_tier"] = plan_tier
+        _write_json_atomic(AGY_QUOTA_CACHE, cached)
+        return 0
+    finally:
+        try:
+            os.unlink(AGY_QUOTA_LOCK)
+        except OSError:
+            pass
+
+
+def _start_agy_refresh():
+    cache_age = _path_age(AGY_QUOTA_CACHE)
+    if cache_age is not None and cache_age < AGY_QUOTA_TTL_SECONDS:
+        return False
+    attempt_age = _path_age(AGY_QUOTA_ATTEMPT)
+    if attempt_age is not None and attempt_age < AGY_QUOTA_TTL_SECONDS:
+        return False
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--refresh-agy"],
+            **kwargs,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def _read_agy_cache():
+    try:
+        with open(AGY_QUOTA_CACHE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data.get("usage"), dict) else None
+
+
+def _agy_group(data, name="Gemini Models"):
+    for group in (data.get("usage") or {}).get("groups") or []:
+        if (group or {}).get("name") == name:
+            return group
+    return None
+
+
+def _agy_bucket(group, window):
+    for bucket in (group or {}).get("buckets") or []:
+        if (bucket or {}).get("window") == window:
+            return bucket
+    return {}
+
+
+def _agy_window(bucket):
+    try:
+        remaining = min(1.0, max(0.0, float(bucket.get("remaining_fraction"))))
+    except (TypeError, ValueError):
+        return {}
+    window = {CLAUDE_PCT_FIELD: (1.0 - remaining) * 100.0}
+    reset_time = bucket.get("reset_time")
+    if reset_time:
+        try:
+            from datetime import datetime
+            window["resets_at"] = datetime.fromisoformat(
+                str(reset_time).replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            pass
+    return window
 
 
 def _fmt_age(secs):
@@ -314,6 +543,8 @@ def claude_row():
         return "Claude   (no statusLine cache yet — open Claude Code once to populate)"
     rl = d.get("rate_limits") or {}
     model = d.get("model") or "?"
+    if model.endswith(" context)") and " (" in model:
+        model = model.rsplit(" (", 1)[0]
     five = _fmt(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
     week = _fmt(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
     return f"Claude   {model:<12}  5h {five:<20}  7d {week:<20}  [{_age(d.get('ts'))}]"
@@ -347,10 +578,39 @@ def codex_row():
     return f"Codex    {model:<12}  {body}  [{shown}]"
 
 
+def agy_row(refresh_started=False):
+    data = _read_agy_cache()
+    if data is None:
+        state = "refresh started" if refresh_started else "quota cache unavailable"
+        return f"Agy      ({state})"
+    tier = data.get("plan_tier")
+    specs = [
+        ("Gemini Models", f"Gemini/{tier}" if tier else "Gemini"),
+        ("Claude and GPT models", "Claude/GPT"),
+    ]
+    rows = []
+    for group_name, label in specs:
+        group = _agy_group(data, group_name)
+        if group is None:
+            continue
+        five = _fmt(_agy_window(_agy_bucket(group, "5h")), CLAUDE_PCT_FIELD)
+        week = _fmt(_agy_window(_agy_bucket(group, "weekly")), CLAUDE_PCT_FIELD)
+        rows.append(
+            f"Agy      {label:<12}  5h {five:<20}  7d {week:<20}  "
+            f"[{_age(data.get('cached_at'))}]"
+        )
+    return "\n".join(rows) if rows else "Agy      (quota groups unavailable)"
+
+
 def main():
+    if sys.argv[1:] == ["--refresh-agy"]:
+        return _refresh_agy_cache()
+    refresh_started = _start_agy_refresh()
     print(claude_row())
     print(codex_row())
+    print(agy_row(refresh_started))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

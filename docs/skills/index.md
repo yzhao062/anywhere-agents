@@ -8,7 +8,7 @@
 
     ---
 
-    Structured dual-agent review loop with content-type lenses. Codex reviews, Claude applies fixes, iterates until clean.
+    Structured cross-model review loop with content-type lenses. Codex is the default reviewer; Agy, Copilot, and headless Claude Code are selectable backends.
 
     [:octicons-arrow-right-24: Deep docs](implement-review.md)
 
@@ -40,7 +40,7 @@
 
     ---
 
-    Parallel delegation fan-out where Opus coordinates Codex and Sonnet workers that spend their separate quotas.
+    Parallel delegation fan-out where a Claude session coordinates Sonnet and Agy workers. Codex is reserved for `/vet`; fan-out width follows the task instead of a fixed small cap.
 
     [:octicons-arrow-right-24: Deep docs](prun.md)
 
