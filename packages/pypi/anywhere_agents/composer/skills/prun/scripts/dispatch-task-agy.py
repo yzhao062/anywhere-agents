@@ -12,8 +12,13 @@ requires an explicit mode, and ``--mode plan`` is the read-only opt-in.
 ``--add-dir`` puts a directory outside the working directory into the unit's
 workspace without copying a repository into the scratch area. The conversation id from Agy's ``init`` event is recorded
 to ``<state-dir>/conversation-id`` so a follow-up dispatch can resume that
-conversation with ``--continue-from``. This dispatcher never scans for or
-terminates other agent processes.
+conversation with ``--continue-from``. The dispatcher omits Agy's
+``--sandbox`` flag by default: on Windows that sandbox needs an elevated
+admin broker (``agy --exebox-admin-broker``), which raises a UAC prompt for
+every unit that runs a command. ``PRUN_AGY_SANDBOX`` controls whether the
+flag is added; it does not disable a sandbox enabled in Agy's own settings
+(``enableTerminalSandbox``). This dispatcher never scans for or terminates
+other agent processes.
 """
 from __future__ import annotations
 
@@ -46,7 +51,16 @@ def fail(message: str, code: int = 2) -> int:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dispatch a prun unit through Agy")
+    parser = argparse.ArgumentParser(
+        description="Dispatch a prun unit through Agy",
+        epilog=(
+            "Environment: PRUN_AGY_SANDBOX=1 adds Agy's --sandbox flag, which "
+            "is omitted by default because on Windows it needs an elevated "
+            "admin broker and raises a UAC prompt for every unit that runs a "
+            "command. The variable does not disable a sandbox enabled in "
+            "Agy's own settings (enableTerminalSandbox)."
+        ),
+    )
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--unit-id", required=True)
@@ -107,6 +121,24 @@ def positive_int_env(name: str, default: int) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def sandbox_opt_in() -> bool:
+    """Return whether ``PRUN_AGY_SANDBOX`` asks for Agy's ``--sandbox``.
+
+    Off unless the value is ``1``, ``true``, ``yes``, or ``on``; ``0``,
+    ``false``, ``no``, ``off``, and an empty value keep it off. Any other
+    spelling raises so a typo fails before a request is spent.
+    """
+    raw = os.environ.get("PRUN_AGY_SANDBOX", "").strip().lower()
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(
+        "PRUN_AGY_SANDBOX must be 1/true/yes/on or 0/false/no/off "
+        f"(got: {raw})"
+    )
 
 
 def run_preflight(executable: str, model: str, state_dir: Path) -> tuple[int, str]:
@@ -376,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds = positive_int_env(
             "ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
         )
+        use_sandbox = sandbox_opt_in()
     except ValueError as exc:
         return fail(str(exc))
 
@@ -425,10 +458,11 @@ def main(argv: list[str] | None = None) -> int:
         effort,
         "--mode",
         args.mode,
-        "--sandbox",
         "--print-timeout",
         f"{timeout_seconds}s",
     ]
+    if use_sandbox:
+        command.append("--sandbox")
     if args.mode == "accept-edits":
         command.append("--dangerously-skip-permissions")
     for add_dir in add_dirs:

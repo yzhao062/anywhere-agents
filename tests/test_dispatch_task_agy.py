@@ -122,6 +122,8 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         target = result_path or (self.root / "unit-result.md")
         env = os.environ.copy()
+        # The default-argv assertions must not inherit an operator's opt-in.
+        env.pop("PRUN_AGY_SANDBOX", None)
         env.update(
             {
                 "ANTIGRAVITY_BIN": str(self.mock),
@@ -178,7 +180,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertEqual(args[args.index("--mode") + 1], "plan")
         self.assertNotIn("--dangerously-skip-permissions", args)
         self.assertNotIn("--disable-slash-commands", args)
-        self.assertIn("--sandbox", args)
+        self.assertNotIn("--sandbox", args)
         actual_cwd = Path((self.log / "cwd.txt").read_text(encoding="utf-8"))
         self.assertTrue(
             actual_cwd.samefile(self.work), f"{actual_cwd} != {self.work}"
@@ -250,6 +252,56 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
                 result, target = self._run(extra_args=extra)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("non-empty", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(target.exists())
+                self.assertFalse((self.log / "args.json").exists())
+
+    def test_sandbox_is_off_by_default_and_opt_in_via_env(self) -> None:
+        # On Windows Agy's sandbox spawns an elevated admin broker
+        # (agy --exebox-admin-broker), one UAC prompt per unit that runs a
+        # command, so the dispatcher must not ask for it unless told to.
+        result, _ = self._run(mode="accept-edits")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertNotIn("--sandbox", args)
+
+        (self.log / "args.json").unlink()
+        result, _ = self._run(
+            result_path=self.root / "unit-result-sandbox.md",
+            mode="accept-edits",
+            extra_env={"PRUN_AGY_SANDBOX": "1"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("--sandbox", args)
+        self.assertIn("--dangerously-skip-permissions", args)
+
+    def test_sandbox_env_spellings_are_case_and_whitespace_insensitive(self) -> None:
+        for index, (value, expected) in enumerate(
+            (("true", True), (" YES ", True), ("On", True), ("0", False), ("False", False), (" off", False))
+        ):
+            with self.subTest(value=value):
+                if (self.log / "args.json").exists():
+                    (self.log / "args.json").unlink()
+                result, _ = self._run(
+                    result_path=self.root / f"unit-result-spelling-{index}.md",
+                    mode="plan",
+                    extra_env={"PRUN_AGY_SANDBOX": value},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+                self.assertEqual("--sandbox" in args, expected)
+                self.assertEqual(args[args.index("--mode") + 1], "plan")
+                self.assertNotIn("--dangerously-skip-permissions", args)
+
+    def test_unrecognized_sandbox_env_fails_before_launch(self) -> None:
+        for value in ("maybe", "sandbox"):
+            with self.subTest(value):
+                if (self.log / "args.json").exists():
+                    (self.log / "args.json").unlink()
+                result, target = self._run(extra_env={"PRUN_AGY_SANDBOX": value})
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("PRUN_AGY_SANDBOX", result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertFalse(target.exists())
                 self.assertFalse((self.log / "args.json").exists())

@@ -243,6 +243,15 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   atomic `FALLBACK` result with captured tails.
 - `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` defaults to 2700 and is passed to Agy's bounded
   `--print-timeout`. The dispatcher never enumerates or terminates another agent process.
+- The dispatcher omits Agy's `--sandbox` flag by default. On Windows that sandbox starts an
+  elevated admin broker and raises a UAC prompt for every unit that runs a command; a declined
+  prompt fails the command. `PRUN_AGY_SANDBOX` controls whether the flag is added; it does not
+  disable a sandbox enabled in Agy's own settings (`enableTerminalSandbox`). Accepted values are
+  `1`/`true`/`yes`/`on` to add the flag and `0`/`false`/`no`/`off`, empty, or unset to omit it.
+  Values ignore case and surrounding whitespace; anything else exits 2 before state creation or
+  launch. Scratch directories and throwaway clones reduce accidental changes to the working
+  repository. They do not enforce filesystem or network isolation; the worker must follow the
+  prompt's ban on commit, push, and destructive git.
 - The legacy `dispatch-task.{sh,ps1}` Codex scripts remain shipped only so older deployments and
   state directories retain their recovery tooling. Current `prun` routing never selects them.
 
@@ -477,9 +486,12 @@ Both executors reach the web by different paths, each with its own strengths, so
 **Agy** runs on the user's local machine, so its requests leave from the user's local network
 rather than the cloud fetcher's egress IP, often a residential IP. That can reach some pages a cloud
 fetcher gets `403` on, though a hardened site can still block on bot score, fingerprint, or rate. It
-also surfaces pages a cloud fetch would miss. The dispatcher enables Agy's sandbox, and its default
-mode grants the web and the shell unattended, so a worker can fetch through `read_url` or a
-local-shell curl. Only `--mode plan` withholds both: it runs Agy in `request-review` mode, and a
+also surfaces pages a cloud fetch would miss. The dispatcher's default mode grants the web and the
+shell unattended, so a worker can fetch through `read_url` or a local-shell curl. It does not ask
+for Agy's own `--sandbox`: on Windows that sandbox starts an elevated admin broker
+(`agy --exebox-admin-broker`), which raises a UAC prompt for every unit that runs a command, and
+a declined prompt fails the command. Set `PRUN_AGY_SANDBOX=1` to add the flag where the broker
+is acceptable. Only `--mode plan` withholds the web and the shell: it runs Agy in `request-review` mode, and a
 headless run denies the permission prompt. The process can still exit 0 with a result that says the
 fetch did not happen, so read a plan-mode result's `Verification` and `Open items` fields before
 trusting it.

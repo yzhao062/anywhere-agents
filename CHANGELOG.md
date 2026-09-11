@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
+## [Unreleased]
+
+### Fixed
+
+- **`prun` Agy units no longer raise a Windows UAC prompt.** `dispatch-task-agy.py` passed Agy's `--sandbox` on every unit. On Windows that sandbox starts an elevated admin broker (`agy --exebox-admin-broker`). Each unit that ran a shell command therefore popped a User Account Control dialog, and declining it failed the command. Now the dispatcher omits the `--sandbox` flag. `PRUN_AGY_SANDBOX` controls whether it is added: `1`/`true`/`yes`/`on` add it, `0`/`false`/`no`/`off`, empty, or unset omit it, and anything else exits 2 before launch. The variable does not disable a sandbox enabled in Agy's own settings (`enableTerminalSandbox`). Units keep the web, the shell, and file writes through the unattended `accept-edits` default, matching the `/vet` Agy reviewer, which never passed the flag. Scratch directories and throwaway clones reduce accidental changes to the working repository. They do not enforce filesystem or network isolation, so the worker must follow the prompt's ban on commit, push, and destructive git.
+- **The session banner no longer reports the bundled `agent-style` pack as undeployed.** Session Start Check item 7 now seeds the bundled defaults and resolves their identity from `pack-lock.json` before comparing against user-level rows, the way `anywhere-agents pack verify` does. The `agent-style` row that `pack add` writes on first use therefore stops counting as a gap in every project that relies on the bundled default.
+
 ## [0.8.0] — 2026-09-11
 
 ### Added
