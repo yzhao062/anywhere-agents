@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import threading
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,11 @@ def load_dispatch_module():
     spec.loader.exec_module(module)
     return module
 
+
+WORKER_RESULT_TEXT = (
+    "# unit_a result\nConclusion: worker-written\nFiles: none\n"
+    "Open items: none\nVerification: mock\n\n| row | value |\n|---|---|\n| a | 1 |\n"
+)
 
 MOCK_AGY = r'''#!/usr/bin/env python3
 import json
@@ -52,16 +59,23 @@ print(json.dumps(init_event))
 worker_result = os.environ.get("MOCK_AGY_WRITE_RESULT")
 if worker_result:
     Path(worker_result).write_text(
-        "# unit_a result\nConclusion: worker-written\nFiles: none\n"
-        "Open items: none\nVerification: mock\n\n| row | value |\n|---|---|\n| a | 1 |\n",
-        encoding="utf-8",
+        os.environ["MOCK_AGY_WORKER_TEXT"], encoding="utf-8"
     )
 if os.environ.get("MOCK_AGY_NO_RESULT") != "1":
     response = os.environ.get(
         "MOCK_AGY_RESPONSE",
         "# unit_a result\nConclusion: complete\nFiles: none\nOpen items: none\nVerification: mock\n",
     )
-    print(json.dumps({"event": "result", "result": {"response": response}}))
+    payload = {"response": response}
+    # Older Agy builds omit status, so the fixture carries the field only when
+    # a test asks for it.
+    for key in ("status", "error"):
+        value = os.environ.get("MOCK_AGY_" + key.upper())
+        if value:
+            payload[key] = value
+    print(json.dumps({"event": "result", "result": payload}))
+    if os.environ.get("MOCK_AGY_TRAILING_RESULT_WITHOUT_STATUS") == "1":
+        print(json.dumps({"event": "result", "result": {"response": response}}))
 raise SystemExit(int(os.environ.get("MOCK_AGY_EXIT", "0")))
 '''
 
@@ -81,6 +95,56 @@ class DispatchTaskAgyUnitTests(unittest.TestCase):
     def test_unit_id_is_narrow(self) -> None:
         self.assertIsNotNone(self.module.UNIT_RE.fullmatch("paper_review-12"))
         self.assertIsNone(self.module.UNIT_RE.fullmatch("../escape"))
+
+    def test_failure_reason_reads_the_final_result_status(self) -> None:
+        self.assertEqual(self.module.failure_reason(None, None), "")
+        self.assertEqual(self.module.failure_reason("SUCCESS", None), "")
+        self.assertEqual(self.module.failure_reason("", None), "")
+        self.assertEqual(self.module.failure_reason("  success  ", None), "")
+        reason = self.module.failure_reason(
+            "ERROR", "Individual quota reached.\nResets in 34m7s."
+        )
+        self.assertIn("ERROR", reason)
+        # The reason becomes one line of the FALLBACK header.
+        self.assertIn("Individual quota reached. Resets in 34m7s.", reason)
+        self.assertNotIn("\n", reason)
+
+    def test_copy_stream_writes_each_chunk_before_eof(self) -> None:
+        # A running unit's tail sat at 0 bytes and then jumped to exactly
+        # 65536, because read(65536) waits for a full 64 KiB. The monitors
+        # and their stall threshold read the tail while the unit runs, so a
+        # chunk has to land as the pipe delivers it.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        tail_path = Path(temp.name) / "tail"
+        read_fd, write_fd = os.pipe()
+        # bufsize -1 is what subprocess.Popen hands the dispatcher, so this
+        # read end buffers exactly the way process.stdout does.
+        source = open(read_fd, "rb")
+        self.addCleanup(source.close)
+        writer = open(write_fd, "wb", buffering=0)
+        line = b'{"event": "init", "conversation_id": "conv-pump-0001"}\n'
+        observed = b""
+        with tail_path.open("wb") as tail:
+            pump = threading.Thread(
+                target=self.module.copy_stream, args=(source, tail), daemon=True
+            )
+            pump.start()
+            try:
+                writer.write(line)
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    observed = tail_path.read_bytes()
+                    if observed == line:
+                        break
+                    time.sleep(0.02)
+            finally:
+                # Closing before the join keeps a failed assertion from
+                # leaving the pump blocked on a pipe nobody will write to.
+                writer.close()
+                pump.join(timeout=10.0)
+        self.assertEqual(observed, line, "tail did not grow while the pipe stayed open")
+        self.assertFalse(pump.is_alive(), "the pump did not return at EOF")
 
 
 class DispatchTaskAgyIntegrationTests(unittest.TestCase):
@@ -129,6 +193,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
                 "ANTIGRAVITY_BIN": str(self.mock),
                 "ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS": "10",
                 "MOCK_AGY_LOG": str(self.log),
+                "MOCK_AGY_WORKER_TEXT": WORKER_RESULT_TEXT,
                 "PRUN_SCRATCH_CWD": str(self.work),
                 "TEMP": str(self.root),
                 "TMP": str(self.root),
@@ -429,6 +494,113 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         beside = self.root / "unit-result.response.md"
         self.assertEqual(beside.read_text(encoding="utf-8"), "done\n")
         self.assertNotIn("FALLBACK", body)
+
+    def test_error_status_publishes_fallback_with_the_backend_error(self) -> None:
+        # Agy exits 0 after a quota stop and still fills the ERROR event's
+        # response with the model's opening narration. Four units of one
+        # 2026-09-11 fan-out published that narration as their result.
+        narration = (
+            "I will begin by reading the required documents in order, "
+            "starting with the plan file, and then work through each section.\n"
+        )
+        result, target = self._run(
+            extra_env={
+                "MOCK_AGY_STATUS": "ERROR",
+                "MOCK_AGY_ERROR": "Individual quota reached. Resets in 34m7s.",
+                "MOCK_AGY_RESPONSE": narration,
+            }
+        )
+        self.assertEqual(result.returncode, 70, result.stderr)
+        body = target.read_text(encoding="utf-8")
+        lines = body.splitlines()
+        self.assertIn("FALLBACK", lines[0])
+        # Assert on the header, not anywhere in the body: publish_fallback
+        # embeds the captured tail, which carries the same error text, so a
+        # body-wide search passes even when the reason never reaches the reader.
+        conclusion = next(x for x in lines if x.startswith("Conclusion:"))
+        self.assertIn("ERROR", conclusion)
+        self.assertIn("Individual quota reached", conclusion)
+        self.assertIn("Individual quota reached", result.stderr)
+        self.assertNotEqual(lines[0], narration.splitlines()[0])
+
+    def test_error_status_keeps_worker_result_and_exits_nonzero(self) -> None:
+        # The stream-interrupted case: the worker had written its result before
+        # the run was cut short, so that file must survive while the dispatcher
+        # still exits non-zero. The monitors read only the first line, so they
+        # report the unit done; the exit code is what records the stop.
+        target = self.root / "unit-result.md"
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(target),
+                "MOCK_AGY_STATUS": "ERROR",
+                "MOCK_AGY_ERROR": "The stream was interrupted.",
+                "MOCK_AGY_RESPONSE": "partial narration before the stop",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        beside = self.root / "unit-result.response.md"
+        self.assertEqual(
+            beside.read_text(encoding="utf-8"),
+            "partial narration before the stop\n",
+        )
+        self.assertIn("The stream was interrupted.", result.stderr)
+
+    def test_trailing_status_free_result_event_cannot_erase_an_error(self) -> None:
+        # A second result event that omits the field must not read as "no
+        # verdict"; otherwise the quota stop republishes the narration.
+        result, target = self._run(
+            extra_env={
+                "MOCK_AGY_STATUS": "ERROR",
+                "MOCK_AGY_ERROR": "Individual quota reached.",
+                "MOCK_AGY_RESPONSE": "narration long enough to clear the floor",
+                "MOCK_AGY_TRAILING_RESULT_WITHOUT_STATUS": "1",
+            }
+        )
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn("FALLBACK", target.read_text(encoding="utf-8").splitlines()[0])
+
+    def test_nonzero_exit_keeps_a_worker_written_result(self) -> None:
+        # The hard-exit path shares the worker-result branch, so a crash after
+        # the worker published must not replace its file with a FALLBACK.
+        target = self.root / "unit-result.md"
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(target),
+                "MOCK_AGY_EXIT": "9",
+                "MOCK_AGY_RESPONSE": "partial narration before the crash",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        beside = self.root / "unit-result.response.md"
+        self.assertEqual(
+            beside.read_text(encoding="utf-8").strip(),
+            "partial narration before the crash",
+        )
+
+    def test_success_status_publishes_normally(self) -> None:
+        result, target = self._run(extra_env={"MOCK_AGY_STATUS": "SUCCESS"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = target.read_text(encoding="utf-8")
+        self.assertIn("Conclusion: complete", body)
+        self.assertNotIn("FALLBACK", body)
+
+    def test_result_event_without_status_publishes_normally(self) -> None:
+        # An Agy build that omits the field has to keep working.
+        result, target = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Conclusion: complete", target.read_text(encoding="utf-8"))
+        state_dir = Path(result.stdout.strip().split(" ", 1)[1])
+        events = [
+            json.loads(line)
+            for line in (state_dir / "tail").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        final = [event for event in events if event.get("event") == "result"][-1]
+        self.assertNotIn("status", final["result"])
 
     def test_existing_result_is_never_overwritten(self) -> None:
         target = self.root / "existing.md"

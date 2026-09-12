@@ -222,9 +222,10 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   exit 0 with a normal-looking result that reports it could not verify. A normal result file
   therefore does not prove those checks ran; read its `Verification` and `Open items` fields. If
   the worker has not written a non-empty result file, a missing, empty, or shorter-than-20-byte
-  final response produces `FALLBACK`. A standing `permissions.allow` rule in Agy's own
-  `settings.json` (`~/.gemini/antigravity-cli/settings.json`, entries such as `read_url(*)` or
-  `command(*)`) is the alternative for a plan-mode unit.
+  final response produces `FALLBACK`, and so does a final `result` event whose `status` is not
+  `SUCCESS`. A standing `permissions.allow` rule in Agy's own `settings.json`
+  (`~/.gemini/antigravity-cli/settings.json`, entries such as `read_url(*)` or `command(*)`) is the
+  alternative for a plan-mode unit.
 - `--add-dir PATH` (repeatable) adds a directory outside the unit's working directory to its
   workspace without copying a repository into the scratch area, in either mode; it requires an
   explicit `--mode`. Point it at a clone or a read-only snapshot, never the real tree, since
@@ -241,6 +242,20 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   a one-line closing reply never replaces a full result. If no non-empty worker result exists, a
   failed preflight, launch, worker run, or timeout, or an unusable final response, produces an
   atomic `FALLBACK` result with captured tails.
+- Both signals decide the outcome. A non-zero process exit fails the unit, and after an exit of 0
+  the final `result` event's `status` is consulted, because Agy exits 0 when it stops on a quota
+  limit and that `ERROR` event still carries the opening narration in `response`. Publishing that
+  response would hand the coordinator work that never happened. Any status other than `SUCCESS`
+  fails the unit and carries the event's `error` text into the `FALLBACK` result. The one exception
+  is a status that is missing or blank, which counts as success so that an older Agy keeps working.
+- A failed run whose worker had already written its own result keeps that file, because the worker
+  may have finished before the backend stopped. The partial response lands beside it as
+  `<result>.response.<ext>`, and the dispatcher exits non-zero with the backend error on stderr.
+  Both monitors classify a stable worker-written result as `done` without reading the backend
+  status. Before integrating such a unit, wait for the dispatcher to finish and check its exit
+  code. When that code is unavailable, read the `result` event's `status` and `error` in
+  `<state-dir>/tail` and the captured dispatch diagnostics. The sibling response is supporting
+  context: a successful run writes one too, and it records no status.
 - `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` defaults to 2700 and is passed to Agy's bounded
   `--print-timeout`. The dispatcher never enumerates or terminates another agent process.
 - The dispatcher omits Agy's `--sandbox` flag by default. On Windows that sandbox starts an

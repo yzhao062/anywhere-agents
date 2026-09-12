@@ -361,7 +361,10 @@ try {
         New-Item -ItemType Directory -Force -Path $stagedSnapshotDir | Out-Null
         $snapshotPrefix = ($stagedSnapshotDir -replace '\\', '/') + '/'
         $checkoutSubcmd = 'checkout-' + 'index'
-        & git $checkoutSubcmd -a "--prefix=$snapshotPrefix" 2>> $gitDiffStderrPath
+        # core.longpaths as a per-command override: the state-dir prefix plus a
+        # long index path crosses the 260-character Windows limit, which failed
+        # the export. The user's git config is untouched.
+        & git -c core.longpaths=true $checkoutSubcmd -a "--prefix=$snapshotPrefix" 2>> $gitDiffStderrPath
         if ($LASTEXITCODE -eq 0) {
             $validationDir = $stagedSnapshotDir
         } else {

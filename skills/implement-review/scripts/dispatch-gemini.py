@@ -185,7 +185,18 @@ def prepare_snapshot(cwd: Path, state_dir: Path) -> tuple[Path | None, str, str]
     snapshot = state_dir / "staged-snapshot"
     snapshot.mkdir()
     prefix = str(snapshot) + os.sep
-    export = git_output(repo_root, "checkout-index", "-a", f"--prefix={prefix}")
+    # core.longpaths as a per-command override, because the state-dir prefix
+    # is 114 characters and an index path of 186 crosses the 260-character
+    # Windows limit, which failed the export and blocked the reviewer. The
+    # flag leaves the user's git config untouched and is inert off Windows.
+    export = git_output(
+        repo_root,
+        "-c",
+        "core.longpaths=true",
+        "checkout-index",
+        "-a",
+        f"--prefix={prefix}",
+    )
     diagnostics += export.stderr
     if export.returncode != 0:
         diagnostics += (
@@ -284,30 +295,64 @@ def start_stall_watch(state_dir: Path) -> None:
 
 
 def copy_stream(source: BinaryIO, target: BinaryIO) -> None:
+    # read1 returns as soon as the pipe holds bytes, where read(65536) waits
+    # for 64 KiB or EOF. Under read, the tail this watcher polls grew in 64 KiB
+    # steps, so a quiet reviewer looked stalled and a killed dispatcher lost
+    # its last block of events. getattr keeps a plain BinaryIO working.
+    read_chunk = getattr(source, "read1", source.read)
     while True:
-        chunk = source.read(65536)
+        chunk = read_chunk(65536)
         if not chunk:
             break
         target.write(chunk)
         target.flush()
 
 
-def extract_response(tail_path: Path) -> str | None:
+def extract_result(tail_path: Path) -> tuple[str | None, str | None, str | None]:
+    """Return ``(status, response, error)`` from the tail's final result event.
+
+    Status and error come from the last ``result`` event that carries each
+    field, so a trailing event that omits the status cannot erase a verdict an
+    earlier event recorded. The response keeps the last non-empty value.
+    """
+    status: str | None = None
     response: str | None = None
+    error: str | None = None
     with tail_path.open("r", encoding="utf-8", errors="replace") as stream:
         for line in stream:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("event") != "result":
+            if not isinstance(event, dict) or event.get("event") != "result":
                 continue
             result = event.get("result")
-            if isinstance(result, dict):
-                candidate = result.get("response")
-                if isinstance(candidate, str) and candidate.strip():
-                    response = candidate
-    return response
+            if not isinstance(result, dict):
+                continue
+            if "status" in result:
+                raw_status = result.get("status")
+                status = raw_status if isinstance(raw_status, str) else "UNKNOWN"
+            if "error" in result:
+                raw_error = result.get("error")
+                error = raw_error if isinstance(raw_error, str) else None
+            candidate = result.get("response")
+            if isinstance(candidate, str) and candidate.strip():
+                response = candidate
+    return status, response, error
+
+
+def failure_reason(status: str | None, error: str | None) -> str:
+    """Return why the run failed, or an empty string when it reported success.
+
+    A missing or blank status counts as success, so an Antigravity build that
+    omits the field keeps working. Whitespace is collapsed, because the reason
+    is printed as one diagnostic line.
+    """
+    if status is None or status.strip().upper() in {"", "SUCCESS"}:
+        return ""
+    detail = " ".join(error.split()) if isinstance(error, str) else ""
+    reason = f"Antigravity reported status {' '.join(status.split())}"
+    return f"{reason}: {detail}" if detail else reason
 
 
 def normalize_review(response: str, round_num: int) -> str:
@@ -522,8 +567,16 @@ def main(argv: list[str] | None = None) -> int:
         stderr_thread.join()
 
     if exit_code == 0:
-        response = extract_response(tail_path)
-        if response is None:
+        status, response, error = extract_result(tail_path)
+        backend_failure = failure_reason(status, error)
+        if backend_failure:
+            # Antigravity exits 0 when it stops on a quota limit, and that
+            # ERROR event still carries the model's opening narration. The
+            # prun dispatcher published one of those as a unit result; here it
+            # would become the round's review.
+            print(f"dispatch-gemini: {backend_failure}; review rejected", file=sys.stderr)
+            exit_code = 70
+        elif response is None:
             print(
                 "dispatch-gemini: Antigravity exited 0 without a final result response; review rejected",
                 file=sys.stderr,

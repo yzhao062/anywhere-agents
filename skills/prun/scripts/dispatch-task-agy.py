@@ -4,7 +4,9 @@
 The coordinator receives the usual ``STATE-DIR`` contract. Antigravity runs
 inside a per-unit scratch directory (or ``PRUN_SCRATCH_CWD``), its streaming
 events land in ``tail``, and the final response is published atomically to the
-fresh result path. ``--mode`` defaults to ``accept-edits`` with
+fresh result path. A final ``result`` event whose ``status`` is not ``SUCCESS``
+fails the unit even when the process exits 0, because Agy exits 0 after it
+stops on a quota limit. ``--mode`` defaults to ``accept-edits`` with
 ``--dangerously-skip-permissions``, the same unattended capability the
 implement-review Gemini reviewer already runs with, when the dispatcher owns
 the working directory; a caller-supplied ``PRUN_SCRATCH_CWD`` or ``--add-dir``
@@ -196,34 +198,76 @@ def run_preflight(executable: str, model: str, state_dir: Path) -> tuple[int, st
 
 
 def copy_stream(source: BinaryIO, target: BinaryIO) -> None:
+    # read1 returns as soon as the pipe holds bytes, where read(65536) waits
+    # for 64 KiB or EOF. Under read, a running unit's tail stayed at 0 bytes
+    # and then jumped to exactly 65536, which blinded the monitors and their
+    # stall threshold while the unit ran, and cost a killed dispatcher the
+    # last block of events, including the init event that carries the
+    # conversation id. getattr keeps a plain BinaryIO working.
+    read_chunk = getattr(source, "read1", source.read)
     while True:
-        chunk = source.read(65536)
+        chunk = read_chunk(65536)
         if not chunk:
             return
         target.write(chunk)
         target.flush()
 
 
-def extract_response(tail_path: Path) -> str | None:
+def extract_result(tail_path: Path) -> tuple[str | None, str | None, str | None]:
+    """Return ``(status, response, error)`` from the tail's final result event.
+
+    Status and error come from the last ``result`` event that carries each
+    field, so a trailing event that omits the status cannot erase a verdict an
+    earlier event recorded. The response keeps the last non-empty value, which
+    is the one worth publishing. A tail with no usable result event yields
+    three ``None`` values.
+    """
+    status: str | None = None
     response: str | None = None
+    error: str | None = None
     try:
         stream = tail_path.open("r", encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        return None, None, None
     with stream:
         for line in stream:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("event") != "result":
+            if not isinstance(event, dict) or event.get("event") != "result":
                 continue
             result = event.get("result")
-            if isinstance(result, dict):
-                candidate = result.get("response")
-                if isinstance(candidate, str) and candidate.strip():
-                    response = candidate
-    return response
+            if not isinstance(result, dict):
+                continue
+            if "status" in result:
+                raw_status = result.get("status")
+                # A present but non-string status is still a verdict, and it is
+                # not SUCCESS. Recording it as UNKNOWN fails the run rather than
+                # letting a malformed field read as no verdict at all.
+                status = raw_status if isinstance(raw_status, str) else "UNKNOWN"
+            if "error" in result:
+                raw_error = result.get("error")
+                error = raw_error if isinstance(raw_error, str) else None
+            candidate = result.get("response")
+            if isinstance(candidate, str) and candidate.strip():
+                response = candidate
+    return status, response, error
+
+
+def failure_reason(status: str | None, error: str | None) -> str:
+    """Return why the run failed, or an empty string when it reported success.
+
+    A missing or blank status counts as success, so an Agy build that omits the
+    field keeps working, and the comparison folds case so that a respelled
+    success is not read as a failure. Whitespace in the error is collapsed,
+    because the reason becomes one line of the FALLBACK header.
+    """
+    if status is None or status.strip().upper() in {"", "SUCCESS"}:
+        return ""
+    detail = " ".join(error.split()) if isinstance(error, str) else ""
+    reason = f"Agy reported status {' '.join(status.split())}"
+    return f"{reason}: {detail}" if detail else reason
 
 
 def extract_conversation_id(tail_path: Path) -> str | None:
@@ -238,7 +282,7 @@ def extract_conversation_id(tail_path: Path) -> str | None:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("event") != "init":
+            if not isinstance(event, dict) or event.get("event") != "init":
                 continue
             candidate = event.get("conversation_id")
             if isinstance(candidate, str) and candidate.strip():
@@ -521,29 +565,42 @@ def main(argv: list[str] | None = None) -> int:
             f"{conversation_id}\n", encoding="utf-8"
         )
 
+    status, response, error = extract_result(tail_path)
     reason = ""
+    if exit_code != 0:
+        reason = f"Agy exited with code {exit_code}"
+    else:
+        backend_failure = failure_reason(status, error)
+        if backend_failure:
+            # Agy exits 0 after it stops on a quota limit, and the ERROR event
+            # still carries the model's opening narration in `response`. Four
+            # units of one 2026-09-11 fan-out published that narration as their
+            # result, so the event status decides the outcome, not the exit code.
+            exit_code = 70
+            reason = backend_failure
+
     worker_wrote = result_path.is_file() and result_path.stat().st_size > 0
-    if exit_code == 0:
-        response = extract_response(tail_path)
-        if worker_wrote:
-            # The worker followed the prun return contract and wrote its own
-            # result file during the run. Keep it: replacing it with the final
-            # response turned a full trace table into a one-line summary on a
-            # live run. The response lands beside it instead.
-            if response is not None and response.strip():
-                try:
-                    atomic_publish(
-                        response_path_for(result_path),
-                        response.strip() + "\n",
-                        nonce,
-                    )
-                except OSError as exc:
-                    print(
-                        f"dispatch-task-agy: kept worker result; could not store "
-                        f"final response beside it: {exc}",
-                        file=sys.stderr,
-                    )
-        elif response is None:
+    if worker_wrote:
+        # The worker followed the prun return contract and wrote its own
+        # result file during the run. Keep it: replacing it with the final
+        # response turned a full trace table into a one-line summary on a
+        # live run. The response lands beside it instead, on a failed run
+        # too, where it is the only record of how far the unit got.
+        if response is not None and response.strip():
+            try:
+                atomic_publish(
+                    response_path_for(result_path),
+                    response.strip() + "\n",
+                    nonce,
+                )
+            except OSError as exc:
+                print(
+                    f"dispatch-task-agy: kept worker result; could not store "
+                    f"final response beside it: {exc}",
+                    file=sys.stderr,
+                )
+    elif exit_code == 0:
+        if response is None:
             exit_code = 70
             reason = "Agy exited 0 without a final result response"
         elif len(response.strip().encode("utf-8")) < MIN_RESULT_BYTES:
@@ -555,8 +612,6 @@ def main(argv: list[str] | None = None) -> int:
             except OSError as exc:
                 exit_code = 70
                 reason = f"could not publish result atomically: {exc}"
-    else:
-        reason = f"Agy exited with code {exit_code}"
 
     if exit_code != 0:
         publish_fallback(

@@ -907,6 +907,20 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             DISPATCH_PS1.read_text(encoding="utf-8"),
         ]
 
+    def test_snapshot_export_raises_the_windows_path_limit(self) -> None:
+        # A state-dir prefix of 114 characters plus a long index path crosses
+        # the 260-character Windows limit, which failed the export and dropped
+        # the reviewer back into the original repository. The override is per
+        # command, so it never writes to the user's git config.
+        for text in self._both():
+            self.assertIn(
+                "core.longpaths=true", text,
+                "both dispatchers must raise the path limit for the snapshot export",
+            )
+            # The snapshot stays a runnable working copy, so the export keeps
+            # every indexed file rather than only the changed ones.
+            self.assertIn("checkout-" + "index -a", text.replace("$checkoutSubcmd", "checkout-index"))
+
     def test_prompt_via_stdin_redirection(self) -> None:
         # The sh side uses shell stdin redirection. The PowerShell side uses
         # ProcessStartInfo with redirected stdin to avoid Windows .cmd quoting

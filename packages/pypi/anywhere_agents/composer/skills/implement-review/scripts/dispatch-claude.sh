@@ -337,7 +337,10 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf '%s\n' "dispatch-claude: git diff --cached failed; see state-dir/git-diff.stderr" > "$DIFF_FILE"
     fi
     mkdir -p "$STAGED_SNAPSHOT_DIR"
-    if git checkout-index -a --prefix="$STAGED_SNAPSHOT_DIR/" >> "$GIT_DIFF_STDERR" 2>&1; then
+    # core.longpaths as a per-command override: the state-dir prefix plus a
+    # long index path crosses the 260-character Windows limit, which failed
+    # the export. Inert off Windows, and the user's git config is untouched.
+    if git -c core.longpaths=true checkout-index -a --prefix="$STAGED_SNAPSHOT_DIR/" >> "$GIT_DIFF_STDERR" 2>&1; then
         VALIDATION_DIR="$STAGED_SNAPSHOT_DIR"
     else
         printf '%s\n' "dispatch-claude: staged snapshot export failed; validation commands run in the original repo" >> "$GIT_DIFF_STDERR"
