@@ -177,7 +177,10 @@ function Add-GitignoreLine([string]$Line) {
     if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 0x0A) { $prefix = "`n" }
   }
   $encoding = New-Object System.Text.UTF8Encoding $false
-  $existing = if (Test-Path -LiteralPath $path) { [System.IO.File]::ReadAllBytes($path) } else { [byte[]]@() }
+  [byte[]]$existing = @()
+  if (Test-Path -LiteralPath $path) {
+    $existing = [System.IO.File]::ReadAllBytes($path)
+  }
   $addition = $encoding.GetBytes($prefix + $Line + "`n")
   $combined = New-Object byte[] ($existing.Length + $addition.Length)
   [System.Array]::Copy($existing, 0, $combined, 0, $existing.Length)
@@ -199,7 +202,10 @@ function Add-GitignoreEntry([string]$Pattern, [string]$Line) {
     if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 0x0A) { $prefix = "`n" }
   }
   $encoding = New-Object System.Text.UTF8Encoding $false
-  $existing = if (Test-Path -LiteralPath $path) { [System.IO.File]::ReadAllBytes($path) } else { [byte[]]@() }
+  [byte[]]$existing = @()
+  if (Test-Path -LiteralPath $path) {
+    $existing = [System.IO.File]::ReadAllBytes($path)
+  }
   $addition = $encoding.GetBytes($prefix + $Line + "`n")
   $combined = New-Object byte[] ($existing.Length + $addition.Length)
   [System.Array]::Copy($existing, 0, $combined, 0, $existing.Length)
