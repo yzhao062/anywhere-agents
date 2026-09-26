@@ -275,7 +275,7 @@ anywhere-agents pack verify              # 只读审计（user / project / lock 
 
 **项目原本是从 `agent-config` bootstrap 的，怎么过渡？** 跑裸 `anywhere-agents`（或者 `bash .agent-config/bootstrap.sh` 都行）。CLI 会自动从 `.agent-config/upstream` 或缓存的 `.git/config` 里识别遗留的 `yzhao062/agent-config` upstream，把旧 cache 删掉，再从 anywhere-agents bootstrap。检测逻辑同时存在于 Python CLI 和 raw shell 脚本里，任何入口都会触发一次性迁移。
 
-之后用 [`agent-pack`](https://github.com/yzhao062/agent-pack) 把原本 `agent-config` 自带的 User Profile、paper workflow、4 个学术写作 skill（`bibref-filler`、`bibref-verify`、`dual-pass-workflow`、`figure-prompt-builder`）补回来：
+之后用 [`agent-pack`](https://github.com/yzhao062/agent-pack) 加上 User Profile、paper workflow 和学术写作 skill（`acad-skills`）：
 
 ```bash
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
@@ -422,7 +422,7 @@ anywhere-agents/
 **同一系列。** `anywhere-agents` 和两个公开 repo 一起发：
 
 - [`agent-style`](https://github.com/yzhao062/agent-style)：写作规则 pack，每个 consumer 的 `AGENTS.md` 默认会装。21 条规则（12 经典 + 9 LLM 实测），每条带 BAD → GOOD 例子。
-- [`agent-pack`](https://github.com/yzhao062/agent-pack)：第三方 pack 作者的公开参考。用 v2 manifest 声明 3 个 pack（passive profile、passive paper-workflow、active `acad-skills`，其中含 4 个学术写作 skill）。想做自己的 pack repo，fork 它当起点。
+- [`agent-pack`](https://github.com/yzhao062/agent-pack)：第三方 pack 作者的公开参考。用 v2 manifest 声明 3 个 pack（passive profile、passive paper-workflow、active `acad-skills`，其中含学术写作 skill）。想做自己的 pack repo，fork 它当起点。
 
 **走不同方向的工具。** 如果你要的是通用多 agent 同步工具、或者更大的 skill 目录：
 

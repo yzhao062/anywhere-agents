@@ -86,7 +86,7 @@ bash ../agent-config/scripts/check-parity.sh
 #        docs/ (hero, banner, RTD content), .readthedocs.yaml, mkdocs.yml,
 #        .github/workflows/{docs-strict-build.yml, package-smoke.yml}
 #      agent-config only: docs/anywhere-agents.md and other private docs, reference-skills/,
-#        MIGRATIONS.md, private-only skills (bibref-filler, dual-pass-workflow, figure-prompt-builder),
+#        MIGRATIONS.md, private-only skills (bibref-filler, bibref-verify, figure-prompt-builder),
 #        scripts/check-parity.sh itself (maintainer-only tool).
 
 # 6. Dual-OS local test: run the full suite on a Linux machine via SSH before tagging.

@@ -273,7 +273,7 @@ To reconcile drift, run bare `anywhere-agents` — the canonical apply path appl
 
 **Migrating from a project that bootstrapped from `agent-config`?** Run bare `anywhere-agents` (or `bash .agent-config/bootstrap.sh` directly). The CLI auto-detects the legacy `yzhao062/agent-config` upstream from `.agent-config/upstream` or the cached `.git/config`, deletes the legacy cache, and bootstraps from anywhere-agents. The detection lives in both the Python CLI and the raw shell scripts, so any entry path triggers the migration once.
 
-Then bring back the User Profile, paper workflow, and 4 academic-writing skills (`bibref-filler`, `bibref-verify`, `dual-pass-workflow`, `figure-prompt-builder`) that previously lived in `agent-config` by adding [`agent-pack`](https://github.com/yzhao062/agent-pack):
+Then add the User Profile, the paper workflow, and the academic-writing skills (`acad-skills`) with [`agent-pack`](https://github.com/yzhao062/agent-pack):
 
 ```bash
 anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
@@ -420,7 +420,7 @@ anywhere-agents/
 **Same family.** `anywhere-agents` ships alongside two companion public repos:
 
 - [`agent-style`](https://github.com/yzhao062/agent-style): the writing-rule pack composed into every consumer's `AGENTS.md` by default. 21 rules (12 classic + 9 LLM-observed) with BAD -> GOOD examples per rule.
-- [`agent-pack`](https://github.com/yzhao062/agent-pack): public reference example for third-party pack authors. Declares 3 packs (passive profile, passive paper-workflow, active `acad-skills` with four academic-writing skills) in the v2 manifest format. Fork as a starting point for your own pack repo.
+- [`agent-pack`](https://github.com/yzhao062/agent-pack): public reference example for third-party pack authors. Declares 3 packs (passive profile, passive paper-workflow, active `acad-skills` with academic-writing skills) in the v2 manifest format. Fork as a starting point for your own pack repo.
 
 **Different approaches.** If you want a general-purpose multi-agent sync tool or a broader skill catalog, these take different routes:
 
