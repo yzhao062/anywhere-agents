@@ -72,9 +72,20 @@ class _Repo(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve() / "consumer"
         self.root.mkdir()
         self.skills = self.root / ".agents" / "skills"
+        # Newer git starts detached auto-maintenance after a commit; if it is
+        # still writing into .git when the temporary directory is removed,
+        # cleanup fails with "Directory not empty" (seen on macOS py3.13 CI).
         env = patch.dict(
             os.environ,
-            {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+            {
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "maintenance.auto",
+                "GIT_CONFIG_VALUE_0": "false",
+                "GIT_CONFIG_KEY_1": "gc.auto",
+                "GIT_CONFIG_VALUE_1": "0",
+            },
         )
         env.start()
         self.addCleanup(env.stop)
