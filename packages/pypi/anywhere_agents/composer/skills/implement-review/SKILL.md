@@ -193,7 +193,7 @@ State-dir, stdout contract (`STATE-DIR <abs-path>` single line), state files (`p
 
 ### Codex waiting for the Claude backend (App and Terminal)
 
-**Scope:** This subsection applies only when Codex is the coordinator and Claude Code is the current reviewer. It overrides conflicting waiting instructions below only for that pair, in Codex App or Terminal. Other coordinator/reviewer pairs keep their existing dispatch, waiting, health-check, and failover behavior. In a mixed `/vet claude agy` queue, apply this subsection to the Claude slot only; handle the Agy slot under the existing rules.
+**Scope:** This subsection applies only when Codex is the coordinator and Claude Code is the current reviewer. It overrides conflicting waiting instructions below only for that pair, in Codex App or Terminal. Other coordinator/reviewer pairs keep their existing dispatch, waiting, health-check, and failover behavior. In a mixed `/vet claude agy` queue, apply this subsection to the Claude slot only; handle the Agy slot under the existing rules. Under Codex, `/vet both` resolves to that queue.
 
 Start `dispatch-claude` through a resumable exec tool and retain its handle and emitted `STATE-DIR`. Claude's text output can stay empty until the final response. Empty tails, `ALIVE`, and a pre-publication `STALL` therefore leave this review pending, even after 15 minutes. A tool yield or expired wait window does not establish reviewer failure. Do not conclude the review, drop the Claude slot, or cancel the dispatcher/reviewer merely to end the turn, including through `terminate: true`, Ctrl-C, or `kill`. Coordinator cancellation is not a backend failure that permits Single-source completion.
 
@@ -225,17 +225,31 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
    - **Reviewer-backend selection (Agy, Gemini through Antigravity CLI, opt-in)**: when the selected channel is Auto-terminal and the slash arguments contain `agy`, `gemini`, or `antigravity`, use `dispatch-gemini.py` and expect `Review-Antigravity.md`. The canonical invocation is `/vet agy`; `/vet gemini`, `/vet antigravity`, the compatible `/implement-review` forms with `auto` or `cli`, and plain phrases such as `use agy as reviewer`, `use gemini as reviewer`, or `review with antigravity` are aliases under the same negation guard. A reviewer token does not need an `auto` token when Auto-terminal came from `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`. If the orchestrator is Agy, Gemini, or Antigravity, rewrite to Codex before dispatch and state why.
    - **Reviewer-backend selection (two reviewers in one invocation)**: reviewer
      tokens are a set rather than a single choice. When the invocation names
-     more than one, dispatch each named backend for the same round. `both` is
-     the shorthand for the pair this loop actually runs, `codex agy`, and it
-     means those two specifically rather than every backend that exists; name
-     the tokens explicitly for any other combination. `/vet both`, `/vet codex
-     agy`, and plain phrases such as `review with codex and agy` are the same
-     request under the same negation guard. Everything downstream already takes
-     a set. The expected reviewer set is the comma-separated normalized list
-     (`Codex,Antigravity`), and each reviewer gets its own watcher on its
-     exact `Review-<Name>.md`. Phase 2's multi-reviewer consolidation
-     classifies each finding as Convergent or Single-source. With one
-     reviewer token, or none, nothing here changes.
+     more than one, dispatch each named backend for the same round. `both`
+     selects the two backends from `claude`, `codex`, and `agy` that are not
+     coordinating. Under Claude Code it is `codex agy`, under Codex
+     `claude agy`, and under Agy `codex claude`. Any other coordinator gets
+     `codex agy`. Resolve `both` using the coordinator identity passed to
+     dispatchers in Phase 1c step 5. Do this before the self-review rewrites
+     in the other reviewer-backend items. The resolved pair excludes the
+     coordinator, so those rewrites leave it unchanged. When `both` includes
+     Claude, Auto-terminal requires every staged path to be in scope; see
+     Phase 1b. `both` means that pair specifically rather than every backend
+     that exists, so Copilot is never part of it; name the tokens explicitly
+     for any other combination. An invocation or plain phrase naming the
+     resolved pair is equivalent to `/vet both` under the same negation
+     guard. Under Claude Code, examples are `/vet codex agy` and
+     `review with codex and agy`. The channel lines name the coordinator and
+     the resolved pair, for example `both → claude agy (coordinator: codex)`.
+     The same token reaches different reviewers depending on who runs the
+     skill, and those lines keep the target visible. Everything downstream
+     already takes a set. The expected reviewer set is the comma-separated
+     normalized list: `Codex,Antigravity` under Claude Code,
+     `Claude-Code,Antigravity` under Codex, and `Codex,Claude-Code` under
+     Agy. Each reviewer gets its own watcher on its exact `Review-<Name>.md`.
+     Phase 2's multi-reviewer consolidation classifies each finding as
+     Convergent or Single-source. With one reviewer token, or none, nothing
+     here changes.
 
      **Dispatch them in parallel when memory allows, one after another
      otherwise.** Before the second dispatch, check available memory. On
@@ -409,7 +423,7 @@ If the scripts are present, Claude Code does NOT present a copy-paste prompt blo
 2. Probes session sticky-downgrade state. If active: downgrade to Terminal-relay (silent unless the user asks why).
 3. Assembles the prompt: byte-identical to the fenced Terminal-relay block above (same save contract, lens, focus, scope-challenge focus, prior findings).
 4. Writes the prompt to `<scratch>/agent-io/round-<N>-prompt.txt` under `%TEMP%` / `$TMPDIR`. See **Where the round's own files go** below for why the directory is named.
-5. Invokes the selected dispatcher from the same lookup root: `dispatch-codex.{ps1,sh}`, `dispatch-copilot.{ps1,sh}`, `dispatch-claude.{ps1,sh}`, or `<python> dispatch-gemini.py`. Pass `--prompt-file <temp-path>`, `--round <N>`, and the matching expected review file: `Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Claude-Code.md`, or `Review-Antigravity.md`. Set `IMPLEMENT_REVIEW_ORCHESTRATOR` in the dispatcher's environment to the coordinator's own identity: `claude` for Claude Code, `codex` for Codex. Do this on every dispatch, including retries and failover, so an inherited runtime marker never decides who the coordinator is. Run in the background and size the timeout to the backend and reasoning tier. For Codex, use about 20 minutes (`1200000`) at `xhigh` and about 45 minutes (`2700000`) at `max`. Agy defaults its own `--print-timeout` to 45 minutes. Each dispatcher launches the shared `stall-watch` in the background. Its default 600-second silence threshold records `<state-dir>/stall-warning` without killing any process. A terminal Codex response-stream suffix records `<state-dir>/stream-death` and invokes the bounded reap contract below. Run the dispatcher from the reviewed repository's root, which is the session's working directory; to review another repository, change directory in its own tool call first, never as `cd <path> && <dispatcher>`, which the guard denies (23 of the 97 re-dispatches in 60 days were that denial).
+5. Invokes the selected dispatcher from the same lookup root: `dispatch-codex.{ps1,sh}`, `dispatch-copilot.{ps1,sh}`, `dispatch-claude.{ps1,sh}`, or `<python> dispatch-gemini.py`. Pass `--prompt-file <temp-path>`, `--round <N>`, and the matching expected review file: `Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Claude-Code.md`, or `Review-Antigravity.md`. Set `IMPLEMENT_REVIEW_ORCHESTRATOR` in the dispatcher's environment to the coordinator's own identity: `claude` for Claude Code, `codex` for Codex, `agy` for Agy. Do this on every dispatch, including retries and failover, so an inherited runtime marker never decides who the coordinator is. Run in the background and size the timeout to the backend and reasoning tier. For Codex, use about 20 minutes (`1200000`) at `xhigh` and about 45 minutes (`2700000`) at `max`. Agy defaults its own `--print-timeout` to 45 minutes. Each dispatcher launches the shared `stall-watch` in the background. Its default 600-second silence threshold records `<state-dir>/stall-warning` without killing any process. A terminal Codex response-stream suffix records `<state-dir>/stream-death` and invokes the bounded reap contract below. Run the dispatcher from the reviewed repository's root, which is the session's working directory; to review another repository, change directory in its own tool call first, never as `cd <path> && <dispatcher>`, which the guard denies (23 of the 97 re-dispatches in 60 days were that denial).
 6. Reads the dispatch script's stdout: it emits exactly one line `STATE-DIR <abs-path>` (the only stdout line). Capture this path for Phase 2 to pass to `health-check --state-dir <abs-path> --round <N> --review-file Review-<Reviewer>.md`. Pass the backend's exact review filename explicitly. All other dispatch diagnostics plus the last 80 backend lines go to the script's stderr.
 7. Phase 1d auto-watch runs once per reviewer; each watcher polls for that backend's exact review file with the current round marker. Phase 2 prologue (defined in Phase 2 below) adds Auto-terminal-specific gating before silent advance.
 

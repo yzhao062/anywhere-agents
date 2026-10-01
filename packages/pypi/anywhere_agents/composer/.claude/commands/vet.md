@@ -13,6 +13,9 @@ Treat the command arguments as part of the user's current task.
 `manual`, `back to manual`, and `use terminal-relay` force Terminal-relay.
 With Auto-terminal as the user default, `/vet agy` selects Antigravity directly;
 `gemini` and `antigravity` remain aliases. No reviewer token selects Codex.
-`/vet both` runs Codex and Agy for the same round, in parallel when memory allows and one after the other otherwise.
+`/vet both` runs the two of Claude, Codex, and Agy that are not coordinating this session, for the same round.
+That is Codex and Agy under Claude Code, Claude and Agy under Codex, and Codex and Claude under Agy.
+The two run in parallel when memory allows and one after the other otherwise.
+When the pair includes Claude, every staged path must be in scope, because the Claude backend reviews the whole staged diff.
 
 Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.
