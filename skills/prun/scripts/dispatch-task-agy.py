@@ -73,7 +73,11 @@ BALANCE_MARGIN = 0.15
 # Two readings 15 points apart in decimal can subtract to slightly less in
 # binary floating point, which decided 0.20/0.35 and 0.50/0.65 differently.
 MARGIN_TOLERANCE = 1e-9
-SECOND_MODEL = "claude-sonnet-4-6"
+# Agy 1.2.16 (2026-10) retired `claude-sonnet-4-6` and lists Claude models
+# with the effort tier in the slug, as the Gemini models already were. The
+# high tier matches the Gemini default; a later Sonnet floats to it through
+# newest_in_family.
+SECOND_MODEL = "claude-sonnet-5-5-high"
 # The windows Agy meters. A group's entry in a snapshot is its emptiest bucket,
 # so a group that reports one window says nothing about the other.
 REQUIRED_WINDOWS = frozenset({"5h", "weekly"})
@@ -520,17 +524,23 @@ def quota_route(model: str, pinned: bool = False) -> tuple[str, str, str]:
 def newest_in_family(template: str, available: Iterable[str]) -> str:
     """The newest model `available` lists in the same family as `template`.
 
-    A family keeps the template's name and tier and floats only its version:
-    `gemini-3.8-flash-high` admits `gemini-3.9-flash-high` and
-    `gemini-4-flash-high` but no medium, lite, or pro variant, and
-    `claude-sonnet-4-6` admits `claude-sonnet-4-7` but no `-thinking` variant.
-    Versions compare as integer tuples, so 3.10 is newer than 3.9. A tie keeps
-    the template, else the first tied slug in listing order. A template that
-    does not parse, or whose family `available` does not list, comes back
-    unchanged. The pinned constants are therefore family templates, and a new
-    Agy model needs no edit here. The /vet reviewer and the prun worker each
-    carry an identical copy, because the two skills deploy separately.
+    A family is the template's name without its version and its effort tier:
+    `claude-sonnet-5-5-high` is Claude Sonnet, `gemini-3.8-flash-high` is
+    Gemini Flash. Both the version and the tier may change, so a rename that
+    only moves the tier still resolves, as when Agy 1.2.16 replaced
+    `claude-sonnet-4-6` with `claude-sonnet-5-5-high`. A different name is a
+    different family: no lite or pro variant joins Flash. The tier is chosen
+    first, in this order: the template's own tier (`high` when it has none),
+    then `high`, then an untiered slug. The newest version within that tier
+    wins, comparing versions as integer tuples so 3.10 is newer than 3.9, and
+    the template itself wins a tie. An older high therefore beats a newer
+    medium, which keeps the dispatchers' `high` effort valid. With none of
+    those tiers listed, the newest member wins. A template that does not
+    parse, or whose family `available` does not list, comes back unchanged.
+    The /vet reviewer and the prun worker each carry an identical copy,
+    because the two skills deploy separately.
     """
+    tiers = ("low", "medium", "high", "xhigh", "max", "thinking")
     match = re.match(
         r"^(?P<prefix>[a-z]+(?:-[a-z]+)*-)"
         r"(?P<version>\d+(?:[.-]\d+)*)"
@@ -539,25 +549,37 @@ def newest_in_family(template: str, available: Iterable[str]) -> str:
     )
     if not match:
         return template
+    words = match.group("suffix").split("-")[1:]
+    template_tier = words.pop() if words and words[-1] in tiers else None
     candidate_re = re.compile(
         "^" + re.escape(match.group("prefix")) + r"(\d+(?:[.-]\d+)*)"
-        + re.escape(match.group("suffix")) + "$"
+        + re.escape("".join("-" + word for word in words))
+        + "(?:-(" + "|".join(tiers) + "))?$"
     )
-    candidates: list[tuple[str, tuple[int, ...]]] = []
+    candidates: list[tuple[str, tuple[int, ...], str | None]] = []
     for slug in available:
         found = candidate_re.match(slug)
         if found:
             version = tuple(int(part) for part in re.split(r"[.-]", found.group(1)))
-            candidates.append((slug, version))
+            candidates.append((slug, version, found.group(2)))
     if not candidates:
         return template
-    newest = max(version for _, version in candidates)
-    tied = [slug for slug, version in candidates if version == newest]
-    return template if template in tied else tied[0]
+    for wanted in (template_tier or "high", "high", None):
+        members = [(slug, version) for slug, version, tier in candidates if tier == wanted]
+        if members:
+            newest = max(version for _, version in members)
+            group = [slug for slug, version in members if version == newest]
+            return template if template in group else group[0]
+    newest = max(version for _, version, _ in candidates)
+    return next(slug for slug, version, _ in candidates if version == newest)
 
 
 def run_preflight(
-    executable: str, model: str, state_dir: Path, allow_resolution: bool = False
+    executable: str,
+    model: str,
+    state_dir: Path,
+    allow_resolution: bool = False,
+    fallback_model: str | None = None,
 ) -> tuple[int, str, str]:
     mode = os.environ.get("ANTIGRAVITY_PREFLIGHT", "auto").strip().lower()
     if mode not in {"auto", "force", "off"}:
@@ -611,6 +633,18 @@ def run_preflight(
                         flush=True,
                     )
                     model = resolved
+                # A template Agy no longer lists, after a rename such as the
+                # one that retired claude-sonnet-4-6, would fail every unit
+                # routed to it; the fallback template keeps the unit running.
+                if model not in available and fallback_model:
+                    alternative = newest_in_family(fallback_model, available_listing)
+                    if alternative in available:
+                        print(
+                            f"dispatch-task-agy: MODEL-FALLBACK from={model} to={alternative} reason=template-unlisted",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        model = alternative
             if model not in available:
                 (state_dir / "preflight-tail").write_text(
                     "\n".join(output_parts), encoding="utf-8"
@@ -929,7 +963,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     routed_model = model
     preflight_code, preflight_error, model = run_preflight(
-        executable, model, state_dir, allow_resolution=allow_resolution
+        executable,
+        model,
+        state_dir,
+        allow_resolution=allow_resolution,
+        fallback_model=DEFAULT_MODEL if model == SECOND_MODEL else None,
     )
     if preflight_code:
         stderr_path.write_text(preflight_error + "\n", encoding="utf-8")
@@ -940,11 +978,33 @@ def main(argv: list[str] | None = None) -> int:
     (state_dir / "model").write_text(model + "\n", encoding="utf-8")
     if model != routed_model:
         # A quota note names the family template it routed to; this line
-        # explains why `model` names a newer member.
+        # explains why `model` names a newer member, or a model in the other
+        # group when the routed template was not listed.
+        reason = (
+            "newest-in-family"
+            if model_pool(model) == model_pool(routed_model)
+            else "template-unlisted"
+        )
+        kind = "MODEL-RESOLVE" if reason == "newest-in-family" else "MODEL-FALLBACK"
         with (state_dir / "quota-note").open("a", encoding="utf-8") as note:
-            note.write(
-                f"MODEL-RESOLVE from={routed_model} to={model} reason=newest-in-family\n"
+            note.write(f"{kind} from={routed_model} to={model} reason={reason}\n")
+    if model_pool(model) != model_pool(routed_model):
+        # The fallback left the group the quota route checked, so the new
+        # group is checked here, without rebalancing back to the template.
+        _, _, fallback_block = quota_route(model, True)
+        if fallback_block:
+            fallback_block = f"after MODEL-FALLBACK to {model}: {fallback_block}"
+            stderr_path.write_text(fallback_block + "\n", encoding="utf-8")
+            publish_fallback(
+                result_path, args.unit_id, fallback_block, tail_path, stderr_path, nonce
             )
+            return fail(fallback_block, QUOTA_EXHAUSTED_EXIT)
+    # A floated slug can carry a tier other than the default effort, and Agy
+    # rejects a conflicting --effort, so an unset effort follows the slug.
+    if "ANTIGRAVITY_DISPATCH_EFFORT" not in os.environ:
+        slug_tier = model.rsplit("-", 1)[-1]
+        if slug_tier in ("low", "medium", "high", "max"):
+            effort = slug_tier
 
     relay = build_prompt(original, args.unit_id)
     (state_dir / "prompt-relay").write_text(relay, encoding="utf-8")
@@ -960,7 +1020,9 @@ def main(argv: list[str] | None = None) -> int:
     # Agy rejects `--effort` for the Claude and GPT models ("--effort is not
     # supported for model ..."), so passing it unconditionally made that whole
     # group unreachable: the 2026-09-11 fan-out had to patch a copy of this
-    # script to use it at all. Only the Gemini models take the flag.
+    # script to use it at all. Agy 1.2.16 accepts it for a Claude slug only when
+    # it repeats the slug's own tier and rejects a conflicting one, so the
+    # second group still runs without it. Only the Gemini models take the flag.
     if model_pool(model) != "second":
         command += ["--effort", effort]
     command += [

@@ -195,20 +195,32 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   `<state-dir>/conversation-id`, and the final response is published atomically to the result path.
 - Defaults to the newest `gemini-*-flash-high` at `high` effort. The constants
   `DEFAULT_MODEL` (`gemini-3.8-flash-high`) and `SECOND_MODEL`
-  (`claude-sonnet-4-6`) are family templates. The preflight's `agy models`
-  listing floats each one's version, so a new Flash or Sonnet release runs
-  without an edit. The switch shows as a `MODEL-RESOLVE from=... to=...` line
+  (`claude-sonnet-5-5-high`) are family templates: Gemini Flash and Claude
+  Sonnet. The preflight's `agy models` listing supplies the newest version in
+  each family, so a new Flash or Sonnet release runs without an edit. The
+  effort tier may change too: Agy 1.2.16 retired `claude-sonnet-4-6` for
+  slugs that carry the tier, and the old template would still have reached
+  `claude-sonnet-5-5-high`. The tier is chosen first (the template's own,
+  then `high`), and the newest version within it second. An older high
+  therefore beats a newer medium. An unset `ANTIGRAVITY_DISPATCH_EFFORT`
+  follows the chosen slug's tier, because Agy rejects a conflicting
+  `--effort`. The switch shows as a `MODEL-RESOLVE from=... to=...` line
   on stderr and in `<state-dir>/quota-note`, and `<state-dir>/model` names the
-  model that ran. Quota routing
-  picks the group first, and floating never moves a unit to the other group.
+  model that ran. Quota routing picks the group first, and floating never
+  moves a unit to the other group. One exception keeps a batch alive after a
+  larger rename. When Agy lists nothing in the Sonnet family, a unit routed
+  there runs on the Gemini default, recorded as `MODEL-FALLBACK ...
+  reason=template-unlisted`. The Gemini group's quota is checked again first,
+  so a fallback into an empty group exits `75` without launching.
   A model named in `ANTIGRAVITY_DISPATCH_MODEL` runs verbatim, and
   `ANTIGRAVITY_PREFLIGHT=off` skips the listing, so the templates run as
-  written. `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. Agy takes
-  `--effort` for its Gemini models only, so the dispatcher omits the flag for
-  the second group below rather than having Agy reject the whole call.
+  written. `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. The dispatcher
+  passes `--effort` for the Gemini models only. Agy rejected the flag for the
+  older Claude models. Since 1.2.16 it rejects any effort that conflicts with
+  the tier in a Claude slug, so the flag is omitted for the second group.
 - Agy Ultra exposes a second quota group for Claude and GPT-OSS models
-  (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`, and `gpt-oss-120b-medium`
-  as of 2026-09), metered apart from the Gemini group. **A unit that names no
+  (Claude Opus 5.5 and Sonnet 5.5 at low, medium, and high, and
+  `gpt-oss-120b-medium`, as of 2026-10), metered apart from the Gemini group. **A unit that names no
   model goes to whichever group has the freer meter**, with the newest Claude
   Sonnet as the second group's model. A unit is
   shallow work that either group handles, so the meter decides rather than the

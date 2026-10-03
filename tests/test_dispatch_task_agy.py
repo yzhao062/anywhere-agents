@@ -48,6 +48,15 @@ if sys.argv[1:] == ["models"]:
     raise SystemExit(0)
 
 (log / "args.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+# Agy 1.2.16 rejects an --effort that conflicts with the tier in the slug.
+argv = sys.argv[1:]
+if "--model" in argv and "--effort" in argv:
+    slug = argv[argv.index("--model") + 1]
+    effort = argv[argv.index("--effort") + 1]
+    tier = slug.rsplit("-", 1)[-1]
+    if tier in ("low", "medium", "high") and tier != effort:
+        print(f"error: --model {slug} conflicts with --effort={effort}", file=sys.stderr)
+        raise SystemExit(2)
 (log / "cwd.txt").write_text(os.getcwd(), encoding="utf-8")
 event = json.loads(sys.stdin.readline())
 (log / "prompt.txt").write_text(event["message"]["content"], encoding="utf-8")
@@ -131,17 +140,68 @@ class DispatchTaskAgyUnitTests(unittest.TestCase):
             ),
             "gemini-3.8.1-flash-high",
         )
-        # medium/lite/pro not candidates
+        # A tier change stays in the family; a name change (lite, pro) does not.
         self.assertEqual(
             newest(
                 "gemini-3.8-flash-high",
-                [
-                    "gemini-3.8-flash-medium",
-                    "gemini-3.8-flash-lite-high",
-                    "gemini-3.1-pro-high",
-                ],
+                ["gemini-3.8-flash-lite-high", "gemini-3.1-pro-high"],
             ),
             "gemini-3.8-flash-high",
+        )
+        self.assertEqual(
+            newest(
+                "gemini-3.8-flash-high",
+                ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low"],
+            ),
+            "gemini-3.8-flash-high",
+        )
+        # Agy 1.2.16 moved the tier into the Claude slugs and retired
+        # claude-sonnet-4-6; the old template still reaches Sonnet 5.5 at high.
+        live = [
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-low",
+            "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-high",
+            "gpt-oss-120b-medium",
+        ]
+        self.assertEqual(newest("claude-sonnet-4-6", live), "claude-sonnet-5-5-high")
+        self.assertEqual(
+            newest(
+                "claude-sonnet-5-5-high",
+                live + ["claude-sonnet-5-6-medium", "claude-sonnet-5-6-high"],
+            ),
+            "claude-sonnet-5-6-high",
+        )
+        # A tier outranks a version, so the dispatcher's high effort stays valid.
+        self.assertEqual(
+            newest("gemini-3.8-flash-high", ["gemini-3.8-flash-medium", "gemini-3.7-flash-high"]),
+            "gemini-3.7-flash-high",
+        )
+        # An untiered template prefers high over another untiered slug.
+        self.assertEqual(
+            newest("claude-sonnet-4-6", ["claude-sonnet-5-5", "claude-sonnet-5-5-high"]),
+            "claude-sonnet-5-5-high",
+        )
+        # With no preferred tier listed, the newest member wins.
+        self.assertEqual(
+            newest("gemini-3.8-flash-high", ["gemini-3.9-flash-medium", "gemini-3.9-flash-low"]),
+            "gemini-3.9-flash-medium",
+        )
+        # Without the template itself: its own tier, then high, then untiered.
+        self.assertEqual(
+            newest(
+                "claude-sonnet-5-5-medium",
+                ["claude-sonnet-5-6-high", "claude-sonnet-5-6-medium"],
+            ),
+            "claude-sonnet-5-6-medium",
+        )
+        self.assertEqual(
+            newest("claude-sonnet-5-5-low", ["claude-sonnet-5-6", "claude-sonnet-5-6-high"]),
+            "claude-sonnet-5-6-high",
+        )
+        self.assertEqual(
+            newest("claude-sonnet-5-5-low", ["claude-sonnet-5-6-medium", "claude-sonnet-5-6"]),
+            "claude-sonnet-5-6",
         )
         # -thinking suffix respected both ways
         self.assertEqual(
@@ -556,6 +616,10 @@ class DispatchTaskAgyUnitTests(unittest.TestCase):
 
 
 class DispatchTaskAgyIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_dispatch_module()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -965,17 +1029,18 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         result, target = self._run(
             extra_env={
                 "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
-                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\nclaude-sonnet-4-6",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\n" + self.module.SECOND_MODEL,
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("claude-sonnet-4-6", argv)
+        self.assertIn(self.module.SECOND_MODEL, argv)
         self.assertNotIn("--effort", argv)
         self.assertIn("MODEL-BALANCE", result.stderr)
         state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
         self.assertEqual(
-            (state_dir / "model").read_text(encoding="utf-8").strip(), "claude-sonnet-4-6"
+            (state_dir / "model").read_text(encoding="utf-8").strip(),
+            self.module.SECOND_MODEL,
         )
         self.assertIn("MODEL-BALANCE", (state_dir / "quota-note").read_text(encoding="utf-8"))
         self.assertTrue(target.is_file())
@@ -986,12 +1051,12 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         result, target = self._run(
             extra_env={
                 "AGY_QUOTA_CACHE": self._quota(gemini=0.0, second=0.1),
-                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\nclaude-sonnet-4-6",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\n" + self.module.SECOND_MODEL,
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("claude-sonnet-4-6", argv)
+        self.assertIn(self.module.SECOND_MODEL, argv)
         self.assertTrue(target.is_file())
 
     def test_both_groups_exhausted_stops_the_dispatch(self) -> None:
@@ -1279,26 +1344,122 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
             extra_env={
                 "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
                 "MOCK_AGY_MODELS": (
-                    "claude-sonnet-4-6\n"
-                    "claude-sonnet-4-7\n"
-                    "claude-opus-4-6-thinking"
+                    "claude-opus-5-5-high\n"
+                    "claude-sonnet-5-5-high\n"
+                    "claude-sonnet-5-6-medium\n"
+                    "claude-sonnet-5-6-high"
                 ),
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("claude-sonnet-4-7", argv)
+        self.assertIn("claude-sonnet-5-6-high", argv)
         self.assertNotIn("--effort", argv)
         state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
         self.assertEqual(
             (state_dir / "model").read_text(encoding="utf-8").strip(),
-            "claude-sonnet-4-7",
+            "claude-sonnet-5-6-high",
         )
         self.assertIn(
-            "MODEL-RESOLVE from=claude-sonnet-4-6 to=claude-sonnet-4-7 reason=newest-in-family",
+            "MODEL-RESOLVE from=claude-sonnet-5-5-high to=claude-sonnet-5-6-high reason=newest-in-family",
             result.stderr,
         )
         self.assertTrue(target.is_file())
+
+    def test_an_unlisted_second_template_falls_back_to_gemini(self) -> None:
+        # Agy 1.2.16 retired claude-sonnet-4-6 for slugs that carry the effort
+        # tier, so the old template matched nothing and every balanced unit
+        # failed its preflight. A balanced unit now runs on the Gemini default
+        # instead, and the saved trail says why.
+        result, target = self._run(
+            extra_env={
+                "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
+                "MOCK_AGY_MODELS": (
+                    "gemini-3.8-flash-high\n"
+                    "gemini-3.9-flash-high\n"
+                    "claude-sonnet-9-0-renamed"
+                ),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("gemini-3.9-flash-high", argv)
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertIn(
+            f"MODEL-FALLBACK from={self.module.SECOND_MODEL} to=gemini-3.9-flash-high "
+            "reason=template-unlisted",
+            result.stderr,
+        )
+        state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
+        self.assertEqual(
+            (state_dir / "model").read_text(encoding="utf-8").strip(),
+            "gemini-3.9-flash-high",
+        )
+        note = (state_dir / "quota-note").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(note[0].startswith("MODEL-BALANCE"))
+        self.assertEqual(
+            note[1],
+            f"MODEL-FALLBACK from={self.module.SECOND_MODEL} to=gemini-3.9-flash-high "
+            "reason=template-unlisted",
+        )
+        self.assertTrue(target.is_file())
+
+    def test_a_fallback_into_an_empty_gemini_group_stops_before_launch(self) -> None:
+        # The router chose the second group because Gemini was empty; falling
+        # back to Gemini must not skip the quota gate it just passed.
+        result, target = self._run(
+            extra_env={
+                "AGY_QUOTA_CACHE": self._quota(gemini=0.0, second=1.0),
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\nclaude-sonnet-9-0-renamed",
+            }
+        )
+        self.assertEqual(result.returncode, self.module.QUOTA_EXHAUSTED_EXIT, result.stderr)
+        self.assertIn("MODEL-FALLBACK", result.stderr)
+        self.assertFalse((self.log / "args.json").is_file())
+        # The saved trail explains both steps even though the unit stopped.
+        state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
+        note = (state_dir / "quota-note").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(note[0].startswith("MODEL-BALANCE"))
+        self.assertTrue(note[1].startswith("MODEL-FALLBACK"))
+        self.assertIn("reason=template-unlisted", note[1])
+        self.assertIn("FALLBACK", target.read_text(encoding="utf-8"))
+
+    def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
+        # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
+        result, target = self._run(
+            extra_env={"MOCK_AGY_MODELS": "gemini-3.9-flash-medium\ngemini-3.9-flash-low"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("gemini-3.9-flash-medium", argv)
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+        self.assertTrue(target.is_file())
+
+    def test_newest_in_family_copies_are_identical(self) -> None:
+        # The two skills deploy separately, so each carries its own copy.
+        reviewer = ROOT / "skills" / "implement-review" / "scripts" / "dispatch-gemini.py"
+
+        def helper(path: Path) -> str:
+            text = path.read_text(encoding="utf-8")
+            start = text.index("def newest_in_family(")
+            return text[start:text.index("\n\n\ndef ", start)]
+
+        self.assertEqual(helper(DISPATCH), helper(reviewer))
+
+    def test_an_unlisted_named_model_still_fails_the_preflight(self) -> None:
+        # The fallback covers the shipped template only; a model the caller
+        # named is a choice, so its absence is reported rather than replaced.
+        result, target = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_MODEL": "claude-sonnet-5-5-high",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\nclaude-sonnet-9-0-renamed",
+            }
+        )
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn("unavailable", result.stderr)
+        self.assertNotIn("MODEL-FALLBACK", result.stderr)
+        self.assertFalse((self.log / "args.json").is_file())
+        self.assertIn("FALLBACK", target.read_text(encoding="utf-8"))
 
     def test_named_model_is_never_floated(self) -> None:
         result, target = self._run(

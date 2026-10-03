@@ -41,6 +41,15 @@ from pathlib import Path
 log = Path(os.environ["MOCK_AGY_LOG"])
 log.mkdir(parents=True, exist_ok=True)
 (log / "args.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+# Agy 1.2.16 rejects an --effort that conflicts with the tier in the slug.
+argv = sys.argv[1:]
+if "--model" in argv and "--effort" in argv:
+    slug = argv[argv.index("--model") + 1]
+    effort = argv[argv.index("--effort") + 1]
+    tier = slug.rsplit("-", 1)[-1]
+    if tier in ("low", "medium", "high") and tier != effort:
+        print(f"error: --model {slug} conflicts with --effort={effort}", file=sys.stderr)
+        raise SystemExit(2)
 
 if sys.argv[1:] == ["--version"]:
     print("Antigravity CLI 1.2.0")
@@ -404,35 +413,58 @@ class DispatchGeminiUnitTests(unittest.TestCase):
             "gemini-4-flash-high",
         )
 
-    def test_newest_in_family_variants_not_candidates(self) -> None:
+    def test_newest_in_family_name_variants_not_candidates(self) -> None:
+        # A tier change stays in the family; a name change (lite, pro) does not.
         self.assertEqual(
             self.module.newest_in_family(
                 "gemini-3.8-flash-high",
                 [
-                    "gemini-3.8-flash-medium",
                     "gemini-3.8-flash-lite-high",
                     "gemini-3.8-pro-high",
                     "gemini-3.1-pro-high",
-                    "gemini-3.9-flash-medium",
                 ],
             ),
             "gemini-3.8-flash-high",
         )
-
-    def test_newest_in_family_claude_thinking_suffix_respected_both_ways(self) -> None:
         self.assertEqual(
             self.module.newest_in_family(
-                "claude-sonnet-4-6",
-                ["claude-sonnet-4-6-thinking", "claude-sonnet-4-5"],
+                "gemini-3.8-flash-high",
+                ["gemini-3.9-flash-medium", "gemini-3.9-flash-high", "gemini-3.8-flash-high"],
             ),
-            "claude-sonnet-4-5",
+            "gemini-3.9-flash-high",
+        )
+
+    def test_newest_in_family_prefers_tier_over_version(self) -> None:
+        self.assertEqual(
+            self.module.newest_in_family(
+                "gemini-3.8-flash-high",
+                ["gemini-3.8-flash-medium", "gemini-3.7-flash-high"],
+            ),
+            "gemini-3.7-flash-high",
         )
         self.assertEqual(
             self.module.newest_in_family(
-                "claude-opus-4-6-thinking",
-                ["claude-opus-4-7", "claude-opus-4-5-thinking"],
+                "claude-sonnet-4-6", ["claude-sonnet-5-5", "claude-sonnet-5-5-high"]
             ),
-            "claude-opus-4-5-thinking",
+            "claude-sonnet-5-5-high",
+        )
+
+    def test_newest_in_family_follows_a_tier_rename(self) -> None:
+        # Agy 1.2.16 moved the tier into the Claude slugs and retired
+        # claude-sonnet-4-6; the old template still reaches Sonnet 5.5 at high.
+        live = [
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-low",
+            "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-high",
+        ]
+        self.assertEqual(
+            self.module.newest_in_family("claude-sonnet-4-6", live),
+            "claude-sonnet-5-5-high",
+        )
+        self.assertEqual(
+            self.module.newest_in_family("claude-opus-4-6-thinking", live),
+            "claude-opus-5-5-high",
         )
 
     def test_newest_in_family_no_candidates_returns_template(self) -> None:
@@ -1071,6 +1103,14 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
             "to=gemini-3.9-flash-high reason=newest-in-family",
             result.stderr,
         )
+
+    def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
+        # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
+        result = self._run({"MOCK_AGY_MODELS": "gemini-3.9-flash-medium\ngemini-3.9-flash-low"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("gemini-3.9-flash-medium", args)
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
 
     def test_blank_named_model_is_still_refused(self) -> None:
         # A blank override is a mistake to report, not a request for the

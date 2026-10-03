@@ -97,17 +97,23 @@ def positive_int_env(name: str, default: int) -> int:
 def newest_in_family(template: str, available: Iterable[str]) -> str:
     """The newest model `available` lists in the same family as `template`.
 
-    A family keeps the template's name and tier and floats only its version:
-    `gemini-3.8-flash-high` admits `gemini-3.9-flash-high` and
-    `gemini-4-flash-high` but no medium, lite, or pro variant, and
-    `claude-sonnet-4-6` admits `claude-sonnet-4-7` but no `-thinking` variant.
-    Versions compare as integer tuples, so 3.10 is newer than 3.9. A tie keeps
-    the template, else the first tied slug in listing order. A template that
-    does not parse, or whose family `available` does not list, comes back
-    unchanged. The pinned constants are therefore family templates, and a new
-    Agy model needs no edit here. The /vet reviewer and the prun worker each
-    carry an identical copy, because the two skills deploy separately.
+    A family is the template's name without its version and its effort tier:
+    `claude-sonnet-5-5-high` is Claude Sonnet, `gemini-3.8-flash-high` is
+    Gemini Flash. Both the version and the tier may change, so a rename that
+    only moves the tier still resolves, as when Agy 1.2.16 replaced
+    `claude-sonnet-4-6` with `claude-sonnet-5-5-high`. A different name is a
+    different family: no lite or pro variant joins Flash. The tier is chosen
+    first, in this order: the template's own tier (`high` when it has none),
+    then `high`, then an untiered slug. The newest version within that tier
+    wins, comparing versions as integer tuples so 3.10 is newer than 3.9, and
+    the template itself wins a tie. An older high therefore beats a newer
+    medium, which keeps the dispatchers' `high` effort valid. With none of
+    those tiers listed, the newest member wins. A template that does not
+    parse, or whose family `available` does not list, comes back unchanged.
+    The /vet reviewer and the prun worker each carry an identical copy,
+    because the two skills deploy separately.
     """
+    tiers = ("low", "medium", "high", "xhigh", "max", "thinking")
     match = re.match(
         r"^(?P<prefix>[a-z]+(?:-[a-z]+)*-)"
         r"(?P<version>\d+(?:[.-]\d+)*)"
@@ -116,21 +122,29 @@ def newest_in_family(template: str, available: Iterable[str]) -> str:
     )
     if not match:
         return template
+    words = match.group("suffix").split("-")[1:]
+    template_tier = words.pop() if words and words[-1] in tiers else None
     candidate_re = re.compile(
         "^" + re.escape(match.group("prefix")) + r"(\d+(?:[.-]\d+)*)"
-        + re.escape(match.group("suffix")) + "$"
+        + re.escape("".join("-" + word for word in words))
+        + "(?:-(" + "|".join(tiers) + "))?$"
     )
-    candidates: list[tuple[str, tuple[int, ...]]] = []
+    candidates: list[tuple[str, tuple[int, ...], str | None]] = []
     for slug in available:
         found = candidate_re.match(slug)
         if found:
             version = tuple(int(part) for part in re.split(r"[.-]", found.group(1)))
-            candidates.append((slug, version))
+            candidates.append((slug, version, found.group(2)))
     if not candidates:
         return template
-    newest = max(version for _, version in candidates)
-    tied = [slug for slug, version in candidates if version == newest]
-    return template if template in tied else tied[0]
+    for wanted in (template_tier or "high", "high", None):
+        members = [(slug, version) for slug, version, tier in candidates if tier == wanted]
+        if members:
+            newest = max(version for _, version in members)
+            group = [slug for slug, version in members if version == newest]
+            return template if template in group else group[0]
+    newest = max(version for _, version, _ in candidates)
+    return next(slug for slug, version, _ in candidates if version == newest)
 
 
 def run_preflight(
@@ -704,6 +718,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if preflight_code:
         return preflight_code
+    # A floated slug can carry a tier other than the default effort, and Agy
+    # rejects a conflicting --effort, so an unset effort follows the slug.
+    if "ANTIGRAVITY_DISPATCH_EFFORT" not in os.environ:
+        slug_tier = model.rsplit("-", 1)[-1]
+        if slug_tier in ("low", "medium", "high", "max"):
+            effort = slug_tier
 
     validation_dir, diff_text, _ = prepare_snapshot(cwd, state_dir)
     if validation_dir is None:
