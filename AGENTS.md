@@ -109,6 +109,7 @@ Use the narrowest escape only for a legitimate write that quotes a banned word a
 - Do not wrap PowerShell inside PowerShell with inline `-Command` when the payload contains `$` variables; run the body directly or write a temporary `.ps1` and invoke it with `-File`. The outer shell expands `$f`, `$_`, and friends first.
 - Do not delete a scratch directory before rewriting it (`rm -rf <dir>; cp -r <src> <dir>` prompts on every run). Copy into a fresh name or let the consuming script create the directory.
 - Do not pass backslash-heavy or commented content through a shell command. Some command transports collapse doubled backslashes before the shell sees them, even inside a quoted heredoc. In a one-line `python -c`, a `#` comments out the rest of the line. Create the `.py` or `.ps1` with a file-writing tool and run that.
+- Wait for a long job in a background command that exits when it ends; no model-turn status checks.
 
 ## Communication
 
