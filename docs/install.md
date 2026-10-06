@@ -78,7 +78,7 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, `scripts/statusline.py`, `scripts/agent-quota.py`, and `user/settings.json` into `.agent-config/repo/`.
 3. Copies shared `.claude/commands/*.md` into the project's `.claude/commands/`. Non-destructive — does not delete unrelated local pointer files.
 4. Merges shared `.claude/settings.json` keys into the project's copy. Project-only keys are preserved.
-5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, user-level permissions).
+5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json`. The merge carries hook wiring, the statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=65`, `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`, and user-level permissions.
 6. Appends `.agent-config/` to the project's `.gitignore` if not already present.
 
 ## Pack manifest schema (v0.6.0)
@@ -164,7 +164,9 @@ $data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyV
 [System.IO.File]::WriteAllText($p, ($data | ConvertTo-Json -Depth 10) + "`n", [System.Text.UTF8Encoding]::new($false))
 ```
 
-**Auto-compaction.** The same `env` block carries `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, which starts auto-compaction at 70% of the auto-compact window. A 1M-context model tunes that window to about 967K tokens, so compaction starts near 677K. Claude Code re-sends the whole conversation on every request, so a lower threshold keeps requests smaller on average. The variable only lowers the threshold; `/autocompact <tokens>` sets an absolute window per user instead.
+**Auto-compaction.** The same `env` block carries `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=65`, which starts auto-compaction at 65% of the auto-compact window. A 1M-context model tunes that window to about 967K tokens, so compaction starts near 629K. Claude Code re-sends the whole conversation on every request, so a lower threshold keeps requests smaller on average. The variable only lowers the threshold; `/autocompact <tokens>` sets an absolute window per user instead.
+
+**Subagent model.** `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` runs the general-purpose subagent, teammates, and workflow agents on Sonnet when nothing else assigns them a model. On Claude Code v2.1.251 or later, a model Claude passes when it spawns an agent still wins, as does a `model` field in the agent's definition. A hard task can therefore still ask for Opus. Earlier versions let the variable override both. The built-in Explore and Plan subagents keep their own model selection, and forks keep the main conversation's model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257 or later) would move Explore and Plan too.
 
 ### Codex
 

@@ -513,7 +513,11 @@ class RepoValidationTests(unittest.TestCase):
         )
         self.assertEqual(
             user_settings.get("env", {}).get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
-            "70",
+            "65",
+        )
+        self.assertEqual(
+            user_settings.get("env", {}).get("CLAUDE_CODE_SUBAGENT_MODEL"),
+            "sonnet",
         )
         claude_settings = json.loads(read_text(CLAUDE_SETTINGS))
         self.assertNotIn("effortLevel", claude_settings)
