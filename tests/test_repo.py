@@ -463,9 +463,9 @@ class RepoValidationTests(unittest.TestCase):
 
     def test_agents_routes_long_drafts_to_a_file(self) -> None:
         for fragment in (
-            "goes in a `.md` file rather than in the terminal",
-            "arrives in Outlook or Gmail as literal",
-            "rendered view of the file to copy from",
+            "goes in a `.md` file instead of the terminal",
+            "shows literal `**` and `-` in Outlook or Gmail",
+            "rendered view or an artifact to copy from",
         ):
             self.assertIn(fragment, self.agents_text)
 

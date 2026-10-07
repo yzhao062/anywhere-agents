@@ -5,7 +5,7 @@ tests/test_bootstrap_size.py measures the baseline alone and is shared
 byte-for-byte with agent-config. This test is anywhere-agents-only because
 the composer is: it composes the committed AGENTS.md with fixed copies of the
 three compact pack bodies under tests/fixtures/composed-consumer/ (agent-style
-v0.4.1 docs/rule-pack-compact.md; agent-pack profile and paper-workflow
+v0.5.0 docs/rule-pack-compact.md; agent-pack profile and paper-workflow
 compact bodies), runs the generator, and holds the composed AGENTS.md and the
 generated CLAUDE.md under 61,440 bytes. That is the consumer target
 PLAN-agents-md-diet.md set (criterion 4, "consumer CLAUDE.md under 60 KB with
@@ -42,7 +42,7 @@ CONSUMER_CEILING_BYTES = 61_440
 # consumers compose them (the bundled agent-style first, then the two
 # agent-pack packs from agent-config.yaml).
 PACKS = (
-    ("agent-style", "v0.4.1", "docs/rule-pack-compact.md"),
+    ("agent-style", "v0.5.0", "docs/rule-pack-compact.md"),
     ("profile", "main", "docs/rule-pack-compact.md"),
     ("paper-workflow", "main", "docs/paper-workflow-compact.md"),
 )

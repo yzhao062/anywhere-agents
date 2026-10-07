@@ -1766,10 +1766,10 @@ _AUTO_RECONCILED_DEFAULT_REF_REWRITES: dict[str, set[str]] = {
     # is added while it is the default and is already here by the time a
     # later bump moves away from it. This list was incomplete twice before
     # that test existed.
-    # v0.4.1 is listed while it *is* the default. Advancing a row to the ref
+    # v0.5.0 is listed while it *is* the default. Advancing a row to the ref
     # it already holds is a no-op: the rewrite is guarded by
     # `entry_ref != bundled_ref`, which short-circuits first.
-    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1"},
+    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0"},
 }
 _BUNDLED_IDENTITY_URL = "bundled:aa"
 _BUNDLED_IDENTITY_REF = "bundled"

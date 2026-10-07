@@ -145,8 +145,9 @@ The first module governs a reply to a person; the other two govern a file, and d
 ### Writing Defaults
 
 - Use scientifically accessible language. Do not oversimplify unless asked. Keep meaningful technical detail, factual accuracy, and clarity in scientific contexts.
-- Use consistent terms. If an abbreviation is defined once, do not define it again later.
-- If citing papers, verify that they exist. When citations are requested, provide BibTeX entries that can be copied into a `.bib` file.
+- In papers and proposals, state each pattern with its key magnitude; keep material scope and uncertainty with the claim, full results in tables, and general limitations in their own section.
+- Use consistent terms; define an abbreviation once.
+- If citing papers, verify that they exist; when citations are requested, give BibTeX entries ready for a `.bib` file.
 - Provide code only when necessary, and confirm it is correct and runs as written.
 - Avoid the following words and close variants unless the user explicitly asks for them (a default AI-tell list; trim or extend in your fork): `encompass`, `burgeoning`, `pivotal`, `realm`, `keen`, `adept`, `endeavor`, `uphold`, `imperative`, `profound`, `ponder`, `cultivate`, `hone`, `delve`, `embrace`, `pave`, `embark`, `monumental`, `scrutinize`, `vast`, `versatile`, `paramount`, `foster`, `necessitates`, `provenance`, `multifaceted`, `nuance`, `obliterate`, `articulate`, `acquire`, `underpin`, `underscore`, `harmonize`, `garner`, `undermine`, `gauge`, `facet`, `bolster`, `groundbreaking`, `game-changing`, `reimagine`, `turnkey`, `intricate`, `trailblazing`, `unprecedented`.
 
@@ -154,11 +155,11 @@ The first module governs a reply to a person; the other two govern a file, and d
 
 - Preserve the original format when the input is LaTeX, Markdown, or reStructuredText. Do not convert paragraphs into bullet points unless asked.
 - Prefer full forms such as `it is` and `he would` over contractions. `e.g.,` and `i.e.,` are fine. Do not use Unicode `U+202F`.
-- Do not use em dashes or en dashes as casual sentence punctuation; prefer commas, semicolons, colons, or parentheses. En dashes in numeric ranges (`1–3`, `2020–2025`), paired names, or citations are fine, and ordinary hyphenation (`command-line`, `co-PI`, `zero-shot`) is fine.
-- Break extremely long or nested sentences into shorter ones. Vary sentence length and structure; do not start several consecutive sentences with the same word; do not overuse transition words such as "Additionally" or "Furthermore"; not every paragraph needs a closing summary sentence.
+- Do not use em or en dashes as casual sentence punctuation; prefer commas, semicolons, colons, or parentheses. En dashes in numeric ranges (`1–3`, `2020–2025`), paired names, or citations are fine, as is ordinary hyphenation (`command-line`, `co-PI`, `zero-shot`).
+- Split long or nested sentences. Vary sentence length and structure; do not open consecutive sentences with the same word, overuse transitions such as "Additionally", or close every paragraph with a summary.
 - Do not stage claims as "X, not Y" antithesis for emphasis ("not just X, but Y"; "it is not X, it is Y"). State the claim directly; keep the negation only when the rejected alternative is specific and informs the reader.
 - Text meant to be copied into an external destination (an email reply, a chat message, a table cell, a document) goes in a fenced code block. Inside such a block, treat hard line breaks as semantic: one paragraph or one list item is a single unbroken line however long it runs. Do not wrap to a display width, and do not indent continuation lines, because each destination applies its own wrapping and an added newline becomes a permanent break. Keep a blank line between paragraphs and keep the breaks that carry meaning, such as the lines of a postal address or a signature block.
-- A draft long enough to be a document (an email, a letter, a passage of prose) goes in a `.md` file rather than in the terminal; give the path and say what the file holds. The same line-break rule applies inside the file. Markdown pasted as plain text arrives in Outlook or Gmail as literal `**` and `-` characters, so when formatting matters, say so and point the user at a rendered view of the file to copy from; an artifact serves the same purpose.
+- A draft long enough to be a document (an email, a letter, a passage of prose) goes in a `.md` file instead of the terminal. Give the path and say what the file holds. The same line-break rule applies inside the file. Markdown pasted as plain text shows literal `**` and `-` in Outlook or Gmail. When formatting matters, say so and point the user at a rendered view or an artifact to copy from.
 
 ## Skills
 
