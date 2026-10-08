@@ -288,12 +288,62 @@ class TestRender(unittest.TestCase):
         self.assertIn("cr", seg.split(" · "), seg)
         self.assertIn("credits", row)
 
+    def test_decimal_balance_is_rounded(self):
+        # Codex reports the balance as a ten-place decimal string.
+        seg, row = _render({
+            "primary": _window(0, 10080),
+            "credits": {"has_credits": True, "balance": "62500.0000000000"},
+        })
+        self.assertIn("cr 62,500", seg)
+        self.assertIn("credits 62,500", row)
+        self.assertNotIn("0000", seg)
+        self.assertNotIn("0000", row)
+
+    def test_decimal_zero_balance_hidden(self):
+        # "0.0000000000" is zero; it must not pass as nonzero against "0".
+        seg, row = _render({
+            "primary": _window(13, 10080),
+            "credits": {"has_credits": False, "balance": "0.0000000000"},
+        })
+        self.assertNotIn("cr", seg)
+        self.assertNotIn("credits", row)
+
     def test_no_windows_no_credits(self):
         # rate_limits present but empty -> no broken row.
         seg, row = _render({"primary": None, "secondary": None,
                             "credits": {"has_credits": False, "balance": "0"}})
         self.assertIsNone(seg)
         self.assertIn("(no windows)", row)
+
+
+class TestFmtCredits(unittest.TestCase):
+    def test_compact_statusline(self):
+        fn = statusline.fmt_credits
+        self.assertEqual(fn("62500.0000000000", compact=True), "62.5k")
+        self.assertEqual(fn("1000", compact=True), "1k")
+        self.assertEqual(fn("1500000", compact=True), "1.5M")
+        self.assertEqual(fn("42.5000000000", compact=True), "42.5")
+        self.assertEqual(fn("42", compact=True), "42")
+
+    def test_full_row(self):
+        for fn in (statusline.fmt_credits, agent_quota._fmt_credits):
+            self.assertEqual(fn("62500.0000000000"), "62,500")
+            self.assertEqual(fn("1234.5600000000"), "1,234.56")
+            self.assertEqual(fn("42"), "42")
+
+    def test_unparseable_shown_as_given(self):
+        for fn in (statusline.fmt_credits, agent_quota._fmt_credits):
+            self.assertEqual(fn("unlimited"), "unlimited")
+            self.assertEqual(fn("nan"), "nan")
+
+    def test_nonzero(self):
+        for fn in (statusline.credits_nonzero, agent_quota._credits_nonzero):
+            self.assertFalse(fn(None))
+            self.assertFalse(fn(""))
+            self.assertFalse(fn("0"))
+            self.assertFalse(fn("0.0000000000"))
+            self.assertTrue(fn("62500.0000000000"))
+            self.assertTrue(fn("unlimited"))
 
 
 class TestMeterLabel(unittest.TestCase):

@@ -351,6 +351,31 @@ def _codex_window_label(window):
     return f"{m}m"
 
 
+def _credits_nonzero(balance):
+    """True when a Codex credit balance holds a nonzero amount. Codex reports
+    the balance as a decimal string ("62500.0000000000"), so a zero can arrive
+    as "0.0000000000" and must not pass a string comparison against "0"."""
+    if balance in (None, ""):
+        return False
+    try:
+        return float(balance) != 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _fmt_credits(balance):
+    """Round a Codex credit balance for display: "62500.0000000000" becomes
+    "62,500". A value that does not parse as a finite number is shown as
+    given."""
+    try:
+        v = float(balance)
+    except (TypeError, ValueError):
+        return str(balance)
+    if v != v or v in (float("inf"), float("-inf")):
+        return str(balance)
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
 def _codex_is_main_meter(rate_limits):
     """True when a snapshot belongs to the account plan meter.
 
@@ -575,8 +600,8 @@ def codex_row():
         segs.append(f"{label} {_fmt(w, CODEX_PCT_FIELD)}")
     credits = rl.get("credits") or {}
     bal = credits.get("balance")
-    if credits.get("has_credits") or (bal not in (None, "", "0")):
-        segs.append(f"credits {bal}" if bal not in (None, "") else "credits")
+    if credits.get("has_credits") or _credits_nonzero(bal):
+        segs.append(f"credits {_fmt_credits(bal)}" if bal not in (None, "") else "credits")
     # The side-meter tag replaces the configured model name: the row would
     # otherwise read "gpt-6-astra  5h 100% left" off a Spark bucket.
     meter = _codex_meter_label(rl)

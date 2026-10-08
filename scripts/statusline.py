@@ -189,6 +189,35 @@ def codex_window_label(window):
     return f"{m}m"
 
 
+def credits_nonzero(balance):
+    """True when a Codex credit balance holds a nonzero amount. Codex reports
+    the balance as a decimal string ("62500.0000000000"), so a zero can arrive
+    as "0.0000000000" and must not pass a string comparison against "0"."""
+    if balance in (None, ""):
+        return False
+    try:
+        return float(balance) != 0
+    except (TypeError, ValueError):
+        return True
+
+
+def fmt_credits(balance, compact=False):
+    """Round a Codex credit balance for display: "62500.0000000000" becomes
+    "62.5k" in the compact statusline and "62,500" in the full row. A value
+    that does not parse as a finite number is shown as given."""
+    try:
+        v = float(balance)
+    except (TypeError, ValueError):
+        return str(balance)
+    if v != v or v in (float("inf"), float("-inf")):
+        return str(balance)
+    if compact and abs(v) >= 1_000_000:
+        return f"{v / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if compact and abs(v) >= 1000:
+        return f"{v / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
 def persist_claude(data):
     """Write the latest Claude rate_limits to disk so off-session readers
     (a Codex session, the agent-quota command) can show Claude's quota.
@@ -495,11 +524,11 @@ def codex_segment(compact=False):
         segs.append(f"{label}{shown}" if compact else f"{label} {shown}")
     credits = rl.get("credits") or {}
     bal = credits.get("balance")
-    if credits.get("has_credits") or (bal not in (None, "", "0")):
+    if credits.get("has_credits") or credits_nonzero(bal):
         if compact:
-            segs.append(f"cr{bal}" if bal not in (None, "") else "cr")
+            segs.append(f"cr{fmt_credits(bal, compact=True)}" if bal not in (None, "") else "cr")
         else:
-            segs.append(f"cr {bal}" if bal not in (None, "") else "cr")
+            segs.append(f"cr {fmt_credits(bal)}" if bal not in (None, "") else "cr")
     if not segs:
         return None
     age = codex_snapshot_age(found[1])
