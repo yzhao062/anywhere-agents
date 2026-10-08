@@ -27,6 +27,8 @@ Based on NeurIPS, ICLR, ICML, and ACL Rolling Review guidelines.
 
 Flag undersell as well as overclaim: a supported contribution stated so weakly that a reviewer would miss it is a finding. Its remedy keeps the evidence: a scoped affirmative claim, or a clearer statement of the observed pattern.
 
+In a revision, flag accretion too. Keep evidence, methods, and disclosures needed by retained claims. Flag unneeded defenses and move process history that supports no retained claim to the records. A request to add material names the claim that lacks evidence or the step a reader cannot follow.
+
 1. **Soundness** -- Are claims well-supported by theoretical analysis or experimental evidence? Are there methodological flaws? (NeurIPS 1-4, ACL 1-5)
 2. **Novelty and originality** -- Does the work present new ideas, methods, or combinations? How does it differ from prior work? (NeurIPS, ICLR, AAAI)
 3. **Significance** -- Does it address an important problem? Will it influence future research or practice? (NeurIPS 1-4, ICLR)
@@ -70,7 +72,7 @@ Rating scale: Excellent / Very Good / Good / Fair / Poor (narrative, no numerica
 2. **Feasibility** -- Is the timeline realistic? Are risks and mitigation strategies acknowledged, stated once with their mitigations rather than as a hedge on every preliminary result?
 3. **Significance and impact** -- Is the contribution clearly articulated?
 4. **Budget justification** -- Do requested resources match the proposed activities?
-5. **Clarity** -- Can a panel reviewer skim and extract the key points?
+5. **Clarity** -- Can a panel reviewer skim and extract the key points? Has a revision buried them under caveats or answers to objections nobody raised?
 6. **Formatting** -- Page limits, required sections, font and margin compliance.
 
 ## Focused Sub-Lenses and Agency-Specific Lenses
@@ -93,7 +95,7 @@ If unsure which to use, use the full parent lens and add an "additional focus" t
 | `paper/submission-ready` | Paper | Items 7, 8, 9 plus anonymization checks and page-limit compliance | Blind-submission preparation (pre-acceptance) |
 | `proposal/compliance` | Proposal | Common items 1, 6 (alignment with call, formatting) | Formatting and solicitation compliance checks |
 | `website` | General | items 1-5 in the Website subsection | Static sites, personal sites, documentation sites, landing pages |
-| `plan` | General | items 1-6 in the Plan subsection | Methodology docs, roadmaps, research backlogs, migration plans, phased-development design docs, superpowers-style spec docs |
+| `plan` | General | items 1-7 in the Plan subsection | Methodology docs, roadmaps, research backlogs, migration plans, phased-development design docs, superpowers-style spec docs |
 | `skill` | General | items 1-6 in the Skill subsection | Editing `SKILL.md` files, adding references/scripts to a skill, meta-skill work |
 
 When using a focused sub-lens, include only the referenced parent criteria in the review prompt, not the full lens. For `paper/submission-ready`, also add: verify no author-identifying information remains and confirm the paper meets venue page limits.
@@ -120,6 +122,7 @@ Criteria for the `plan` focused sub-lens. Parent: General.
 4. **Alignment with implementation** -- if the plan describes code, config, or content that already exists, does the description match what is actually there?
 5. **Risk surfacing** -- are known failure modes named, and are mitigations proposed or explicitly deferred?
 6. **Acceptance criteria** -- can "done" be checked objectively? Are success metrics or verification steps stated?
+7. **Accretion** -- does a revision rewrite the plan or append to it? Each added guard, step, or criterion should address a missing requirement or change a decision. Flag guards that address no identified risk and superseded steps left in place.
 
 When to use: methodology docs, research backlogs, roadmaps, migration plans, phased-development design docs, superpowers-style design specs (`docs/superpowers/specs/*.md`).
 
@@ -160,3 +163,4 @@ Fallback lens when content type does not match the above or is mixed.
 5. **Over-engineering** -- Is anything more complex than it needs to be?
 6. **Impact on existing work** -- Does the change break or conflict with anything already in place?
 7. **Writing rules (prose diffs)** -- For changed prose in .md, .tex, .rst, .txt (and prose inside code). The coordinator pastes the rules into the focus item so the reviewer does not go looking for them; a focus that only names `AGENTS.md` sent the Antigravity reviewer searching the tree for it. Ready-made wording, with the list filled from `AGENTS.md` § Writing Defaults at dispatch time: "Audit each changed sentence for: banned words and close variants (<the banned-word list>); sentences over 30 words; several consecutive sentences opening with the same word; em or en dashes as casual punctuation; contractions; 'X, not Y' antithesis for emphasis; double negation; claims miscalibrated in either direction (an overclaim, or a qualifier that adds no information); a sentence that transcribes a table instead of stating its pattern. Flag each hit with file:line and a suggested rewrite."
+8. **Accretion (revision rounds)** -- Were earlier findings answered in place? Flag unnecessary defenses, obsolete process history, and growth that adds no needed content. A requested addition names the gap and its effect on the reader.

@@ -619,6 +619,7 @@ If only one current-round source remains after retry and direct-paste handling w
   - **Deferred** -- the user chose not to address this. The reviewer acknowledges it as unchanged. No action unless the user reconsiders.
 - **Verify factual claims (Phase 2.5)** for High-priority findings, and for Medium findings produced via the Auto-terminal embedded-diff retry channel, that make checkable factual assertions (citation existence, code behavior, link reachability, count or size, compile error). Verification outcomes (`Verified` / `Refuted` / `Inconclusive`) override or augment the categorization above: a Refuted finding is not applied, regardless of its original `Will fix` / `Needs discussion` category.
 - Present the categorized list (including verification outcomes from Phase 2.5) and confirm with the user before making changes.
+- **Apply in place.** Fix approved findings by rewriting, moving, or cutting the named passage; add material only for an identified gap. For a paper, proposal, or plan, record its size each round in the same unit. After two consecutive rounds of growth with no new result or step, consolidate before the next dispatch. Cut unneeded defenses and move process history that supports no retained claim to the records.
 - For follow-up questions within the same review round, prepare a short prompt the user can paste into the reviewer.
 
 ## Phase 2.5: Verify Factual Claims (when triggered)

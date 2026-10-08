@@ -85,7 +85,7 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 - **Claude Code** is the primary workhorse: drafting, implementation, research, and heavy-lifting tasks.
 - **Codex** is the gatekeeper: review, feedback, and quality checks on work produced by Claude Code or the user, reached through `/vet`.
 - This division is a default. The user may reverse it, and two scenarios must stay workable: one agent absent (outage, quota, regional block) and roles deliberately reversed to test drift. Core functions (the review loop, structured dispatch, the health check) must work either way, even where an ergonomic helper exists for one agent only.
-- A skill, hook, or script that hard-codes one agent's CLI (`codex exec`, `claude -p`) documents or wires the other side's equivalent at the same time, even if that half ships later. A doc that names one agent in its steps names the cross-vendor equivalent once near the top. When the deferred half ships later, the principle is satisfied; do not block the primary half on parity.
+- A skill, hook, or script hard-coding one agent's CLI (`codex exec`, `claude -p`) documents or wires the other agent's equivalent at the same time. That half may ship later; do not block the primary half on parity. A doc naming one agent in its steps names the cross-vendor equivalent once near the top.
 
 ## Git Safety and Mechanical Gates
 
@@ -146,6 +146,7 @@ The first module governs a reply to a person; the other two govern a file, and d
 
 - Use scientifically accessible language. Do not oversimplify unless asked. Keep meaningful technical detail, factual accuracy, and clarity in scientific contexts.
 - In papers and proposals, state each pattern with its key magnitude; keep material scope and uncertainty with the claim, full results in tables, and general limitations in their own section.
+- Revise in place: answer a review finding by rewriting, moving, or cutting what it names. Add only what the document lacks, never a defense against an objection nobody raised; a paper, plan, brief, or rule file should not grow each round without new content.
 - Use consistent terms; define an abbreviation once.
 - If citing papers, verify that they exist; when citations are requested, give BibTeX entries ready for a `.bib` file.
 - Provide code only when necessary, and confirm it is correct and runs as written.
@@ -180,14 +181,14 @@ Version-controlled files are the memory that travels across agents, sessions, ac
 
 ## Tool-Use Reliability
 
-Treat a tool's "cannot open / encrypted / unreadable" report on a file as a possible false positive. Before telling the user a file cannot be read, retry once and try an alternate path (a page range, `pdftotext`, render to an image, a different tool), and report failure only after that also fails, naming the paths tried. Apply the same one-retry rule to other transient-looking failures unless the failure is clearly deterministic.
+Treat a tool's "cannot open / encrypted / unreadable" report as a possible false positive. Retry once and try an alternate path (a page range, `pdftotext`, render to an image, a different tool). Report failure only if both fail, naming the paths tried. Apply the same one-retry rule to other transient-looking failures unless the failure is clearly deterministic.
 
 ## Environment
 
 - Prefer a Miniforge-managed Python interpreter. Prefer `mamba` for install and create operations and fall back to `conda` only for commands mamba lacks. If the fork or the project names a preferred interpreter in `AGENTS.local.md`, use it first. Do not conclude that Python is unavailable because `python`, `python3`, or `py` fails in `PATH`; those may be shims or store aliases. Inspect Miniforge environments (`%USERPROFILE%\miniforge3\envs\<env>\python.exe`, `$HOME/miniforge3/envs/<env>/bin/python`) and IDE settings before reporting that Python is missing.
 - GitHub CLI (`gh`) drives PR and issue work. If it is missing, remind the user to install it (`winget install GitHub.cli`, `brew install gh`, or the distribution package) and run `gh auth login`.
 - Claude Code: prefer the native installer, which auto-updates (`claude doctor`, `claude update`). Effort: `CLAUDE_CODE_EFFORT_LEVEL=xhigh` in the `env` block of `~/.claude/settings.json` is the persistent default that bootstrap installs; it outranks `--effort` and `/effort`. Claude reviews dispatched by `/vet` skip user settings and pass `--effort max`.
-- Codex: `gpt-6.1-sol` at `service_tier = "standard"` with `[features] fast_mode = false` is the interactive default. `model_reasoning_effort = "xhigh"` is the default and `max` a valid dial-up, while `ultra` also enables automatic task delegation and is chosen only when that is wanted. `approval_policy = "on-request"` for interactive sessions. Set `project_doc_max_bytes = 262144` in `~/.codex/config.toml`: the default injects only the first 32 KiB of a project's `AGENTS.md` and drops the rest without notice. By default a dispatched `/vet` review runs under `--ignore-user-config` and passes the model, the byte budget, and the reasoning floor itself. It takes the model from `config.toml`, so a model switch there reaches reviews without a repository edit. It uses the model named here instead when that file sets none or sets a `model_provider` other than `openai`. `CODEX_DISPATCH_ISOLATE_MCP=off` restores the user config while keeping the explicit byte budget.
+- Codex: `gpt-6.1-sol` at `service_tier = "standard"` with `[features] fast_mode = false` is the interactive default. `model_reasoning_effort = "xhigh"` is the default, `max` a dial-up, and `ultra`, which also delegates tasks automatically, only when that is wanted. `approval_policy = "on-request"` for interactive sessions. Set `project_doc_max_bytes = 262144` in `~/.codex/config.toml`: the default injects only the first 32 KiB of a project's `AGENTS.md` and drops the rest without notice. A dispatched `/vet` review defaults to `--ignore-user-config` and passes the byte budget, the reasoning floor, and the model from `config.toml`. It falls back to the model named here when that file sets none or a `model_provider` other than `openai`. `CODEX_DISPATCH_ISOLATE_MCP=off` restores the user config and keeps the byte budget.
 - GitHub Actions: keep workflow pins at or above the first Node.js 24 major: `actions/checkout@v5`, `actions/setup-python@v6`, `actions/setup-node@v5`, `actions/upload-artifact@v6`, `actions/download-artifact@v7`. Flag a SHA pin for manual review rather than suggesting a tag, treat a jump to the newest major as a separate manual upgrade, and remind self-hosted runner owners that these actions need a runner that supports Node.js 24.
 
 ## Session Start Check
