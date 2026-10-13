@@ -25,7 +25,11 @@ from pathlib import Path
 from typing import BinaryIO, Iterable
 
 
-DEFAULT_MODEL = "gemini-3.8-flash-high"
+# Agy 1.3.4 (2026-10) lists Gemini 4 Argon, the strongest Gemini it offers,
+# so the reviewer defaults to it. An account that does not list the Argon
+# family falls back to Gemini Flash, the previous default.
+DEFAULT_MODEL = "gemini-4-argon-high"
+FALLBACK_MODEL = "gemini-3.8-flash-high"
 DEFAULT_EFFORT = "high"
 DEFAULT_TIMEOUT_SECONDS = 2700
 MIN_REVIEW_BYTES = 500
@@ -152,6 +156,7 @@ def run_preflight(
     model: str,
     state_dir: Path,
     allow_resolution: bool = False,
+    fallback_model: str | None = None,
 ) -> tuple[int, str]:
     mode = os.environ.get("ANTIGRAVITY_PREFLIGHT", "auto").strip().lower()
     if mode not in {"auto", "force", "off"}:
@@ -225,6 +230,17 @@ def run_preflight(
                     )
                 model = resolved
             available = set(available_list)
+            # An account that does not list the default's family would fail
+            # every round; the fallback family keeps the reviewer running.
+            if allow_resolution and model not in available and fallback_model:
+                alternative = newest_in_family(fallback_model, available_list)
+                if alternative in available:
+                    print(
+                        f"dispatch-gemini: MODEL-FALLBACK from={model} to={alternative} reason=template-unlisted",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    model = alternative
             if model not in available:
                 (state_dir / "preflight-tail").write_text(
                     "\n".join(output_parts), encoding="utf-8"
@@ -714,7 +730,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"STATE-DIR {state_dir}", flush=True)
 
     preflight_code, model = run_preflight(
-        executable, model, state_dir, allow_resolution=allow_resolution
+        executable,
+        model,
+        state_dir,
+        allow_resolution=allow_resolution,
+        fallback_model=FALLBACK_MODEL,
     )
     if preflight_code:
         return preflight_code

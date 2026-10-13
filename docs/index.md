@@ -33,7 +33,7 @@ The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest 
 
 ## Review With a Second Model Family
 
-With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest Gemini Flash High the account lists, at `high` effort, through the official Antigravity CLI. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
+With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest Gemini Argon High the account lists, at `high` effort, through the official Antigravity CLI. Under the default model selection, an account that lists no Argon model falls back to the newest Gemini Flash High. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
 
 The Agy dispatcher reviews an isolated export of the staged Git index with unattended execution permission, then atomically publishes `Review-Antigravity.md`. It can run tests and experiments, including generated-file writes inside the disposable snapshot, without touching the original worktree. The same validation-capability contract applies to every automated `/vet` backend. See [implement-review](skills/implement-review.md) for backend selection, preflight, model overrides, self-review guards, and failure handling.
 

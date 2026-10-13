@@ -2,14 +2,14 @@
 
 Structured cross-model review loop that sends staged changes to a reviewer agent and iterates until findings are resolved. Content-type-aware lenses apply established review criteria from the Google / Microsoft engineering playbooks (code), NeurIPS / ICLR / ICML / ACL guidelines (papers), and the NSF Merit Review / NIH Simplified Peer Review frameworks (proposals).
 
-With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, use `/vet` for the default Codex reviewer or `/vet agy` for Gemini through Antigravity. Without that setting, write `/vet auto agy`. The Agy backend defaults to the newest Gemini Flash High the account lists (see [Antigravity models](https://antigravity.google/docs/models/)) at `high` effort; `gemini` and `antigravity` remain accepted aliases.
+With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, use `/vet` for the default Codex reviewer or `/vet agy` for Gemini through Antigravity. Without that setting, write `/vet auto agy`. The Agy backend defaults to the newest Gemini Argon High the account lists (see [Antigravity models](https://antigravity.google/docs/models/)) at `high` effort. An account without Argon falls back to Gemini Flash High. `gemini` and `antigravity` remain accepted aliases.
 
 Reviewer choice does not reduce validation capability. Codex, Agy, Copilot, and headless Claude all run unattended with access to shell commands, tests, experiments, and necessary network verification. Agy and Claude use disposable staged snapshots when export succeeds, so verification may create generated artifacts without polluting the source checkout. The shared review contract still forbids commit, push, publication, external-system mutation, and destructive cleanup.
 
 | Invocation | Reviewer | Review file |
 |---|---|---|
 | `/vet` | Codex | `Review-Codex.md` |
-| `/vet agy` | The newest Gemini Flash High through Antigravity | `Review-Antigravity.md` |
+| `/vet agy` | The newest Gemini Argon High through Antigravity | `Review-Antigravity.md` |
 | `/vet copilot` | GitHub Copilot CLI | `Review-GitHub-Copilot.md` |
 | `/vet claude` | Headless Claude Code, subject to the self-review guard | `Review-Claude-Code.md` |
 

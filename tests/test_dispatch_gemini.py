@@ -55,7 +55,7 @@ if sys.argv[1:] == ["--version"]:
     print("Antigravity CLI 1.2.0")
     raise SystemExit(0)
 if sys.argv[1:] == ["models"]:
-    print(os.environ.get("MOCK_AGY_MODELS", "gemini-3.8-flash-high"))
+    print(os.environ.get("MOCK_AGY_MODELS", "gemini-4-argon-high\ngemini-3.8-flash-high"))
     raise SystemExit(0)
 
 event = json.loads(sys.stdin.readline())
@@ -148,7 +148,8 @@ class DispatchGeminiUnitTests(unittest.TestCase):
         self.assertTrue(DISPATCH.is_file())
 
     def test_defaults_pin_independent_gemini_model(self) -> None:
-        self.assertEqual(self.module.DEFAULT_MODEL, "gemini-3.8-flash-high")
+        self.assertEqual(self.module.DEFAULT_MODEL, "gemini-4-argon-high")
+        self.assertEqual(self.module.FALLBACK_MODEL, "gemini-3.8-flash-high")
         self.assertEqual(self.module.DEFAULT_EFFORT, "high")
 
     def test_normalize_trims_preface_before_round_marker(self) -> None:
@@ -835,7 +836,7 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         self.assertEqual(args[args.index("--mode") + 1], "accept-edits")
         self.assertIn("--dangerously-skip-permissions", args)
         self.assertIn("--add-dir", args)
-        self.assertIn("gemini-3.8-flash-high", args)
+        self.assertIn("gemini-4-argon-high", args)
         prompt = (self.log / "prompt.txt").read_text(encoding="utf-8")
         self.assertIn("staged Gemini fixture", prompt)
         self.assertIn("Run relevant tests, experiments, benchmarks", prompt)
@@ -1088,28 +1089,53 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
 
     def test_model_floats_to_newest_in_family_when_no_env_model(self) -> None:
         listing = (
+            "gemini-4-argon-high\n"
+            "gemini-4.1-argon-high\n"
+            "gemini-4.1-argon-medium\n"
             "gemini-3.8-flash-high\n"
-            "gemini-3.9-flash-high\n"
-            "gemini-3.9-flash-medium\n"
-            "gemini-3.1-pro-high\n"
         )
         result = self._run({"MOCK_AGY_MODELS": listing})
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-3.9-flash-high", args)
-        self.assertNotIn("gemini-3.8-flash-high", args)
+        self.assertIn("gemini-4.1-argon-high", args)
+        self.assertNotIn("gemini-4-argon-high", args)
         self.assertIn(
-            "dispatch-gemini: MODEL-RESOLVE from=gemini-3.8-flash-high "
-            "to=gemini-3.9-flash-high reason=newest-in-family",
+            "dispatch-gemini: MODEL-RESOLVE from=gemini-4-argon-high "
+            "to=gemini-4.1-argon-high reason=newest-in-family",
             result.stderr,
         )
 
-    def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
-        # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
-        result = self._run({"MOCK_AGY_MODELS": "gemini-3.9-flash-medium\ngemini-3.9-flash-low"})
+    def test_default_falls_back_to_flash_when_argon_is_unlisted(self) -> None:
+        # An account that lists no Argon model would otherwise fail every round.
+        result = self._run({"MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.9-flash-high"})
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-3.9-flash-medium", args)
+        self.assertIn("gemini-3.9-flash-high", args)
+        self.assertNotIn("gemini-4-argon-high", args)
+        self.assertEqual(args[args.index("--effort") + 1], "high")
+        self.assertIn(
+            "dispatch-gemini: MODEL-FALLBACK from=gemini-4-argon-high "
+            "to=gemini-3.9-flash-high reason=template-unlisted",
+            result.stderr,
+        )
+
+    def test_named_model_that_is_unlisted_does_not_fall_back(self) -> None:
+        result = self._run(
+            {
+                "ANTIGRAVITY_DISPATCH_MODEL": "gemini-4-argon-high",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high",
+            }
+        )
+        self.assertEqual(result.returncode, 70)
+        self.assertNotIn("MODEL-FALLBACK", result.stderr)
+        self.assertFalse((self.log / "prompt.txt").exists())
+
+    def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
+        # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
+        result = self._run({"MOCK_AGY_MODELS": "gemini-4-argon-medium\ngemini-4-argon-low"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertIn("gemini-4-argon-medium", args)
         self.assertEqual(args[args.index("--effort") + 1], "medium")
 
     def test_blank_named_model_is_still_refused(self) -> None:
@@ -1141,23 +1167,24 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
 
     def test_listing_with_only_template_does_not_emit_model_resolve(self) -> None:
-        result = self._run({"MOCK_AGY_MODELS": "gemini-3.8-flash-high"})
+        result = self._run({"MOCK_AGY_MODELS": "gemini-4-argon-high"})
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-3.8-flash-high", args)
+        self.assertIn("gemini-4-argon-high", args)
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
+        self.assertNotIn("MODEL-FALLBACK", result.stderr)
 
     def test_preflight_off_uses_constant(self) -> None:
         result = self._run(
             {
                 "ANTIGRAVITY_PREFLIGHT": "off",
-                "MOCK_AGY_MODELS": "gemini-3.9-flash-high",
+                "MOCK_AGY_MODELS": "gemini-4.1-argon-high",
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-3.8-flash-high", args)
-        self.assertNotIn("gemini-3.9-flash-high", args)
+        self.assertIn("gemini-4-argon-high", args)
+        self.assertNotIn("gemini-4.1-argon-high", args)
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
 
     def test_self_review_guard_refuses_gemini_orchestrator(self) -> None:

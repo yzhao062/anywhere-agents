@@ -52,7 +52,7 @@ or a unit's result cannot be checked without redoing it.
 
 | Executor | Quota | Notes |
 |---|---|---|
-| Agy (`agy`) | Google AI plan authenticated in Antigravity | **The only worker.** The newest Gemini Flash High the account lists, at `high` effort; fast, separately funded, and dispatched with full unattended tool permission inside a scratch dir or throwaway clone. |
+| Agy (`agy`) | Google AI plan authenticated in Antigravity | **The only worker.** Runs the newest Gemini Argon High the account lists, at `high` effort; fast, separately funded, and dispatched with full unattended tool permission inside a scratch dir or throwaway clone. |
 | Claude session (this session) | Current Claude account; check Settings > Usage for the applicable limits or credits | Coordinator and integrator only, on whatever model is selected. Never a unit. |
 
 Rules:
@@ -60,8 +60,9 @@ Rules:
 - **Every unit runs on Agy.** Research, verification, extraction, cross-checks, and code-writing
   units in a throwaway clone all go through `dispatch-task-agy`. The dispatcher gives a unit the
   same unattended capability as the `/vet` Agy reviewer, so it can verify numbers, run experiments,
-  and fetch the web. Agy defaults to the newest `gemini-*-flash-high` the account lists
-  (`gemini-3.8-flash-high` as of 2026-09) at the CLI's maximum `high` effort.
+  and fetch the web. Agy defaults to the newest `gemini-*-argon-high` the account lists
+  (`gemini-4-argon-high` as of 2026-10) at `high` effort, the highest tier Agy lists. An account
+  that lists no Argon model falls back to the newest `gemini-*-flash-high`.
 - **Never a Claude-side worker.** Do not spawn an Agent-tool subagent (Sonnet or any other model)
   or a Workflow agent for a unit, including as a fallback when the Agy pool is short. Those workers
   spend the coordinating session's own Claude account. When Agy cannot take a batch, queue it or
@@ -193,12 +194,12 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
 - Emits exactly one stdout line `STATE-DIR <abs-path>`; Agy stream events and stderr land in the
   state directory, the conversation id from Agy's `init` event is recorded to
   `<state-dir>/conversation-id`, and the final response is published atomically to the result path.
-- Defaults to the newest `gemini-*-flash-high` at `high` effort. The constants
-  `DEFAULT_MODEL` (`gemini-3.8-flash-high`) and `SECOND_MODEL`
-  (`claude-sonnet-5-5-high`) are family templates: Gemini Flash and Claude
-  Sonnet. The preflight's `agy models` listing supplies the newest version in
-  each family, so a new Flash or Sonnet release runs without an edit. The
-  effort tier may change too: Agy 1.2.16 retired `claude-sonnet-4-6` for
+- Defaults to the newest `gemini-*-argon-high` at `high` effort. The constants
+  `DEFAULT_MODEL` (`gemini-4-argon-high`) and `SECOND_MODEL`
+  (`claude-sonnet-5-5-high`) are family templates: Gemini Argon and Claude
+  Sonnet. During preflight, the `agy models` listing supplies the newest
+  version in each family, so a new Argon or Sonnet release runs without an
+  edit. Effort tiers may change too: Agy 1.2.16 retired `claude-sonnet-4-6` for
   slugs that carry the tier, and the old template would still have reached
   `claude-sonnet-5-5-high`. The tier is chosen first (the template's own,
   then `high`), and the newest version within it second. An older high
@@ -207,11 +208,14 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   `--effort`. The switch shows as a `MODEL-RESOLVE from=... to=...` line
   on stderr and in `<state-dir>/quota-note`, and `<state-dir>/model` names the
   model that ran. Quota routing picks the group first, and floating never
-  moves a unit to the other group. One exception keeps a batch alive after a
-  larger rename. When Agy lists nothing in the Sonnet family, a unit routed
-  there runs on the Gemini default, recorded as `MODEL-FALLBACK ...
-  reason=template-unlisted`. The Gemini group's quota is checked again first,
-  so a fallback into an empty group exits `75` without launching.
+  moves a unit to the other group. Fallbacks keep a batch alive when Agy
+  lists nothing in a template's family, each recorded as `MODEL-FALLBACK ...
+  reason=template-unlisted`. The Gemini default falls back to the newest
+  Gemini Flash (`FALLBACK_MODEL`, `gemini-3.8-flash-high`) in the same group.
+  A unit routed to the Sonnet family runs on the Gemini default, or on Gemini
+  Flash when Argon is unlisted too. The Gemini group's quota is checked again
+  before that crossing, so a fallback into an empty group exits `75` without
+  launching.
   A model named in `ANTIGRAVITY_DISPATCH_MODEL` runs verbatim, and
   `ANTIGRAVITY_PREFLIGHT=off` skips the listing, so the templates run as
   written. `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. The dispatcher
