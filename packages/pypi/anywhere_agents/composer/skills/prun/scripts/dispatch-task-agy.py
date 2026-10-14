@@ -42,11 +42,12 @@ from pathlib import Path
 from typing import BinaryIO, Iterable, NamedTuple
 
 
-# Agy 1.3.4 (2026-10) lists Gemini 4 Argon, the strongest Gemini it offers,
-# so a unit defaults to it. An account that does not list the Argon family
-# falls back to Gemini Flash, the previous default, in the same quota group.
-DEFAULT_MODEL = "gemini-4-argon-high"
-FALLBACK_MODEL = "gemini-3.8-flash-high"
+# Workers stay on Gemini Flash although Agy also lists Gemini 4 Argon. On
+# 2026-10-13 an Argon High run cost about four times a Flash High run of the
+# same task on the Agy five-hour meter. A prun batch spends quota in bulk.
+# The /vet reviewer runs Argon; a unit that needs it names it in
+# ANTIGRAVITY_DISPATCH_MODEL.
+DEFAULT_MODEL = "gemini-3.8-flash-high"
 DEFAULT_EFFORT = "high"
 DEFAULT_TIMEOUT_SECONDS = 2700
 MIN_RESULT_BYTES = 20
@@ -82,12 +83,6 @@ MARGIN_TOLERANCE = 1e-9
 # high tier matches the Gemini default; a later Sonnet floats to it through
 # newest_in_family.
 SECOND_MODEL = "claude-sonnet-5-5-high"
-# What a constant falls back to, in order, when the account lists nothing in
-# its family. The second group's model falls back into the Gemini group.
-FALLBACK_MODELS = {
-    DEFAULT_MODEL: (FALLBACK_MODEL,),
-    SECOND_MODEL: (DEFAULT_MODEL, FALLBACK_MODEL),
-}
 # The windows Agy meters. A group's entry in a snapshot is its emptiest bucket,
 # so a group that reports one window says nothing about the other.
 REQUIRED_WINDOWS = frozenset({"5h", "weekly"})
@@ -589,7 +584,7 @@ def run_preflight(
     model: str,
     state_dir: Path,
     allow_resolution: bool = False,
-    fallback_models: tuple[str, ...] = (),
+    fallback_model: str | None = None,
 ) -> tuple[int, str, str]:
     mode = os.environ.get("ANTIGRAVITY_PREFLIGHT", "auto").strip().lower()
     if mode not in {"auto", "force", "off"}:
@@ -645,11 +640,8 @@ def run_preflight(
                     model = resolved
                 # A template Agy no longer lists, after a rename such as the
                 # one that retired claude-sonnet-4-6, would fail every unit
-                # routed to it; the first fallback template the account
-                # lists keeps the unit running.
-                for fallback_model in fallback_models:
-                    if model in available:
-                        break
+                # routed to it; the fallback template keeps the unit running.
+                if model not in available and fallback_model:
                     alternative = newest_in_family(fallback_model, available_listing)
                     if alternative in available:
                         print(
@@ -980,7 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         model,
         state_dir,
         allow_resolution=allow_resolution,
-        fallback_models=FALLBACK_MODELS.get(model, ()),
+        fallback_model=DEFAULT_MODEL if model == SECOND_MODEL else None,
     )
     if preflight_code:
         stderr_path.write_text(preflight_error + "\n", encoding="utf-8")
@@ -991,11 +983,11 @@ def main(argv: list[str] | None = None) -> int:
     (state_dir / "model").write_text(model + "\n", encoding="utf-8")
     if model != routed_model:
         # A quota note names the family template it routed to; this line
-        # explains why `model` names a newer member, or a fallback family
-        # when the routed template was not listed.
+        # explains why `model` names a newer member, or a model in the other
+        # group after an unlisted template.
         reason = (
             "newest-in-family"
-            if newest_in_family(routed_model, [model]) == model
+            if model_pool(model) == model_pool(routed_model)
             else "template-unlisted"
         )
         kind = "MODEL-RESOLVE" if reason == "newest-in-family" else "MODEL-FALLBACK"

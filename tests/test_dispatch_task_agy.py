@@ -44,7 +44,7 @@ if sys.argv[1:] == ["--version"]:
     print("Antigravity CLI 1.2.0")
     raise SystemExit(0)
 if sys.argv[1:] == ["models"]:
-    print(os.environ.get("MOCK_AGY_MODELS", "gemini-4-argon-high\ngemini-3.8-flash-high"))
+    print(os.environ.get("MOCK_AGY_MODELS", "gemini-3.8-flash-high"))
     raise SystemExit(0)
 
 (log / "args.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
@@ -98,17 +98,9 @@ class DispatchTaskAgyUnitTests(unittest.TestCase):
     def test_script_exists(self) -> None:
         self.assertTrue(DISPATCH.is_file())
 
-    def test_defaults_pin_argon_high_with_flash_fallback(self) -> None:
-        self.assertEqual(self.module.DEFAULT_MODEL, "gemini-4-argon-high")
-        self.assertEqual(self.module.FALLBACK_MODEL, "gemini-3.8-flash-high")
+    def test_defaults_pin_flash_high(self) -> None:
+        self.assertEqual(self.module.DEFAULT_MODEL, "gemini-3.8-flash-high")
         self.assertEqual(self.module.DEFAULT_EFFORT, "high")
-        self.assertEqual(
-            self.module.FALLBACK_MODELS,
-            {
-                "gemini-4-argon-high": ("gemini-3.8-flash-high",),
-                self.module.SECOND_MODEL: ("gemini-4-argon-high", "gemini-3.8-flash-high"),
-            },
-        )
 
     def test_unit_id_is_narrow(self) -> None:
         self.assertIsNotNone(self.module.UNIT_RE.fullmatch("paper_review-12"))
@@ -774,7 +766,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertIn("Conclusion: complete", target.read_text(encoding="utf-8"))
 
         args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4-argon-high", args)
+        self.assertIn("gemini-3.8-flash-high", args)
         self.assertIn("high", args)
         self.assertEqual(args[args.index("--mode") + 1], "plan")
         self.assertNotIn("--dangerously-skip-permissions", args)
@@ -1327,62 +1319,38 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
             extra_env={
                 "MOCK_AGY_MODELS": (
                     "gemini-4-argon-high\n"
-                    "gemini-4.1-argon-high\n"
                     "gemini-3.8-flash-high\n"
+                    "gemini-3.9-flash-high\n"
                     "claude-sonnet-4-6"
                 ),
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4.1-argon-high", argv)
-        self.assertEqual(argv[argv.index("--effort") + 1], "high")
-        state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
-        self.assertEqual(
-            (state_dir / "model").read_text(encoding="utf-8").strip(),
-            "gemini-4.1-argon-high",
-        )
-        self.assertIn(
-            "MODEL-RESOLVE from=gemini-4-argon-high to=gemini-4.1-argon-high reason=newest-in-family",
-            result.stderr,
-        )
-        self.assertTrue(target.is_file())
-
-    def test_unpinned_unit_falls_back_to_flash_when_argon_is_unlisted(self) -> None:
-        # An account that lists no Argon model would otherwise fail every unit.
-        result, target = self._run(
-            extra_env={"MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.9-flash-high"}
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
         self.assertIn("gemini-3.9-flash-high", argv)
         self.assertNotIn("gemini-4-argon-high", argv)
-        self.assertIn(
-            "MODEL-FALLBACK from=gemini-4-argon-high to=gemini-3.9-flash-high reason=template-unlisted",
-            result.stderr,
-        )
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
         state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
         self.assertEqual(
             (state_dir / "model").read_text(encoding="utf-8").strip(),
             "gemini-3.9-flash-high",
         )
-        # Same quota group, different family: the trail says fallback.
-        self.assertEqual(
-            (state_dir / "quota-note").read_text(encoding="utf-8").splitlines(),
-            ["MODEL-FALLBACK from=gemini-4-argon-high to=gemini-3.9-flash-high reason=template-unlisted"],
+        self.assertIn(
+            "MODEL-RESOLVE from=gemini-3.8-flash-high to=gemini-3.9-flash-high reason=newest-in-family",
+            result.stderr,
         )
         self.assertTrue(target.is_file())
 
-    def test_a_named_model_that_is_unlisted_does_not_fall_back(self) -> None:
-        result, _ = self._run(
-            extra_env={
-                "ANTIGRAVITY_DISPATCH_MODEL": "gemini-4-argon-high",
-                "MOCK_AGY_MODELS": "gemini-3.8-flash-high",
-            }
+    def test_an_unlisted_flash_family_does_not_move_a_unit_to_argon(self) -> None:
+        # Argon cost about four times Flash per run on the Agy meter, so a
+        # default unit stops rather than spend Argon quota nobody chose.
+        result, target = self._run(
+            extra_env={"MOCK_AGY_MODELS": "gemini-4-argon-high\ngemini-4.1-argon-high"}
         )
         self.assertEqual(result.returncode, 70, result.stderr)
         self.assertNotIn("MODEL-FALLBACK", result.stderr)
         self.assertFalse((self.log / "args.json").is_file())
+        self.assertIn("FALLBACK", target.read_text(encoding="utf-8"))
 
     def test_balanced_unit_floats_to_newest_claude_model(self) -> None:
         result, target = self._run(
@@ -1420,6 +1388,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
             extra_env={
                 "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
                 "MOCK_AGY_MODELS": (
+                    "gemini-4-argon-high\n"
                     "gemini-3.8-flash-high\n"
                     "gemini-3.9-flash-high\n"
                     "claude-sonnet-9-0-renamed"
@@ -1429,6 +1398,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
         self.assertIn("gemini-3.9-flash-high", argv)
+        self.assertNotIn("gemini-4-argon-high", argv)
         self.assertEqual(argv[argv.index("--effort") + 1], "high")
         self.assertIn(
             f"MODEL-FALLBACK from={self.module.SECOND_MODEL} to=gemini-3.9-flash-high "
@@ -1446,30 +1416,6 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
             note[1],
             f"MODEL-FALLBACK from={self.module.SECOND_MODEL} to=gemini-3.9-flash-high "
             "reason=template-unlisted",
-        )
-        self.assertTrue(target.is_file())
-
-    def test_an_unlisted_second_template_stops_at_argon_when_it_is_listed(self) -> None:
-        # The Sonnet fallbacks are ordered: Argon first, Flash only without it.
-        result, target = self._run(
-            extra_env={
-                "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
-                "MOCK_AGY_MODELS": (
-                    "gemini-4-argon-high\n"
-                    "gemini-4.1-argon-high\n"
-                    "gemini-3.9-flash-high\n"
-                    "claude-sonnet-9-0-renamed"
-                ),
-            }
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4.1-argon-high", argv)
-        self.assertNotIn("gemini-3.9-flash-high", argv)
-        self.assertIn(
-            f"MODEL-FALLBACK from={self.module.SECOND_MODEL} to=gemini-4.1-argon-high "
-            "reason=template-unlisted",
-            result.stderr,
         )
         self.assertTrue(target.is_file())
 
@@ -1496,11 +1442,11 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
     def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
         # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
         result, target = self._run(
-            extra_env={"MOCK_AGY_MODELS": "gemini-4-argon-medium\ngemini-4-argon-low"}
+            extra_env={"MOCK_AGY_MODELS": "gemini-3.9-flash-medium\ngemini-3.9-flash-low"}
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4-argon-medium", argv)
+        self.assertIn("gemini-3.9-flash-medium", argv)
         self.assertEqual(argv[argv.index("--effort") + 1], "medium")
         self.assertTrue(target.is_file())
 
@@ -1555,26 +1501,26 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
                 "AGY_QUOTA_CACHE": self._quota(gemini=0.86, second=0.0),
                 "ANTIGRAVITY_DISPATCH_MODEL": "claude-opus-4-6-thinking",
                 "MOCK_AGY_MODELS": (
-                    "gemini-4-argon-high\n"
-                    "gemini-4.1-argon-high\n"
+                    "gemini-3.8-flash-high\n"
+                    "gemini-3.9-flash-high\n"
                     "claude-opus-4-6-thinking"
                 ),
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4.1-argon-high", argv)
+        self.assertIn("gemini-3.9-flash-high", argv)
         self.assertNotIn("claude-opus-4-6-thinking", argv)
         self.assertEqual(argv[argv.index("--effort") + 1], "high")
         self.assertIn("MODEL-FALLBACK", result.stderr)
         self.assertIn(
-            "MODEL-RESOLVE from=gemini-4-argon-high to=gemini-4.1-argon-high reason=newest-in-family",
+            "MODEL-RESOLVE from=gemini-3.8-flash-high to=gemini-3.9-flash-high reason=newest-in-family",
             result.stderr,
         )
         state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
         self.assertEqual(
             (state_dir / "model").read_text(encoding="utf-8").strip(),
-            "gemini-4.1-argon-high",
+            "gemini-3.9-flash-high",
         )
         # The saved trail explains the gap between the routed template and
         # the model that ran.
@@ -1582,7 +1528,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertTrue(note[0].startswith("MODEL-FALLBACK from=claude-opus-4-6-thinking"))
         self.assertEqual(
             note[1],
-            "MODEL-RESOLVE from=gemini-4-argon-high to=gemini-4.1-argon-high reason=newest-in-family",
+            "MODEL-RESOLVE from=gemini-3.8-flash-high to=gemini-3.9-flash-high reason=newest-in-family",
         )
         self.assertTrue(target.is_file())
 
@@ -1590,18 +1536,18 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         result, target = self._run(
             extra_env={
                 "ANTIGRAVITY_PREFLIGHT": "off",
-                "MOCK_AGY_MODELS": "gemini-4.1-argon-high",
+                "MOCK_AGY_MODELS": "gemini-3.9-flash-high",
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4-argon-high", argv)
-        self.assertNotIn("gemini-4.1-argon-high", argv)
+        self.assertIn("gemini-3.8-flash-high", argv)
+        self.assertNotIn("gemini-3.9-flash-high", argv)
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
         state_dir = Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
         self.assertEqual(
             (state_dir / "model").read_text(encoding="utf-8").strip(),
-            "gemini-4-argon-high",
+            "gemini-3.8-flash-high",
         )
         self.assertTrue(target.is_file())
 

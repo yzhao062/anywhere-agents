@@ -109,7 +109,7 @@ cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100
 
 如果没有设置用户级 Auto-terminal 默认，就显式写一次 channel：`/vet auto agy`。Agy backend 使用已安装 `agy` CLI 上登录的 Google AI plan，不另要 Gemini API key。它在 staged Git index 的隔离导出中以 `accept-edits` 加自动批准工具权限运行，因此能实际跑实验，同时不会把生成物写进原工作树。完成后原子发布 `Review-Antigravity.md`。需要临时换模型时设 `ANTIGRAVITY_DISPATCH_MODEL`，需要换 effort 时设 `ANTIGRAVITY_DISPATCH_EFFORT`。
 
-`/prun` 采用另一套成本分工：每个单元都交给 Agy，在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。它不启动 Claude subagent，因为这些 subagent 消耗的是协调 session 所在的同一个 Claude 账户额度。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 同样默认最新的 Gemini Argon High / `high`；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
+`/prun` 采用另一套成本分工：每个单元都交给 Agy，在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。它不启动 Claude subagent，因为这些 subagent 消耗的是协调 session 所在的同一个 Claude 账户额度。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 默认最新的 Gemini Flash High / `high`，因为同一任务在 Agy 的五小时额度上，Argon High 的消耗约为 Flash High 的四倍；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
 
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
