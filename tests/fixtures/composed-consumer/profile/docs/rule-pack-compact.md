@@ -7,7 +7,7 @@ agent acts on. docs/rule-pack.md is the full reference.
 
 # User Profile (yzhao062)
 
-Use these bullets for tone, default tooling, terminology, and venue conventions. Project-specific and task-specific instructions override them when they conflict.
+Project-specific and task-specific instructions override these bullets when they conflict.
 
 ## Identity
 
@@ -22,7 +22,7 @@ PyOD and PyGOD are anomaly detection libraries (tabular and graph). The public a
 ## Communication Preferences
 
 - Casual tone. "Yue" for one-on-one work; "Dr. Zhao" only in formal correspondence.
-- Bilingual EN / ZH. Switch language by context; do not translate code, paths, or technical identifiers.
+- Bilingual EN / ZH.
 - Pacific Time (Los Angeles).
 - Direct over diplomatic. Flag disagreements explicitly rather than soften them; a fast back-and-forth beats a cushioned monologue.
 
@@ -30,14 +30,14 @@ PyOD and PyGOD are anomaly detection libraries (tabular and graph). The public a
 
 - **Research papers.** NeurIPS, ICML, ICLR, KDD, and the NeurIPS Datasets and Benchmarks track by default; ACL / EMNLP for NLP work; CVPR / ICCV for vision.
 - **Funding proposals.** NSF Merit Review framework by default; NIH Simplified Peer Review when the call is biomedical; DOE / DOD only on explicit request. Avoid DEI-related terms in NSF / federal proposals unless the solicitation explicitly requires them.
-- **Reviews.** Code goes through the `implement-review` skill (`/vet`: one agent implements, another reviews); papers and proposals follow the same pattern with content-type lenses.
+- **Reviews.** Papers and proposals go through `/vet` like code, with content-type lenses.
 
 ## Tools and Stack
 
-- Python primary. Miniforge `py312` environment by default; `mamba` for install and create operations, `conda` only for commands mamba lacks.
+- Python primary; Miniforge `py312` environment by default.
 - LaTeX for papers and proposals; Markdown for documentation; reStructuredText where Sphinx is in play.
-- Claude Code is the primary workhorse (drafting, implementation, research); Codex is the gatekeeper (review, feedback, quality checks).
-- macOS, Windows, and Linux all in active use; PyCharm and VS Code as editors; GitHub with the `gh` CLI for PR and issue work.
+- Claude drafts prose a person will read (paper and proposal text, abstracts, emails, documentation). Agy, prun units, and Codex do not; a Codex or Agy coordinator hands that draft to Claude or the user. A Codex or Agy reviewer's suggested wording marks the problem; Claude writes the fix.
+- macOS, Windows, and Linux all in active use; PyCharm and VS Code as editors.
 
 ## Decision-Support Stance
 
@@ -54,8 +54,5 @@ Loop control: after plan-review or several rounds on the same point, challenge o
 
 ## Defaults Agents Should Follow
 
-- Confirm before any `git commit` or `git push`, in every project.
-- Use `git -C <path>` rather than `cd <path> && git ...`, which triggers compound-command approval prompts.
-- Verify that a cited paper exists before generating the citation; mark `[UNVERIFIED]` when verification is not possible.
-- For BibTeX, provide entries that copy cleanly into a `.bib` file; never invent venue or year fields.
-- Treat the writing rules in [`agent-style`](https://github.com/yzhao062/agent-style) as binding for every `.md` / `.tex` / `.rst` / `.txt` write.
+- Mark a citation `[UNVERIFIED]` when it cannot be verified, and never invent BibTeX venue or year fields.
+- Treat the writing rules in `agent-style` as binding for every `.md` / `.tex` / `.rst` / `.txt` write.

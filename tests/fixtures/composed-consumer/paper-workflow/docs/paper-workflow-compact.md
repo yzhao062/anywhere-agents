@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
 <!--
-Compact paper-workflow pack: submodule, Overleaf merge, and venue rules
-for paper and proposal repos. docs/paper-workflow.md is the full reference.
+Compact paper-workflow pack: submodule, Overleaf merge, venue, and
+revision rules for paper and proposal repos. docs/paper-workflow.md is the full reference.
 -->
 
 # Paper and Proposal Workflow
 
-Apply these rules when the project is a paper or proposal with a `.gitmodules` file or an Overleaf-synced subdirectory; skip them on prototype and OSS repos.
+The submodule and Overleaf rules apply when the project has a `.gitmodules` file or an Overleaf-synced subdirectory; the venue and revision rules apply to any paper or proposal. Skip them all on prototype and OSS repos.
 
 ## Submodule Workflow
 
@@ -49,3 +49,10 @@ Restore our structural version with `git restore --source=<pre-merge-commit> --w
 ## Venue Conventions
 
 For NSF and federal proposals, do not introduce DEI-related terms unless the solicitation explicitly requires them; a non-federal call that asks for DEI framing gets it. NSF Merit Review framework by default (intellectual merit and broader impacts); NIH Simplified Peer Review on biomedical proposals. For papers, follow the venue's own guidelines (NeurIPS, ICML, ICLR, KDD, ACL, EMNLP, CVPR), and generate venue-specific formatting (camera-ready, anonymous version) only when asked.
+
+## Revision Discipline
+
+1. **Filter revisions through the story.** The author records a one-sentence thesis and the headline claims in the README or plan file. A change enters the manuscript only if it changes a headline claim, helps a reader follow or check one, fixes an error, meets a venue requirement, or cuts. Triage review lists against the thesis, not item by item; the rest goes to the project's records.
+2. **Keep the main text for the story.** Defenses against objections no reader raised, the project's path to a result, and small negative results off the main line go to the records. Main text grows only for a new result or for what a reader needs to follow or check a retained claim.
+3. **Report the trend.** State the main pattern and how widely it holds. Report a statistical test only where the claim depends on it; qualify only where it changes the conclusion.
+4. **Change direction only on purpose.** Run an experiment only if it can change a headline claim or a main table row. Before a finding narrows or reframes the story, state what it cuts and ask the author. Once AI panel scores stop moving, the next readers are people.
