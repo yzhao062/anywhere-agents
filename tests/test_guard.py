@@ -940,6 +940,47 @@ def _write_fake_agent_style(root: Path) -> str:
     return str(root)
 
 
+_SIX_DETECTORS = (
+    "_rule_05", "_rule_06", "_rule_12", "_rule_b", "_rule_d", "_rule_i",
+)
+
+
+def _write_release_fake_agent_style(
+    root: Path, *, version, detectors, raising=(),
+) -> str:
+    """Plant a stand-in `agent_style` whose release and detector set are chosen.
+
+    The advisory's rule set follows the package's `__version__`, so these tests
+    need to say which release they are standing in for. Every detector reports
+    exactly one finding, which makes "how many rules ran" readable from the
+    advisory's own count: six findings mean six detectors ran, seven mean
+    seven. `_rule_03` echoes the `file_path` it was given into its finding, so
+    a test can see the path arrive. A detector named in `raising` raises
+    instead of reporting. Passing `version=None` plants no `__version__` at all.
+    """
+    pkg = root / "agent_style" / "review"
+    pkg.mkdir(parents=True)
+    init = "" if version is None else f"__version__ = {version!r}\n"
+    (root / "agent_style" / "__init__.py").write_text(init, encoding="utf-8")
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    source = [
+        "class _V:\n"
+        "    def __init__(self, detail):\n"
+        "        self.detail = detail\n"
+    ]
+    for name in detectors:
+        params = "text, file_path=''" if name == "_rule_03" else "text"
+        if name in raising:
+            body = "    raise RuntimeError('simulated detector failure')\n"
+        elif name == "_rule_03":
+            body = "    return [_V('path=' + file_path)]\n"
+        else:
+            body = f"    return [_V('{name} ran')]\n"
+        source.append(f"\ndef {name}({params}):\n{body}")
+    (pkg / "detectors_mech.py").write_text("".join(source), encoding="utf-8")
+    return str(root)
+
+
 class AgentStyleAdvisoryTests(unittest.TestCase):
     """agent-style's deterministic findings are reported, never blocking.
 
@@ -1125,22 +1166,32 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         )
         self.assertIsNone(resp)
 
-    def test_exactly_the_six_documented_rules_are_selected(self) -> None:
+    def test_exactly_the_documented_rules_for_the_installed_release_are_selected(
+        self,
+    ) -> None:
         """The rule list is a documented contract, so it is asserted as one.
 
         Every other test here checks behaviour, and behaviour cannot see the
         difference between six rules and one that happens to fire. AGENTS.md
-        and the shipped docs name these six, so a release that renamed the
-        private functions behind five of them should fail here rather than
-        quietly narrow what the advisory covers.
+        and the shipped docs name the set. A release that renamed the private
+        functions behind some of them should fail here, before it quietly
+        narrows what the advisory covers. The set is six before
+        agent-style 0.6.0 and seven from it, and CI installs the package
+        unpinned, so the expectation is read from the installed release. It is
+        parsed here independently of the guard's own parser on purpose.
         """
         self._require_agent_style()
         guard = _load_guard_module()
-        labels = {label for label, _ in guard._agent_style_mechanical()}
-        self.assertEqual(
-            labels,
-            {"RULE-05", "RULE-06", "RULE-12", "RULE-B", "RULE-D", "RULE-I"},
+        import agent_style
+
+        release = tuple(
+            int(p) for p in agent_style.__version__.split(".")[:3]
         )
+        expected = {"RULE-05", "RULE-06", "RULE-12", "RULE-B", "RULE-D", "RULE-I"}
+        if release >= (0, 6, 0):
+            expected.add("RULE-03")
+        labels = {label for label, _ in guard._agent_style_mechanical()}
+        self.assertEqual(labels, expected)
 
     def test_a_detector_that_raises_disables_the_whole_advisory(self) -> None:
         """Incompatibility that only shows up at call time gets the same
@@ -1194,6 +1245,135 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
                         "Write",
                         {"file_path": "/tmp/probe.md", "content": _LONG_SENTENCE},
                     ))
+
+    def _advice_from_fake_release(self, *, version, detectors, raising=()):
+        """Run the real hook against a planted package; return its advisory.
+
+        Goes through the subprocess harness with PYTHONPATH, the pattern the
+        one-response test above uses. PYTHONPATH precedes site-packages, so the
+        fake shadows a real installation and these tests do not depend on, or
+        skip for the want of, the agent-style the machine happens to carry.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _write_release_fake_agent_style(
+                Path(tmp) / "fakepkg",
+                version=version, detectors=detectors, raising=raising,
+            )
+            resp = run_guard_with_payload(
+                {
+                    "tool_name": "Write",
+                    "tool_input": {
+                        "file_path": "/tmp/abstract.md",
+                        "content": "Short and clean.\n",
+                    },
+                },
+                env={"PYTHONPATH": fake},
+            )
+        return self._advice(resp)
+
+    def test_a_release_before_0_6_0_runs_the_six_rule_baseline(self) -> None:
+        """Six detectors present, release 0.4.2: six findings, no RULE-03.
+
+        Pins the old-package half of the contract. The advisory has to keep
+        working on a machine that has not upgraded agent-style, with the same
+        six rules the documentation promised before RULE-03 existed.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.4.2", detectors=_SIX_DETECTORS,
+        )
+        self.assertIn("6 finding(s)", advice)
+        self.assertNotIn("RULE-03", advice)
+
+    def test_an_old_release_does_not_run_a_rule_03_it_happens_to_carry(self) -> None:
+        """The release picks the set, not the presence of the function.
+
+        A package older than 0.6.0 that exposes `_rule_03` anyway (a
+        development build, an unrelated attribute with that name) still runs
+        the six the documentation names. Probing for the function would run
+        seven here, and the advertised set would stop matching what runs.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.5.9", detectors=_SIX_DETECTORS + ("_rule_03",),
+        )
+        self.assertIn("6 finding(s)", advice)
+        self.assertNotIn("RULE-03", advice)
+
+    def test_0_6_0_with_all_seven_rules_runs_seven_and_passes_the_path(self) -> None:
+        """From 0.6.0 the set is the six plus RULE-03, and RULE-03 gets the path.
+
+        The path is what lets the detector recognise an abstract or an
+        introduction file. It must arrive as the tool call's `file_path`;
+        dropping it, moving it into the text slot, or cutting it to a
+        basename fails here. RULE-03 is listed first, so it is inside the advisory's cap.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.6.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+        )
+        self.assertIn("7 finding(s)", advice)
+        self.assertIn("RULE-03: path=/tmp/abstract.md", advice)
+
+    def test_the_release_is_compared_numerically(self) -> None:
+        """0.10.0 is newer than 0.6.0, though it sorts before it as a string.
+
+        Both halves matter: with the function present it runs seven, and with
+        it missing the advisory is off. A string comparison reads 0.10.0 as
+        old, runs six in both cases, and fails each assertion.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+        )
+        self.assertIn("7 finding(s)", advice)
+        self.assertEqual(
+            self._advice_from_fake_release(
+                version="0.10.0", detectors=_SIX_DETECTORS,
+            ),
+            "",
+            "0.10.0 without _rule_03 is incompatible and must disable the advisory",
+        )
+
+    def test_0_6_0_without_rule_03_disables_the_whole_advisory(self) -> None:
+        """A release that promises seven rules and carries six is incompatible.
+
+        Falling back to the six would produce an advisory that looks complete
+        and covers one rule fewer than the documentation says. All or nothing,
+        and the seven-rule set is the one a 0.6.0 package is held to. The six
+        detectors present here would each report, so silence means the loader
+        refused the package and not that nothing fired.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.6.0", detectors=_SIX_DETECTORS,
+        )
+        self.assertEqual(advice, "")
+
+    def test_an_unreadable_version_is_treated_as_an_older_release(self) -> None:
+        """Missing and unparsable versions both run the six-rule baseline.
+
+        Older is the safe direction: the baseline is what every supported
+        package carries. Reading an unparsable version as new would demand a
+        seventh rule from a package that may lack it and switch the advisory
+        off. The first case also covers the existing fake, whose package
+        carries no version at all.
+        """
+        for version in (None, "not-a-version", ""):
+            with self.subTest(version=version):
+                advice = self._advice_from_fake_release(
+                    version=version, detectors=_SIX_DETECTORS,
+                )
+                self.assertIn("6 finding(s)", advice)
+                self.assertNotIn("RULE-03", advice)
+
+    def test_a_raising_rule_03_disables_the_whole_advisory(self) -> None:
+        """RULE-03 is held to the same contract as the other six.
+
+        The six would each report here, so an advisory that skipped the failed
+        detector and kept the rest would print six findings. Nothing printing
+        means the failure was treated as a broken package.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.6.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+            raising=("_rule_03",),
+        )
+        self.assertEqual(advice, "")
 
     def test_the_workflow_installs_what_ci_will_require(self) -> None:
         """Fail here, before the push, rather than in CI.

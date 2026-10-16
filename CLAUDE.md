@@ -64,7 +64,7 @@ Rules that follow from the run:
 - Put repo-local overrides in `AGENTS.local.md`, never in the generated files. Read `AGENTS.local.md` after `AGENTS.md`; its rules win. Codex does not discover it on its own, which is why this sentence exists.
 - Shared command pointers are copied into `.claude/commands/`; the copy overwrites same-named files only and does not delete unrelated project-local commands.
 - Shared keys of `.claude/settings.json` (`permissions`, `attribution`, `effortLevel`, and the like) are merged on every run and project-only keys are preserved. Override a shared key locally in `.claude/settings.local.json`.
-- Bootstrap also refreshes user-level files: `~/.claude/hooks/guard.py` (PreToolUse), `~/.claude/hooks/session_bootstrap.py` (SessionStart), the statusline scripts, and the shared `env` entries of `~/.claude/settings.json`, including `CLAUDE_CODE_EFFORT_LEVEL=xhigh`.
+- Bootstrap also refreshes user-level files: `~/.claude/hooks/guard.py` (PreToolUse), `~/.claude/hooks/session_bootstrap.py` (SessionStart), the statusline scripts, and the shared `env` entries of `~/.claude/settings.json`.
 - `.agent-config/`, `agent-config.local.yaml`, and the three generated files (`AGENTS.md`, `CLAUDE.md`, `agents/codex.md`) are gitignored in a consumer; a generated file is never untracked automatically once a repo tracks it; moving one out of the index is an operator decision. `agent-config.yaml` selects packs under the `packs:` key (`rule_packs:` is deprecated). `todo/` holds files a person drops in for an agent; what an agent generates goes to the session scratchpad, not there.
 
 ### Configuration Precedence
@@ -96,7 +96,7 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 | Gate | Tool scope | Trigger | Action |
 |---|---|---|---|
 | Writing-style | `Write`, `Edit`, `MultiEdit` on `.md` / `.tex` / `.rst` / `.txt`, excluding an `agent-io` path that resolves under a temp root outside any git worktree | Outgoing content contains a banned AI-tell word (see Writing Defaults) | **deny**, with the hit list and an inline `Suggested rewrite:` line |
-| agent-style advisory | Same tools and extensions, excluding an `agent-io` path anywhere | `agent_style` is importable and its mechanical detectors report findings (RULE-05, 06, 12, B, D, I) | **advisory only**: up to 5 findings reported to the model and the user, no permission decision |
+| agent-style advisory | Same tools and extensions, excluding an `agent-io` path anywhere | `agent_style` is importable and its mechanical detectors report findings (RULE-05, 06, 12, B, D, I, plus RULE-03 from agent-style 0.6.0) | **advisory only**: up to 5 findings reported to the model and the user, no permission decision |
 | Banner emission | Any tool except `Read`, `Grep`, `Glob`, `Skill`, `Task`, `TodoWrite`, `BashOutput`, `WebFetch`, `WebSearch`, `ToolSearch`, `LS`, `NotebookRead`, and a `Write`/`Edit`/`MultiEdit` whose target is exactly `<project-root>/.agent-config/banner-emitted.json` | `session-event.json.ts` newer than `banner-emitted.json.ts` in the consumer root found by walking up to `.agent-config/bootstrap.{sh,ps1}`; source repos and unrelated directories are not gated | **deny** on the first arm (no acknowledgement file yet) with the instruction to emit the banner and write the acknowledgement; a stale acknowledgement passes through with a `[banner-gate]` advisory |
 | Compound `cd` | `Bash` | `cd <path> && <cmd>` or `cd <path>; <cmd>` | **deny** with a `Suggested rewrite:` line (`git -C <path>`, or the path as an argument) |
 | Nested `git init` | `Bash`, `PowerShell` | A `git init` whose target is already inside a git worktree | **deny** with a `Suggested rewrite:` line pointing at the session scratch directory |
@@ -144,8 +144,8 @@ The first module governs a reply to a person; the other two govern a file, and d
 
 ### Writing Defaults
 
-- Use scientifically accessible language. Do not oversimplify unless asked. Keep meaningful technical detail, factual accuracy, and clarity in scientific contexts.
-- In papers and proposals, state each pattern with its key magnitude; keep material scope and uncertainty with the claim, full results in tables, and general limitations in their own section.
+- Use scientifically accessible language; keep technical detail and factual accuracy, and simplify only when asked.
+- In papers and proposals, give each pattern a rounded key magnitude and its material scope; put intervals and full results in tables and general limitations in their own section. Never stack precise figures across consecutive sentences, least of all in an abstract or introduction.
 - Revise in place: answer a review finding by rewriting, moving, or cutting what it names. Add only what the document lacks, never a defense against an objection nobody raised; a paper, plan, brief, or rule file should not grow each round without new content.
 - Use consistent terms; define an abbreviation once.
 - If citing papers, verify that they exist; when citations are requested, give BibTeX entries ready for a `.bib` file.

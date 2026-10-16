@@ -58,7 +58,7 @@
     Full removal: in a fork, remove the user-level section of `bootstrap/bootstrap.sh` / `bootstrap.ps1` that deploys `scripts/guard.py`. In a specific project only, remove the `hooks` entry from `~/.claude/settings.json` manually (bootstrap re-installs it on the next run from upstream).
 
 ??? question "What is the `[agent-style]` line on some prose writes?"
-    An advisory, added in v0.7.13. When the [`agent-style`](https://github.com/yzhao062/agent-style) package is importable, prose writes are also scanned by six of its deterministic detectors. Those cover long sentences, casual em dashes, transition overuse, contractions in technical prose, clichés, and jargon. The findings go to both the agent and you, and this guard does not block the write:
+    An advisory, added in v0.7.13. When the [`agent-style`](https://github.com/yzhao062/agent-style) package is importable, prose writes are also scanned by six of its deterministic detectors. Those cover long sentences, casual em dashes, transition overuse, contractions in technical prose, clichés, and jargon. With `agent-style` 0.6.0 or newer the set grows to seven: RULE-03 flags confidence intervals written into prose, and precise figures stacked across consecutive sentences of an abstract or an introduction. The findings go to both the agent and you, and this guard does not block the write:
 
     ```text
     [agent-style] 2 finding(s) in notes.md: RULE-12: sentence length 34 words (>30); RULE-D: transition word "Additionally" opens 3 paragraphs. Advisory only; this hook did not block the write.

@@ -27,12 +27,12 @@ Based on NeurIPS, ICLR, ICML, and ACL Rolling Review guidelines.
 
 Flag undersell as well as overclaim: a supported contribution stated so weakly that a reviewer would miss it is a finding. Its remedy keeps the evidence: a scoped affirmative claim, or a clearer statement of the observed pattern.
 
-In a revision, flag accretion too. Keep evidence, methods, and disclosures needed by retained claims. Flag unneeded defenses and move process history that supports no retained claim to the records. A request to add material names the claim that lacks evidence or the step a reader cannot follow.
+In a revision, flag accretion too. Keep evidence, methods, and disclosures needed by retained claims. Flag unneeded defenses and move process history that supports no retained claim to the records. A request to add material names the claim that lacks evidence or the step a reader cannot follow. When the project records a thesis and headline claims, judge each finding against them, and flag a remedy that would narrow or reframe the thesis as the author's decision.
 
 1. **Soundness** -- Are claims well-supported by theoretical analysis or experimental evidence? Are there methodological flaws? (NeurIPS 1-4, ACL 1-5)
 2. **Novelty and originality** -- Does the work present new ideas, methods, or combinations? How does it differ from prior work? (NeurIPS, ICLR, AAAI)
 3. **Significance** -- Does it address an important problem? Will it influence future research or practice? (NeurIPS 1-4, ICLR)
-4. **Clarity and presentation** -- Can a knowledgeable reader follow the exposition? Is it well-organized? Does the prose state each result's pattern and leave full numbers to tables? (NeurIPS 1-4, ICLR)
+4. **Clarity and presentation** -- Can a knowledgeable reader follow the exposition? Is it well-organized? Does the prose state each result's pattern and leave full numbers and intervals to tables, without precise figures stacked across consecutive sentences or crowding the abstract and introduction? (NeurIPS 1-4, ICLR)
 5. **Related work** -- Are key references present and fairly characterized? Is the positioning in the literature accurate? (ICLR, AISTATS)
 6. **Reproducibility** -- Is there enough detail (setup, hyperparameters, code, data) to reproduce the results? (ACL 1-5, AISTATS)
 7. **Figures and tables** -- Do they add information? Are captions self-contained? Are axes labeled and readable?

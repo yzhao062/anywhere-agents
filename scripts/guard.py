@@ -710,9 +710,59 @@ _STYLE_ADVISORY_LIMIT = 5
 # own, so the set is spelled once here and the loader below refuses a partial
 # match: advertising six rules while silently running one is worse than
 # running none, because the reader cannot tell the difference from the output.
+#
+# This is the baseline, the set every release the advisory supports carries.
+# agent-style 0.6.0 added `_rule_03` (confidence intervals in prose, and
+# precise figures stacked across consecutive sentences of an abstract or an
+# introduction). The set therefore follows the package's release, read in
+# `_agent_style_mechanical()`, and not whatever the package happens to
+# expose. Probing for `_rule_03` instead would let a 0.6.0 package that lost
+# the function narrow the advisory to six rules. The documentation would still
+# promise seven, which is the partial coverage this loader exists to refuse.
+# The release says what the package promises, and the loader holds it to that.
 _ADVISORY_RULE_ATTRS = (
     "_rule_05", "_rule_06", "_rule_12", "_rule_b", "_rule_d", "_rule_i",
 )
+
+# From this release on the advisory requires `_RULE_03_ATTR` as well. A 0.6.0
+# or newer package that lacks it is incompatible and disables the whole
+# advisory, as a package missing any of the six does. It runs first because
+# the findings are capped and RULE-12 can fill the cap on its own.
+_RULE_03_ATTR = "_rule_03"
+_RULE_03_MIN_VERSION = (0, 6, 0)
+
+# Detectors that take the path of the file being written as well as its text.
+# RULE-03 reads it to recognise abstract and introduction files. The others
+# are called with the text alone, as they were before it existed.
+_PATH_AWARE_RULES = frozenset({"RULE-03"})
+
+
+def _agent_style_version():
+    """Return agent_style's release as a three-integer tuple, or None.
+
+    None means missing, not a string, or unparsable, and the caller treats it
+    as an older release. That is the safe direction. An older release runs the
+    six-rule baseline, which every supported package carries. Guessing "new"
+    would demand a seventh rule the package may lack and switch the whole
+    advisory off.
+
+    Compared numerically because `0.10.0` sorts before `0.6.0` as a string.
+    Only the leading dotted integers count, so `0.6.0rc1` and `0.6.0.dev0`
+    read as 0.6.0. The hook runs on every tool call in every repository and
+    carries no dependencies of its own, so it does not import `packaging`.
+    """
+    try:
+        import agent_style
+        raw = getattr(agent_style, "__version__", None)
+        if not isinstance(raw, str):
+            return None
+        match = re.match(r"\s*v?(\d+(?:\.\d+)*)", raw)
+        if not match:
+            return None
+        parts = [int(p) for p in match.group(1).split(".")][:3]
+    except Exception:
+        return None
+    return tuple(parts + [0] * (3 - len(parts)))
 
 
 def _agent_style_mechanical():
@@ -723,10 +773,12 @@ def _agent_style_mechanical():
     missing or broken `agent_style` must cost nothing and block nothing. The
     banned-word gate above is independent of it and keeps working either way.
 
-    All of `_ADVISORY_RULE_ATTRS` or nothing. An earlier version kept whatever
+    All of the release's rules or nothing. An earlier version kept whatever
     subset it found, so a release that renamed five of the six private
     functions would have left the hook running one rule, the documentation
-    promising six, and every behaviour test green.
+    promising six, and every behaviour test green. The release decides which
+    set that is: `_ADVISORY_RULE_ATTRS` for anything older than 0.6.0 or with
+    a version that cannot be read, and that set plus `_rule_03` from 0.6.0.
     """
     try:
         from agent_style.review import detectors_mech
@@ -740,8 +792,12 @@ def _agent_style_mechanical():
     # cannot be title-cased at all. At 40% of all findings it would fill the cap
     # below with headings the author already decided. The style-review skill
     # still runs it, where a human asked for the full audit.
+    attrs = _ADVISORY_RULE_ATTRS
+    version = _agent_style_version()
+    if version is not None and version >= _RULE_03_MIN_VERSION:
+        attrs = (_RULE_03_ATTR,) + _ADVISORY_RULE_ATTRS
     rules = []
-    for name in _ADVISORY_RULE_ATTRS:
+    for name in attrs:
         fn = getattr(detectors_mech, name, None)
         if not callable(fn):
             # An installed but incompatible agent-style. Treated exactly like
@@ -786,17 +842,23 @@ def advise_writing_style(tool_name, tool_input):
     findings = []
     for label, fn in rules:
         try:
+            violations = (
+                fn(scan_target, file_path=file_path)
+                if label in _PATH_AWARE_RULES
+                else fn(scan_target)
+            )
             rule_findings = [
                 f"{label}: {getattr(v, 'detail', None) or str(v)}"
-                for v in fn(scan_target)
+                for v in violations
             ]
         except Exception:
-            # All six ran or none did. Skipping the rule that raised and
-            # keeping the rest is the same hidden partial coverage the loader
-            # refuses at import time, one layer down: a changed signature or
-            # an input the detector cannot handle would quietly narrow the
-            # advisory, and the output would look exactly like a clean pass on
-            # those rules. A broken detector is treated as a broken package.
+            # Every rule in the set ran or none did. Skipping the rule that
+            # raised and keeping the rest is the same hidden partial coverage
+            # the loader refuses at import time, one layer down: a changed
+            # signature or an input the detector cannot handle would quietly
+            # narrow the advisory, and the output would look exactly like a
+            # clean pass on those rules. A broken detector is treated as a
+            # broken package.
             return None
         findings.extend(rule_findings)
 
