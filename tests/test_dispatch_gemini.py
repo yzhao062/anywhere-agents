@@ -1187,6 +1187,96 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         self.assertNotIn("gemini-4.1-argon-high", args)
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
 
+    def _print_model(self, extra_env: dict[str, str] | None = None):
+        # Run outside the repository: printing the model needs no staged diff.
+        env = os.environ.copy()
+        env["ANTIGRAVITY_BIN"] = str(self.mock)
+        env["MOCK_AGY_LOG"] = str(self.log)
+        env["ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS"] = "10"
+        for name in ("ANTIGRAVITY_DISPATCH_MODEL", "ANTIGRAVITY_DISPATCH_EFFORT", "ANTIGRAVITY_PREFLIGHT"):
+            env.pop(name, None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [str(PYTHON), str(DISPATCH), "--print-model"],
+            cwd=self.root,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+    def test_print_model_reports_the_floated_default_without_a_review(self) -> None:
+        listing = "gemini-4-argon-high\ngemini-4.1-argon-high\ngemini-3.8-flash-high\n"
+        result = self._print_model({"MOCK_AGY_MODELS": listing})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gemini-4.1-argon-high high\n")
+        self.assertIn("MODEL-RESOLVE", result.stderr)
+        self.assertFalse((self.log / "prompt.txt").exists())
+
+    def test_print_model_reports_the_flash_fallback(self) -> None:
+        result = self._print_model({"MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.9-flash-high"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gemini-3.9-flash-high high\n")
+        self.assertIn("MODEL-FALLBACK", result.stderr)
+
+    def test_print_model_effort_follows_the_resolved_tier(self) -> None:
+        result = self._print_model({"MOCK_AGY_MODELS": "gemini-4-argon-medium"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gemini-4-argon-medium medium\n")
+
+    def test_print_model_runs_a_named_model_verbatim(self) -> None:
+        result = self._print_model(
+            {
+                "ANTIGRAVITY_DISPATCH_MODEL": "gemini-3.8-flash-high",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.9-flash-high",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gemini-3.8-flash-high high\n")
+
+    def test_print_model_fails_as_a_review_would_on_an_unlisted_model(self) -> None:
+        result = self._print_model(
+            {
+                "ANTIGRAVITY_DISPATCH_MODEL": "gemini-4-argon-high",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high",
+            }
+        )
+        self.assertEqual(result.returncode, 70)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("is not available", result.stderr)
+
+    def test_print_model_fails_as_a_review_would_without_a_binary(self) -> None:
+        result = self._print_model({"ANTIGRAVITY_BIN": str(self.root / "missing" / "agy")})
+        self.assertEqual(result.returncode, 70)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("no runnable Antigravity CLI found", result.stderr)
+
+    def test_print_model_with_preflight_off_reports_the_template(self) -> None:
+        result = self._print_model(
+            {"ANTIGRAVITY_PREFLIGHT": "off", "MOCK_AGY_MODELS": "gemini-4.1-argon-high"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gemini-4-argon-high high\n")
+        self.assertFalse((self.log / "args.json").exists())
+
+    def test_review_flags_stay_required_without_print_model(self) -> None:
+        result = subprocess.run(
+            [str(PYTHON), str(DISPATCH), "--round", "2"],
+            cwd=self.repo,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--prompt-file, --expected-review-file", result.stderr)
+
     def test_self_review_guard_refuses_gemini_orchestrator(self) -> None:
         result = self._run({"IMPLEMENT_REVIEW_ORCHESTRATOR": "gemini"})
         self.assertEqual(result.returncode, 2)

@@ -62,10 +62,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dispatch an Antigravity Gemini review",
     )
-    parser.add_argument("--prompt-file", required=True)
-    parser.add_argument("--round", required=True, type=int)
-    parser.add_argument("--expected-review-file", required=True)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--print-model",
+        action="store_true",
+        help="print the model and effort a review would run on, then exit",
+    )
+    parser.add_argument("--prompt-file")
+    parser.add_argument("--round", type=int)
+    parser.add_argument("--expected-review-file")
+    args = parser.parse_args(argv)
+    if not args.print_model:
+        missing = [
+            flag
+            for flag, value in (
+                ("--prompt-file", args.prompt_file),
+                ("--round", args.round),
+                ("--expected-review-file", args.expected_review_file),
+            )
+            if value is None
+        ]
+        if missing:
+            parser.error("the following arguments are required: " + ", ".join(missing))
+    return args
 
 
 def resolve_binary(value: str) -> str | None:
@@ -257,6 +275,64 @@ def run_preflight(
         "\n".join(output_parts), encoding="utf-8"
     )
     return 0, model
+
+
+def cli_executable() -> tuple[str | None, int]:
+    raw_bin = os.environ.get("ANTIGRAVITY_BIN", "agy")
+    executable = resolve_binary(raw_bin)
+    if executable:
+        return executable, 0
+    return None, fail(
+        f"no runnable Antigravity CLI found: {raw_bin}. "
+        "Install agy or set ANTIGRAVITY_BIN",
+        70,
+    )
+
+
+def requested_model() -> tuple[str, str, bool]:
+    """The model and effort the environment asks for, and whether the model may float."""
+    model = os.environ.get("ANTIGRAVITY_DISPATCH_MODEL", DEFAULT_MODEL).strip()
+    effort = os.environ.get("ANTIGRAVITY_DISPATCH_EFFORT", DEFAULT_EFFORT).strip()
+    # A model the caller named runs verbatim; only the default floats to the
+    # newest member of its family during the preflight.
+    return model, effort, "ANTIGRAVITY_DISPATCH_MODEL" not in os.environ
+
+
+def effort_for(model: str, effort: str) -> str:
+    # A floated slug can carry a tier other than the default effort, and Agy
+    # rejects a conflicting --effort, so an unset effort follows the slug.
+    if "ANTIGRAVITY_DISPATCH_EFFORT" not in os.environ:
+        slug_tier = model.rsplit("-", 1)[-1]
+        if slug_tier in ("low", "medium", "high", "max"):
+            return slug_tier
+    return effort
+
+
+def print_model() -> int:
+    """Print the model and effort a review would run on, then exit.
+
+    The choice passes through the same preflight as a review. A skill that
+    calls Agy directly, such as venue-review-panel, reads it here so its
+    reviewer follows the /vet choice instead of Agy's interactive default.
+    """
+    executable, code = cli_executable()
+    if not executable:
+        return code
+    model, effort, allow_resolution = requested_model()
+    if not model or not effort:
+        return fail("model and effort overrides must be non-empty")
+    with tempfile.TemporaryDirectory(prefix="implement-review-gemini-model-") as scratch:
+        code, model = run_preflight(
+            executable,
+            model,
+            Path(scratch),
+            allow_resolution=allow_resolution,
+            fallback_model=FALLBACK_MODEL,
+        )
+    if code:
+        return code
+    print(f"{model} {effort_for(model, effort)}", flush=True)
+    return 0
 
 
 def git_output(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -623,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code)
 
+    if args.print_model:
+        return print_model()
     if args.round <= 0:
         return fail(f"--round must be a positive integer, got: {args.round}")
 
@@ -683,20 +761,11 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         return fail(f"could not read prompt file: {exc}")
 
-    raw_bin = os.environ.get("ANTIGRAVITY_BIN", "agy")
-    executable = resolve_binary(raw_bin)
+    executable, code = cli_executable()
     if not executable:
-        return fail(
-            f"no runnable Antigravity CLI found: {raw_bin}. "
-            "Install agy or set ANTIGRAVITY_BIN",
-            70,
-        )
+        return code
 
-    model = os.environ.get("ANTIGRAVITY_DISPATCH_MODEL", DEFAULT_MODEL).strip()
-    # A model the caller named runs verbatim; only the default floats to the
-    # newest member of its family during the preflight.
-    allow_resolution = "ANTIGRAVITY_DISPATCH_MODEL" not in os.environ
-    effort = os.environ.get("ANTIGRAVITY_DISPATCH_EFFORT", DEFAULT_EFFORT).strip()
+    model, effort, allow_resolution = requested_model()
     if not model or not effort:
         return fail("model and effort overrides must be non-empty")
     try:
@@ -738,12 +807,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if preflight_code:
         return preflight_code
-    # A floated slug can carry a tier other than the default effort, and Agy
-    # rejects a conflicting --effort, so an unset effort follows the slug.
-    if "ANTIGRAVITY_DISPATCH_EFFORT" not in os.environ:
-        slug_tier = model.rsplit("-", 1)[-1]
-        if slug_tier in ("low", "medium", "high", "max"):
-            effort = slug_tier
+    effort = effort_for(model, effort)
 
     validation_dir, diff_text, _ = prepare_snapshot(cwd, state_dir)
     if validation_dir is None:
