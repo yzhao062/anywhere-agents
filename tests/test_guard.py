@@ -954,8 +954,8 @@ def _write_release_fake_agent_style(
     need to say which release they are standing in for. Every detector reports
     exactly one finding, which makes "how many rules ran" readable from the
     advisory's own count: six findings mean six detectors ran, seven mean
-    seven. `_rule_03` echoes the `file_path` it was given into its finding, so
-    a test can see the path arrive. A detector named in `raising` raises
+    seven. `_rule_03` and `_rule_a` echo the `file_path` they were given into
+    their findings, so a test can see the path arrive. A detector named in `raising` raises
     instead of reporting. Passing `version=None` plants no `__version__` at all.
     """
     pkg = root / "agent_style" / "review"
@@ -969,11 +969,13 @@ def _write_release_fake_agent_style(
         "        self.detail = detail\n"
     ]
     for name in detectors:
-        params = "text, file_path=''" if name == "_rule_03" else "text"
+        params = "text, file_path=''" if name in ("_rule_03", "_rule_a") else "text"
         if name in raising:
             body = "    raise RuntimeError('simulated detector failure')\n"
         elif name == "_rule_03":
             body = "    return [_V('path=' + file_path)]\n"
+        elif name == "_rule_a":
+            body = "    return [_V('a-path=' + file_path)]\n"
         else:
             body = f"    return [_V('{name} ran')]\n"
         source.append(f"\ndef {name}({params}):\n{body}")
@@ -1172,11 +1174,11 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         """The rule list is a documented contract, so it is asserted as one.
 
         Every other test here checks behaviour, and behaviour cannot see the
-        difference between six rules and one that happens to fire. AGENTS.md
-        and the shipped docs name the set. A release that renamed the private
+        difference between six rules and one that happens to fire. The
+        shipped guard-hook docs name the set. A release that renamed the private
         functions behind some of them should fail here, before it quietly
         narrows what the advisory covers. The set is six before
-        agent-style 0.6.0 and seven from it, and CI installs the package
+        agent-style 0.6.0, seven from it, and eight from 0.7.0. CI installs the package
         unpinned, so the expectation is read from the installed release. It is
         parsed here independently of the guard's own parser on purpose.
         """
@@ -1190,6 +1192,8 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         expected = {"RULE-05", "RULE-06", "RULE-12", "RULE-B", "RULE-D", "RULE-I"}
         if release >= (0, 6, 0):
             expected.add("RULE-03")
+        if release >= (0, 7, 0):
+            expected.add("RULE-A")
         labels = {label for label, _ in guard._agent_style_mechanical()}
         self.assertEqual(labels, expected)
 
@@ -1315,20 +1319,20 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
     def test_the_release_is_compared_numerically(self) -> None:
         """0.10.0 is newer than 0.6.0, though it sorts before it as a string.
 
-        Both halves matter: with the function present it runs seven, and with
-        it missing the advisory is off. A string comparison reads 0.10.0 as
-        old, runs six in both cases, and fails each assertion.
+        Both halves matter: with both functions present it runs eight, and
+        with `_rule_a` missing the advisory is off. A string comparison reads
+        0.10.0 as old, runs six in both cases, and fails each assertion.
         """
         advice = self._advice_from_fake_release(
-            version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+            version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
         )
-        self.assertIn("7 finding(s)", advice)
+        self.assertIn("8 finding(s)", advice)
         self.assertEqual(
             self._advice_from_fake_release(
-                version="0.10.0", detectors=_SIX_DETECTORS,
+                version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03",),
             ),
             "",
-            "0.10.0 without _rule_03 is incompatible and must disable the advisory",
+            "0.10.0 without _rule_a is incompatible and must disable the advisory",
         )
 
     def test_0_6_0_without_rule_03_disables_the_whole_advisory(self) -> None:
@@ -1342,6 +1346,44 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         """
         advice = self._advice_from_fake_release(
             version="0.6.0", detectors=_SIX_DETECTORS,
+        )
+        self.assertEqual(advice, "")
+
+    def test_a_0_6_release_does_not_run_a_rule_a_it_happens_to_carry(self) -> None:
+        """Between 0.6.0 and 0.7.0 the set is seven, whatever else is exposed."""
+        advice = self._advice_from_fake_release(
+            version="0.6.5", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
+        )
+        self.assertIn("7 finding(s)", advice)
+        self.assertNotIn("RULE-A", advice)
+
+    def test_0_7_0_runs_eight_and_passes_the_path_to_rule_a(self) -> None:
+        """From 0.7.0 RULE-A joins, takes the path, and sits inside the cap.
+
+        The path is how the detector tells a LaTeX source and an appendix
+        apart, so it must arrive as the tool call's `file_path`. RULE-A runs
+        second, after RULE-03, so both display rules show before RULE-12 can
+        fill the cap.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.7.0", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
+        )
+        self.assertIn("8 finding(s)", advice)
+        self.assertIn("RULE-03: path=/tmp/abstract.md", advice)
+        self.assertIn("RULE-A: a-path=/tmp/abstract.md", advice)
+
+    def test_0_7_0_without_rule_a_disables_the_whole_advisory(self) -> None:
+        """A release that promises eight rules and carries seven is incompatible."""
+        advice = self._advice_from_fake_release(
+            version="0.7.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+        )
+        self.assertEqual(advice, "")
+
+    def test_a_raising_rule_a_disables_the_whole_advisory(self) -> None:
+        """RULE-A is held to the same all-or-nothing contract as the rest."""
+        advice = self._advice_from_fake_release(
+            version="0.7.0", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
+            raising=("_rule_a",),
         )
         self.assertEqual(advice, "")
 

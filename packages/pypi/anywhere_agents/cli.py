@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from anywhere_agents.packs import residue as _residue
+
 from . import __version__
 
 REPO = "yzhao062/anywhere-agents"
@@ -899,9 +901,11 @@ def _user_config_lock_path(user_config_path: Path) -> Path:
     each other on the same machine. The composer also takes its own
     user-level lock for state mutations (``~/.claude/pack-state.json``);
     those two locks are independent so a config-only rewrite doesn't
-    block a composer in another project.
+    block a composer in another project. The residue rewrite that
+    bootstrap's composer runs takes this same lock, so the path comes
+    from one place.
     """
-    return user_config_path.with_name(user_config_path.name + ".lock")
+    return _residue.user_config_lock_path(user_config_path)
 
 
 def _append_to_user_config(
@@ -1738,39 +1742,17 @@ def _default_v2_seed_for_host(host: str) -> tuple[str, ...]:
     )
 
 
-# v0.6.0 deep-review Round 3: the auto-reconciliation rewrite helper
+# v0.6.0 deep-review Round 3: the auto-reconciliation rewrite
 # (``_rewrite_auto_reconciled_default_refs``) advances a stale default-name
 # ref to the bundled default ONLY when the consumer-side ref is a known
 # residue from a prior aa auto-reconciliation pass. Any other minimal
 # default-name ref is a deliberate user pin per the BC-guard contract at
-# pack-architecture.md:678 and must NOT be rewritten. This map is the ledger
-# of bundled-default refs that aa itself auto-assigned to a minimal default
-# row. It includes the ref that is currently bundled, not only past ones, so
-# that the entry is already present when a later bump moves past it.
-_AUTO_RECONCILED_DEFAULT_REF_REWRITES: dict[str, set[str]] = {
-    # v0.5.x aa reconciliation wrote this minimal agent-style row into
-    # consumer projects before the bundled default moved to v0.3.5.
-    # See pack-architecture.md "Reconciliation-aware BC guard refinement"
-    # section and the random-project reproduction (`v0.3.2` stale shape).
-    # Every ref that has ever been the bundled default can appear as
-    # aa-written residue, because reconciliation assigns the then-current
-    # bundled ref into the minimal row. `v0.3.5` (aa v0.6.0) and `v0.3.6`
-    # (aa v0.7.5) are both that. Omitting one silently strands the consumers
-    # healed during its release line: the aa-written row fails the
-    # known-residue check, `_has_explicit_default_override` reads the ref
-    # difference as a deliberate pin, and those projects never reach the
-    # fetch, marker rewrite, or lock refresh.
-    #
-    # The invariant that keeps this list complete is tested rather than
-    # remembered: the current bundled ref must itself be listed, so each ref
-    # is added while it is the default and is already here by the time a
-    # later bump moves away from it. This list was incomplete twice before
-    # that test existed.
-    # v0.6.0 is listed while it *is* the default. Advancing a row to the ref
-    # it already holds is a no-op: the rewrite is guarded by
-    # `entry_ref != bundled_ref`, which short-circuits first.
-    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0"},
-}
+# pack-architecture.md:678 and must NOT be rewritten. The ledger of
+# bundled-default refs that aa itself auto-assigned to a minimal default row
+# lives in ``scripts/packs/residue.py`` (vendored as
+# ``anywhere_agents.packs.residue``), because the composer that bootstrap runs
+# applies the same rewrite and the two must read one list.
+_AUTO_RECONCILED_DEFAULT_REF_REWRITES = _residue.AUTO_RECONCILED_DEFAULT_REF_REWRITES
 _BUNDLED_IDENTITY_URL = "bundled:aa"
 _BUNDLED_IDENTITY_REF = "bundled"
 _AGENT_STYLE_BLOCK_RE = re.compile(
@@ -2481,8 +2463,13 @@ def _detect_bundled_default_drift(project_root: Path) -> set[str]:
     return drifted
 
 
-def _annotate_default_rows(rows, project_root: Path):
-    """Mark bundled defaults and refine no-lock states using disk content."""
+def _annotate_default_rows(rows, project_root: Path, user_config_path=None):
+    """Mark bundled defaults and refine no-lock states using disk content.
+
+    ``user_config_path`` lets the override check read the user-level rows
+    themselves; without it any user-level row that names a source counts as
+    an override.
+    """
     for row in rows:
         name = row.get("name")
         if name not in _DEFAULT_V2_SELECTIONS:
@@ -2519,7 +2506,9 @@ def _annotate_default_rows(rows, project_root: Path):
         # entries fully override the bundled defaults — flagging drift
         # against the bundled would migrate the user's deliberately-pinned
         # entry against their wishes (BC violation).
-        if _has_explicit_default_override(project_root, row, name):
+        if _has_explicit_default_override(
+            project_root, row, name, user_config_path
+        ):
             continue
         # Override BOTH _VERIFY_STATE_DEPLOYED (lock matches old wheel)
         # AND _VERIFY_STATE_MISMATCH. The mismatch case is the post-fix
@@ -2567,10 +2556,53 @@ def _bundled_default_for_name(name: str) -> dict | None:
     return None
 
 
+def _user_rows_are_bundled_default(user_config_path, name: str) -> bool:
+    """True when every user-level row for ``name`` is exactly the bundled default.
+
+    The user-level residue rewrite advances a stale row to the bundled ref
+    and leaves a row that restates the default. That row names a source, so
+    the identity-only check in :func:`_has_explicit_default_override` would
+    read it as a custom URL. This reads the rows themselves and applies the
+    predicate the rewrite uses (``residue.is_bundled_default``): same
+    normalized URL, the bundled ref, no key beyond what reconciliation
+    writes, no ``update_policy``.
+
+    ``False`` whenever the answer cannot be established: no path, an
+    unreadable file, a pack the ledger does not cover, or no row for the
+    name. The caller then keeps treating the row as an override.
+    """
+    if user_config_path is None:
+        return False
+    bundled = _residue.bundled_default_sources(
+        [_bundled_default_for_name(name)], _DEFAULT_V2_SELECTIONS
+    )
+    if name not in bundled:
+        return False
+    try:
+        data = _read_yaml_or_none(user_config_path)
+    except _VerifyParseError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    entries = data.get("packs")
+    if entries is None:
+        entries = data.get("rule_packs")
+    if not isinstance(entries, list):
+        return False
+    rows = [
+        entry for entry in entries
+        if isinstance(entry, dict) and entry.get("name") == name
+    ]
+    return bool(rows) and all(
+        _residue.is_bundled_default(entry, bundled) for entry in rows
+    )
+
+
 def _has_explicit_default_override(
     project_root: Path,
     row: dict,
     name: str,
+    user_config_path=None,
 ) -> bool:
     """Return True when consumer config has an explicit override for ``name``.
 
@@ -2598,9 +2630,23 @@ def _has_explicit_default_override(
     drift detection runs on them so the auto-reconciled minimal entry
     no longer blocks bundled migration (the v0.5.7 ``random``-style
     failure mode that motivated this refinement).
+
+    The user-level layer follows the same rule when ``user_config_path`` is
+    given: a row that is exactly the bundled default (see
+    :func:`_user_rows_are_bundled_default`) is not an override. That row is
+    what the residue rewrite leaves after it advances a stale ref, and it
+    meets a lock still at the old ref before the composer has run. Without
+    this, ``--fix`` would report an identity mismatch for the very row it
+    had just healed. A different URL, a different ref, or any extra key
+    keeps the row an override, as does a missing ``user_config_path``.
     """
     user_ident = row.get("u")
-    if user_ident is not None and len(user_ident) >= 4 and user_ident[3] != _BUNDLED_IDENTITY_URL:
+    if (
+        user_ident is not None
+        and len(user_ident) >= 4
+        and user_ident[3] != _BUNDLED_IDENTITY_URL
+        and not _user_rows_are_bundled_default(user_config_path, name)
+    ):
         return True
 
     bundled_def = _bundled_default_for_name(name)
@@ -2665,8 +2711,11 @@ def _has_explicit_default_override(
     return False
 
 
-def _rewrite_auto_reconciled_default_refs(project_root: Path) -> set[str]:
-    """Advance minimal auto-reconciled bundled-default refs in project YAML.
+def _rewrite_auto_reconciled_default_refs(
+    project_root: Path,
+    user_config_path: Path | None = None,
+) -> set[str]:
+    """Advance aa-written default-pack rows to the bundled default ref.
 
     A minimal default-source row with no ``passive`` / ``active`` /
     ``update_policy`` keys is aa reconciliation residue, not a durable
@@ -2680,77 +2729,32 @@ def _rewrite_auto_reconciled_default_refs(project_root: Path) -> set[str]:
     requires all three artifacts (yaml, lock, AGENTS.md) to converge
     under bare `anywhere-agents`; this helper closes the yaml side.
 
-    Returns the set of pack names whose ref was rewritten (empty set
-    when nothing matched).
+    The same rewrite covers the user-level config when ``user_config_path``
+    is given: reconciliation writes the residue row there too, and the
+    resolver lets a user-level row hold the pack at its ref for every
+    consumer on the machine. The predicate, the ledger, the atomic write and
+    the user-config lock live in ``anywhere_agents.packs.residue``, which the
+    composer that bootstrap runs imports as well, so bootstrap and this
+    command advance the same rows.
+
+    Returns the set of pack names whose ref was rewritten, across both files
+    (empty set when nothing matched).
     """
-    try:
-        import yaml
-    except ImportError:
-        return set()
-
-    path = project_root / "agent-config.yaml"
-    try:
-        data = _read_yaml_or_none(path)
-    except _VerifyParseError:
-        return set()
-    if not isinstance(data, dict):
-        return set()
-
-    key = "packs" if isinstance(data.get("packs"), list) else "rule_packs"
-    entries = data.get(key)
-    if not isinstance(entries, list):
-        return set()
-
-    rewritten: set[str] = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        if name not in _DEFAULT_V2_SELECTIONS:
-            continue
-        if "passive" in entry or "active" in entry or "update_policy" in entry:
-            continue
-
-        bundled = _bundled_default_for_name(name)
-        if not isinstance(bundled, dict):
-            continue
-        bundled_source = bundled.get("source")
-        if not isinstance(bundled_source, dict):
-            continue
-        bundled_url = bundled_source.get("repo") or bundled_source.get("url")
-        bundled_ref = bundled_source.get("ref") or bundled.get("ref")
-        if not isinstance(bundled_url, str) or not isinstance(bundled_ref, str):
-            continue
-
-        source = entry.get("source")
-        if not isinstance(source, dict):
-            continue
-        entry_url = source.get("repo") or source.get("url")
-        entry_ref = source.get("ref") or entry.get("ref")
-        # v0.6.0 deep-review Round 3: only rewrite refs that are KNOWN
-        # aa-reconciliation residue. A minimal default-name entry whose
-        # ref is not in the allow-list is a deliberate user pin (per
-        # pack-architecture.md:678 BC-guard contract) and must survive.
-        known_auto_refs = _AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(name, set())
-        if (
-            isinstance(entry_url, str)
-            and isinstance(entry_ref, str)
-            and _normalize_url(entry_url) == _normalize_url(bundled_url)
-            and entry_ref in known_auto_refs
-            and entry_ref != bundled_ref
-        ):
-            source["ref"] = bundled_ref
-            entry.pop("ref", None)
-            rewritten.add(name)
-
-    if not rewritten:
-        return set()
-
-    out_text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(out_text, encoding="utf-8")
-    os.replace(str(tmp), str(path))
-    return rewritten
+    bundled_packs = [
+        pack_def
+        for pack_def in (
+            _bundled_default_for_name(name) for name in _DEFAULT_V2_SELECTIONS
+        )
+        if isinstance(pack_def, dict)
+    ]
+    rewrites = _residue.advance_residue(
+        user_config_path=user_config_path,
+        project_root=project_root,
+        bundled_packs=bundled_packs,
+        default_names=_DEFAULT_V2_SELECTIONS,
+        emit=log,
+    )
+    return {name for rewrite in rewrites for name, _old, _new in rewrite.advanced}
 
 
 def _classify_pack_states(user, project, lock, lock_health):
@@ -2986,7 +2990,7 @@ def _verify_gather(user_config_path, project_root):
     lock_idents, lock_health = _load_lock_observations(project_root)
     rows = _classify_pack_states(user, project, lock_idents, lock_health)
     rows = _annotate_composed_rows(rows, project_root)
-    rows = _annotate_default_rows(rows, project_root)
+    rows = _annotate_default_rows(rows, project_root, user_config_path)
     env_var_value = os.environ.get("AGENT_CONFIG_PACKS", "")
     return rows, env_var_value
 
@@ -3296,9 +3300,11 @@ def _pack_verify_fix(user_config_path, project_root, args):
     # bundled-default refs in agent-config.yaml BEFORE the verify-gather
     # classifies them as deliberate user pins. Without this, the
     # `random`-project shape (`{name, source: {url, ref: <stale>}}`)
-    # would be left untouched indefinitely. See
-    # `_rewrite_auto_reconciled_default_refs` docstring for details.
-    _rewrite_auto_reconciled_default_refs(project_root)
+    # would be left untouched indefinitely. The user-level config gets the
+    # same treatment: reconciliation writes the residue row there too and
+    # nothing else advanced it. See `_rewrite_auto_reconciled_default_refs`
+    # docstring for details.
+    _rewrite_auto_reconciled_default_refs(project_root, user_config_path)
 
     try:
         rows, env_var_value = _verify_gather(user_config_path, project_root)

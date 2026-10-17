@@ -222,6 +222,196 @@ class StagedContentTests(unittest.TestCase):
         )
 
 
+_FAKE_GUARD = (
+    "class _V:\n"
+    "    def __init__(self, detail):\n"
+    "        self.line = 1\n"
+    "        self.column = 1\n"
+    "        self.detail = detail\n"
+    "        self.excerpt = ''\n"
+    "\n"
+    "def _echo(text, file_path=''):\n"
+    "    return [_V('path=' + file_path)]\n"
+    "\n"
+    "def _boom(text, file_path=''):\n"
+    "    raise RuntimeError('simulated')\n"
+    "\n"
+    "_PATH_AWARE_RULES = frozenset({{'RULE-03', 'RULE-A'}})\n"
+    "\n"
+    "def _agent_style_mechanical():\n"
+    "    return [({label!r}, {fn})]\n"
+)
+
+
+class HookOnlyDetectorTests(unittest.TestCase):
+    """Detectors only hooks run reach the audit through the guard's loader.
+
+    `audit()` runs the CLI's fixed bench scope, which leaves out RULE-03 and,
+    from agent-style 0.7.0, RULE-A. Before this, the pre-review audit never
+    reported an interval written into prose, the finding RULE-03 exists for.
+    """
+
+    def setUp(self) -> None:
+        self.mod = load_module(AUDIT, "_style_audit_hook")
+        try:
+            import agent_style.review  # noqa: F401
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+
+    def _guard(self, tmp, label="RULE-03", fn="_echo"):
+        path = Path(tmp) / "fake_guard.py"
+        path.write_text(_FAKE_GUARD.format(label=label, fn=fn), encoding="utf-8")
+        return self.mod._load_hook_detectors([str(path)])
+
+    def test_a_hook_only_rule_runs_with_the_repository_path(self) -> None:
+        """The detector gets the repository path, not the temp blob's name.
+
+        The real detectors read the file name to recognise an abstract, an
+        introduction, or an appendix. The staged blob is materialised under a
+        hashed name, so passing the blob path would hide all three.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "paper/results.tex", "Short and clean.\n")
+            findings, coverage, error = self.mod.audit_files(
+                ["paper/results.tex"], str(repo), from_index=True,
+                hook_rules=self._guard(tmp))
+        self.assertIsNone(error)
+        self.assertIn(
+            ("RULE-03", "path=paper/results.tex"),
+            {(f["rule"], f["detail"]) for f in findings},
+        )
+        self.assertIn("RULE-03", coverage["partial"])
+
+    def test_a_rule_the_cli_audit_already_ran_is_not_run_twice(self) -> None:
+        """RULE-12 is in the CLI scope, so the guard's copy must not run.
+
+        The guard's RULE-12 here raises; running it would surface as an AUDIT
+        problem, so its absence shows it was skipped.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "notes.md", "Short and clean.\n")
+            findings, _, _ = self.mod.audit_files(
+                ["notes.md"], str(repo), from_index=True,
+                hook_rules=self._guard(tmp, label="RULE-12", fn="_boom"))
+        self.assertEqual([f for f in findings if f["rule"] == "AUDIT"], [])
+
+    def test_a_raising_hook_detector_is_reported_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "results.tex", "Short and clean.\n")
+            findings, _, error = self.mod.audit_files(
+                ["results.tex"], str(repo), from_index=True,
+                hook_rules=self._guard(tmp, fn="_boom"))
+        self.assertIsNone(error)
+        problems = [f for f in findings if f["rule"] == "AUDIT"]
+        self.assertEqual(len(problems), 1)
+        self.assertIn("RULE-03 detector raised RuntimeError", problems[0]["detail"])
+
+    def test_an_old_guard_without_the_loader_is_passed_over(self) -> None:
+        """A consumer's deployed hook can predate the loader; try the next one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "old_guard.py"
+            old.write_text("PROSE_EXTENSIONS = frozenset(['.md'])\n", encoding="utf-8")
+            self.assertEqual(self.mod._load_hook_detectors([str(old)]), (None, frozenset()))
+            new = Path(tmp) / "fake_guard.py"
+            new.write_text(_FAKE_GUARD.format(label="RULE-03", fn="_echo"), encoding="utf-8")
+            rules, path_aware = self.mod._load_hook_detectors([str(old), str(new)])
+        self.assertEqual([label for label, _ in rules], ["RULE-03"])
+        self.assertEqual(path_aware, frozenset({"RULE-03", "RULE-A"}))
+
+    def test_the_guard_beside_the_script_wins_over_the_deployed_hook(self) -> None:
+        """A deployed hook older than the package would leave a new detector out.
+
+        The default order tries the guard shipped beside the audit first. The
+        deployed hook here offers RULE-03 only; the paired guard offers RULE-A.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            deployed = Path(tmp) / "deployed_guard.py"
+            deployed.write_text(_FAKE_GUARD.format(label="RULE-03", fn="_echo"), encoding="utf-8")
+            paired = Path(tmp) / "paired_guard.py"
+            paired.write_text(_FAKE_GUARD.format(label="RULE-A", fn="_echo"), encoding="utf-8")
+            with unittest.mock.patch.object(
+                    self.mod, "_guard_candidates", return_value=[str(deployed), str(paired)]):
+                rules, _ = self.mod._load_hook_detectors()
+            self.assertEqual([label for label, _ in rules], ["RULE-A"])
+            with unittest.mock.patch.object(
+                    self.mod, "_guard_candidates",
+                    return_value=[str(deployed), str(Path(tmp) / "absent.py")]):
+                rules, _ = self.mod._load_hook_detectors()
+            self.assertEqual([label for label, _ in rules], ["RULE-03"],
+                             "the deployed hook is the fallback")
+
+    def _coverage(self, tmp, hook_rules, name="results.tex"):
+        repo = make_repo(Path(tmp) / "repo")
+        stage(repo, name, "Short and clean.\n")
+        _, coverage, error = self.mod.audit_files(
+            [name], str(repo), from_index=True, hook_rules=hook_rules)
+        self.assertIsNone(error)
+        return coverage
+
+    def test_rule_a_runs_beside_the_structural_detector(self) -> None:
+        """RULE-A's structural check runs in `audit()`; the table check must too.
+
+        Only a mechanical run counts as the hook rule having run, so a
+        structural RULE-A result must not suppress the guard's table check.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "results.tex", "Short and clean.\n")
+            findings, _, _ = self.mod.audit_files(
+                ["results.tex"], str(repo), from_index=True,
+                hook_rules=self._guard(tmp, label="RULE-A", fn="_echo"))
+        self.assertIn(("RULE-A", "path=results.tex"),
+                      {(f["rule"], f["detail"]) for f in findings})
+
+    def test_a_raising_hook_detector_is_not_reported_as_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            coverage = self._coverage(tmp, self._guard(tmp, label="RULE-A", fn="_boom"))
+        self.assertNotIn("RULE-A", coverage["covered"])
+
+    def test_a_hook_detector_that_ran_is_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            coverage = self._coverage(tmp, self._guard(tmp, label="RULE-A", fn="_echo"))
+        self.assertIn("RULE-A", coverage["covered"])
+
+    def test_without_a_guard_the_package_hook_detectors_are_not_covered(self) -> None:
+        """No guard means no hook detector ran, and coverage has to say so.
+
+        RULE-A's structural detector still runs through `audit()`, so without
+        this the table check would hide behind a covered RULE-A.
+        """
+        from agent_style.review import detectors_mech
+
+        def quiet(text, file_path=""):
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(detectors_mech, "_rule_a", quiet, create=True):
+                coverage = self._coverage(tmp, (None, frozenset()))
+        self.assertNotIn("RULE-A", coverage["covered"])
+        self.assertIn("RULE-A", coverage["partial"])
+
+    def test_the_real_guard_reports_an_interval_in_staged_prose(self) -> None:
+        """End to end with this repository's guard and the installed package."""
+        import agent_style
+
+        release = tuple(int(p) for p in agent_style.__version__.split(".")[:3])
+        if release < (0, 6, 0):
+            self.skipTest("RULE-03 ships with agent-style 0.6.0")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "results.tex",
+                  "Our method reaches 0.71 [0.65, 0.77] on the main split.\n")
+            findings, _, _ = self.mod.audit_files(
+                ["results.tex"], str(repo), from_index=True,
+                hook_rules=self.mod._load_hook_detectors([str(GUARD)]))
+        self.assertIn("RULE-03", {f["rule"] for f in findings})
+
+
 class FileLevelProblemTests(unittest.TestCase):
     """A finding about a file has no line, and must not be filtered by line.
 

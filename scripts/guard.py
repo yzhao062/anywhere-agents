@@ -705,7 +705,7 @@ def check_writing_style(tool_name, tool_input):
 _STYLE_ADVISORY_LIMIT = 5
 
 
-# The rules the advisory promises, in AGENTS.md and in the docs both repos
+# The rules the advisory promises, in the guard-hook docs both repos
 # ship. Reaching into private names is a bet on a package the hook does not
 # own, so the set is spelled once here and the loader below refuses a partial
 # match: advertising six rules while silently running one is worse than
@@ -731,10 +731,17 @@ _ADVISORY_RULE_ATTRS = (
 _RULE_03_ATTR = "_rule_03"
 _RULE_03_MIN_VERSION = (0, 6, 0)
 
+# agent-style 0.7.0 added `_rule_a` for prose written into LaTeX table cells.
+# It is required from that release on, under the same contract. It runs right
+# after RULE-03, so both display rules sit inside the cap.
+_RULE_A_ATTR = "_rule_a"
+_RULE_A_MIN_VERSION = (0, 7, 0)
+
 # Detectors that take the path of the file being written as well as its text.
-# RULE-03 reads it to recognise abstract and introduction files. The others
-# are called with the text alone, as they were before it existed.
-_PATH_AWARE_RULES = frozenset({"RULE-03"})
+# RULE-03 reads it to recognise abstract and introduction files, and both read
+# it to tell a LaTeX source and an appendix or supplement apart. The others
+# are called with the text alone, as they were before these existed.
+_PATH_AWARE_RULES = frozenset({"RULE-03", "RULE-A"})
 
 
 def _agent_style_version():
@@ -777,8 +784,8 @@ def _agent_style_mechanical():
     subset it found, so a release that renamed five of the six private
     functions would have left the hook running one rule, the documentation
     promising six, and every behaviour test green. The release decides which
-    set that is: `_ADVISORY_RULE_ATTRS` for anything older than 0.6.0 or with
-    a version that cannot be read, and that set plus `_rule_03` from 0.6.0.
+    set that is. Before 0.6.0, or with a version that cannot be read, it is
+    `_ADVISORY_RULE_ATTRS`. 0.6.0 adds `_rule_03`, and 0.7.0 adds `_rule_a`.
     """
     try:
         from agent_style.review import detectors_mech
@@ -794,7 +801,9 @@ def _agent_style_mechanical():
     # still runs it, where a human asked for the full audit.
     attrs = _ADVISORY_RULE_ATTRS
     version = _agent_style_version()
-    if version is not None and version >= _RULE_03_MIN_VERSION:
+    if version is not None and version >= _RULE_A_MIN_VERSION:
+        attrs = (_RULE_03_ATTR, _RULE_A_ATTR) + _ADVISORY_RULE_ATTRS
+    elif version is not None and version >= _RULE_03_MIN_VERSION:
         attrs = (_RULE_03_ATTR,) + _ADVISORY_RULE_ATTRS
     rules = []
     for name in attrs:

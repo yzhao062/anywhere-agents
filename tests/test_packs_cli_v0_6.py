@@ -43,6 +43,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 # Repo root added so ``from scripts.packs import X`` (used by some
 # composer modules) resolves consistently with ``from packs import X``.
 sys.path.insert(0, str(ROOT))
+# tests/ is on sys.path under ``unittest discover -s tests`` but not under
+# ``python -m unittest tests.<module>``; put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The ref the bundled manifest pins agent-style at. Read rather than
 # retyped: these fixtures have to match the manifest, and a literal here
@@ -1179,7 +1182,7 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
 
     def _build_fixture(
         self,
-        agent_config_yaml_text: str,
+        agent_config_yaml_text: str | None,
         project_ref: str | None = None,
     ) -> Path:
         """Lay down the smoke-28 fixture rooted at a fresh tempdir.
@@ -1187,7 +1190,9 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
         Caller passes the full ``agent-config.yaml`` text so each test
         method can vary the project-side entry shape (minimal vs.
         explicit override) while sharing the bundled-manifest, lock,
-        and fake-archive scaffolding.
+        and fake-archive scaffolding. ``None`` writes no
+        ``agent-config.yaml`` at all, the project of a user who never
+        declared a pack.
 
         ``project_ref`` controls the seed ref written into
         ``pack-lock.json`` (and is also the value the caller is expected
@@ -1238,7 +1243,8 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
         _write(bootstrap_dir / "packs.yaml", manifest)
         _write(self.root / ".agent-config" / "AGENTS.md", "# upstream\n")
 
-        _write(self.root / "agent-config.yaml", agent_config_yaml_text)
+        if agent_config_yaml_text is not None:
+            _write(self.root / "agent-config.yaml", agent_config_yaml_text)
 
         # Seed the lock with the OLD source_path (drift signal). When
         # ``project_ref`` is stale, ``requested_ref`` is also stale so
@@ -1329,7 +1335,27 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
         with patch.object(locks, "acquire", side_effect=_ctx):
             yield
 
-    def _run_canonical_apply(self) -> tuple[int, str, str]:
+    def _composer_user_config_path(self) -> Path:
+        """The user-level config path the composer resolves under ``_env_patch``.
+
+        ``_run_canonical_apply`` writes the user config to
+        ``root/user-config.yaml`` by default, a file the in-process composer
+        never reads. A test whose outcome depends on the composer seeing the
+        user-level row passes this path as ``user_path`` instead, so the CLI
+        and the composer share one file as they do on a real machine.
+        """
+        from packs import config as config_mod
+
+        with self._env_patch():
+            path = config_mod.user_config_path()
+        assert path is not None
+        return path
+
+    def _run_canonical_apply(
+        self,
+        user_config_text: str = "packs: []\n",
+        user_path: Path | None = None,
+    ) -> tuple[int, str, str]:
         """Drive ``_pack_main(["verify", "--fix", "--yes"])`` against
         the fixture.
 
@@ -1359,8 +1385,11 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
             from packs import source_fetch
             import compose_packs
 
-            user_path = self.root / "user-config.yaml"
-            user_path.write_text("packs: []\n", encoding="utf-8")
+            if user_path is None:
+                user_path = self.root / "user-config.yaml"
+            user_path.parent.mkdir(parents=True, exist_ok=True)
+            user_path.write_text(user_config_text, encoding="utf-8")
+            self.user_config_path = user_path
 
             def _in_process_composer(
                 project_root, *composer_args, env_extra=None,
@@ -1537,6 +1566,210 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
             "minimal entry must not gain a synthetic active: block",
         )
 
+    def test_user_level_residue_is_advanced_by_the_canonical_apply(self) -> None:
+        """The user-level config carries the same aa-written row, and a row
+        there holds the pack at its ref for every consumer on the machine.
+        Bare ``anywhere-agents`` must advance it, not only the project file.
+
+        The composer's own advance is switched off so the assertion is about
+        the CLI path alone; the composer path has its own tests in
+        ``test_packs_residue.py``. The project row and the lock sit at the
+        bundled ref, the state a machine is in once a bootstrap has composed
+        the new default: the stale user-level row is then the only identity
+        that disagrees, so ``--fix`` refuses to resolve until it is advanced.
+        """
+        import compose_packs
+
+        self._build_fixture(
+            "packs:\n"
+            f"  - name: {self.pack_name}\n"
+            "    source:\n"
+            f"      url: {self.bundled_url}\n"
+            f"      ref: {self.bundled_ref}\n",
+            project_ref=self.bundled_ref,
+        )
+        user_text = (
+            "packs:\n"
+            f"  - name: {self.pack_name}\n"
+            "    source:\n"
+            f"      url: {self.bundled_url}\n"
+            f"      ref: {self.stale_project_ref}\n"
+        )
+        with patch.object(compose_packs, "_advance_default_ref_residue"):
+            rc, out, err = self._run_canonical_apply(user_config_text=user_text)
+        self.assertEqual(
+            rc, 0,
+            msg=f"canonical apply rc={rc}; stdout={out!r}; stderr={err!r}",
+        )
+        post_user = self.user_config_path.read_text(encoding="utf-8")
+        self.assertNotIn(f"ref: {self.stale_project_ref}", post_user)
+        self.assertIn(f"ref: {self.bundled_ref}", post_user)
+        self.assertEqual(
+            err.count("advanced stale default pack ref"), 1,
+            msg=f"expected one summary line; stderr={err!r}",
+        )
+
+        from packs import state as state_mod
+        new_lock = state_mod.load_pack_lock(
+            self.root / ".agent-config" / "pack-lock.json"
+        )
+        self.assertEqual(
+            new_lock["packs"][self.pack_name]["requested_ref"],
+            self.bundled_ref,
+        )
+        agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("NEW compact content", agents_md)
+        self.assertIn(f"version={self.bundled_ref}", agents_md)
+
+    def _seed_old_agents_md(self, ref: str) -> str:
+        """Write the ``AGENTS.md`` a machine holds before the bundled bump:
+        the agent-style block at ``ref`` with the OLD body. Returns the text.
+        """
+        import hashlib
+
+        body = "# OLD full-body content\n"
+        sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        text = (
+            "# project rules\n\n"
+            f"<!-- rule-pack:{self.pack_name}:begin version={ref} sha256={sha} -->\n"
+            f"{body}"
+            f"<!-- rule-pack:{self.pack_name}:end -->\n"
+        )
+        (self.root / "AGENTS.md").write_text(text, encoding="utf-8")
+        return text
+
+    def _user_row(self, ref: str, *, url: str | None = None, extra: str = "") -> str:
+        """A user-level pack row; ``extra`` is appended as raw YAML lines."""
+        return (
+            "packs:\n"
+            f"  - name: {self.pack_name}\n"
+            "    source:\n"
+            f"      url: {url or self.bundled_url}\n"
+            f"      ref: {ref}\n"
+            f"{extra}"
+        )
+
+    def test_user_level_residue_heals_while_the_lock_is_still_at_the_old_ref(
+        self,
+    ) -> None:
+        """The state a machine is in before the composer has run the new pin.
+
+        The user-level config holds aa's residue row at an old ledger ref,
+        the project declares no ``agent-style`` row, and ``pack-lock.json``
+        and ``AGENTS.md`` are still on the old ref and body. The residue
+        rewrite advances the user row first, so the user layer reads the
+        bundled ref while the lock reads the old one: an identity mismatch.
+        That mismatch has to turn into bundled-default drift so the composer
+        runs and heals the lock. Treating the advanced row as a custom URL
+        made ``--fix`` return rc=1 ("identity mismatch ... refusing to
+        auto-resolve") after it had already rewritten the user config. The
+        earlier fixture seeded the lock at the bundled ref, so it never met
+        that mismatch.
+        """
+        import compose_packs
+
+        self._build_fixture(None, project_ref=self.stale_project_ref)
+        self._seed_old_agents_md(self.stale_project_ref)
+        self.assertFalse((self.root / "agent-config.yaml").exists())
+        # The composer must take the patched archive, never the raw-URL
+        # fallback; a network attempt fails the run rather than passing it.
+        with patch.object(
+            compose_packs, "_advance_default_ref_residue"
+        ), patch(
+            "urllib.request.urlopen",
+            side_effect=AssertionError("unexpected network fetch"),
+        ):
+            rc, out, err = self._run_canonical_apply(
+                user_config_text=self._user_row(self.stale_project_ref),
+                user_path=self._composer_user_config_path(),
+            )
+        self.assertEqual(
+            rc, 0,
+            msg=f"canonical apply rc={rc}; stdout={out!r}; stderr={err!r}",
+        )
+        self.assertNotIn("identity mismatch", out)
+
+        post_user = self.user_config_path.read_text(encoding="utf-8")
+        self.assertNotIn(f"ref: {self.stale_project_ref}", post_user)
+        self.assertIn(f"ref: {self.bundled_ref}", post_user)
+
+        from packs import state as state_mod
+        new_lock = state_mod.load_pack_lock(
+            self.root / ".agent-config" / "pack-lock.json"
+        )
+        self.assertEqual(
+            new_lock["packs"][self.pack_name]["requested_ref"],
+            self.bundled_ref,
+            "the composer must run and move the lock to the bundled ref",
+        )
+        agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn(f"version={self.bundled_ref}", agents_md)
+        self.assertNotIn(f"version={self.stale_project_ref}", agents_md)
+        self.assertIn("NEW compact content", agents_md)
+        self.assertNotIn("OLD full-body content", agents_md)
+
+    def test_user_level_pin_still_blocks_auto_resolve(self) -> None:
+        """A user-level row that is not exactly the bundled default stays an
+        explicit override, so a lock at the old ref still ends in the
+        identity-mismatch refusal, with nothing rewritten and no composer run.
+
+        Each case differs from the bundled default in one respect only, so a
+        predicate that ignored that respect would let the row through: a
+        ``locked`` policy or a shape key at the bundled ref, a ref the ledger
+        does not list, and a fork URL at the bundled ref.
+        """
+        pin_policy = "    update_policy: locked\n"
+        pin_passive = (
+            "    passive:\n"
+            "      - files:\n"
+            "          - from: docs/rule-pack.md\n"
+            "            to: AGENTS.md\n"
+        )
+        cases = {
+            "update_policy locked": self._user_row(
+                self.bundled_ref, extra=pin_policy
+            ),
+            "passive key": self._user_row(self.bundled_ref, extra=pin_passive),
+            "ref outside the ledger": self._user_row("v0.2.0"),
+            "fork url at the bundled ref": self._user_row(
+                self.bundled_ref,
+                url="https://github.com/someone-else/agent-style",
+            ),
+        }
+        for label, user_text in cases.items():
+            with self.subTest(label):
+                self._build_fixture(None, project_ref=self.stale_project_ref)
+                old_agents_md = self._seed_old_agents_md(self.stale_project_ref)
+                rc, out, err = self._run_canonical_apply(
+                    user_config_text=user_text,
+                    user_path=self._composer_user_config_path(),
+                )
+                self.assertEqual(
+                    rc, 1,
+                    msg=f"{label}: rc={rc}; stdout={out!r}; stderr={err!r}",
+                )
+                self.assertIn("identity mismatch", out)
+                self.assertIn("refusing to auto-resolve", out)
+                self.assertEqual(
+                    self.user_config_path.read_text(encoding="utf-8"),
+                    user_text,
+                    "a deliberate pin is left exactly as written",
+                )
+
+                from packs import state as state_mod
+                lock = state_mod.load_pack_lock(
+                    self.root / ".agent-config" / "pack-lock.json"
+                )
+                self.assertEqual(
+                    lock["packs"][self.pack_name]["requested_ref"],
+                    self.stale_project_ref,
+                    "the composer must not run behind a pin",
+                )
+                self.assertEqual(
+                    (self.root / "AGENTS.md").read_text(encoding="utf-8"),
+                    old_agents_md,
+                )
+
     def test_override_preservation_parallel_fixture(self) -> None:
         """Parallel fixture: ``agent-config.yaml`` carries explicit
         user-authored ``passive`` and ``update_policy`` keys (a
@@ -1623,7 +1856,7 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
     def test_minimal_entry_with_unrecognized_ref_is_preserved_as_pin(self) -> None:
         """v0.6.0 deep-review Round 3 over-fire guard: a minimal
         default-pack row is NOT automatically aa residue for every old
-        ref. Only refs in the explicit ``_AUTO_RECONCILED_DEFAULT_REF_REWRITES``
+        ref. Only refs in the explicit ``AUTO_RECONCILED_DEFAULT_REF_REWRITES``
         allow-list may be advanced; any other minimal default-name ref
         is a deliberate user pin and must survive byte-for-byte (per
         pack-architecture.md:678 BC-guard contract).
@@ -1798,15 +2031,17 @@ class TestAutoReconciledResidueSetStaysComplete(unittest.TestCase):
     """
 
     def test_current_bundled_ref_is_listed_as_migratable(self) -> None:
-        sys.path.insert(0, str(ROOT / "packages" / "pypi"))
-        from anywhere_agents import cli
+        from packs import residue
 
-        listed = cli._AUTO_RECONCILED_DEFAULT_REF_REWRITES.get("agent-style", set())
+        listed = residue.AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(
+            "agent-style", set()
+        )
         self.assertIn(
             BUNDLED_AGENT_STYLE_REF, listed,
             "bootstrap/packs.yaml pins agent-style at "
             f"{BUNDLED_AGENT_STYLE_REF!r}, which is not in "
-            "_AUTO_RECONCILED_DEFAULT_REF_REWRITES. Add it now: once the "
+            "AUTO_RECONCILED_DEFAULT_REF_REWRITES in scripts/packs/residue.py. "
+            "Add it now: once the "
             "bundled default moves past this ref, every project aa "
             "reconciled while it was current carries a minimal row at it, "
             "and an unlisted ref reads as a deliberate pin that never "
@@ -1832,18 +2067,17 @@ class TestAutoReconciledResidueSetStaysComplete(unittest.TestCase):
             git log -p --all -- bootstrap/packs.yaml bootstrap/rule-packs.yaml
               | grep -E '^\\+.*ref: v[0-9]' | sort -u
         """
-        sys.path.insert(0, str(ROOT / "packages" / "pypi"))
-        from anywhere_agents import cli
+        from packs import residue
 
-        listed = cli._AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(
+        listed = residue.AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(
             "agent-style", set()
         )
-        expected_through_v060 = {
-            "v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0",
+        expected_through_v070 = {
+            "v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0", "v0.7.0",
         }
         self.assertEqual(
             listed,
-            expected_through_v060,
+            expected_through_v070,
             "append each new bundled ref to this ledger and the production "
             "set; do not replace an earlier ref",
         )
@@ -1862,7 +2096,7 @@ class TestSmoke28MinimalAutoReconciledFromV036(
 ):
     """The same convergence, from the other ref aa has auto-written.
 
-    ``_AUTO_RECONCILED_DEFAULT_REF_REWRITES`` listed only ``v0.3.2`` while
+    ``AUTO_RECONCILED_DEFAULT_REF_REWRITES`` listed only ``v0.3.2`` while
     ``v0.3.6`` was the bundled default for an entire release line, so every
     project aa reconciled during that line carries a minimal ``v0.3.6`` row.
     Bumping the bundled pin without listing it stranded exactly those

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vendor scripts/packs/{auth,source_fetch,schema,locks}.py into the PyPI package.
+"""Vendor scripts/packs/{auth,source_fetch,schema,locks,residue}.py into the PyPI package.
 
 Source of truth: scripts/packs/*.py
 Vendored copies: packages/pypi/anywhere_agents/packs/*.py
@@ -19,7 +19,7 @@ DST = REPO / "packages" / "pypi" / "anywhere_agents" / "packs"
 # so ``tests/test_vendored_package_imports.py`` imports the vendored tree
 # in an isolated subprocess and statically asserts the import closure
 # (anywhere-agents#18).
-MODULES = ("auth.py", "source_fetch.py", "schema.py", "locks.py")
+MODULES = ("auth.py", "source_fetch.py", "schema.py", "locks.py", "residue.py")
 
 
 def vendor():

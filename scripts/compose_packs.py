@@ -61,6 +61,7 @@ from packs import locks  # noqa: E402
 from packs import noise_budget  # noqa: E402
 from packs import passive as passive_mod  # noqa: E402
 from packs import reconciliation  # noqa: E402
+from packs import residue as residue_mod  # noqa: E402
 from packs import schema  # noqa: E402
 from packs import source_fetch  # noqa: E402
 from packs import state as state_mod  # noqa: E402
@@ -747,6 +748,35 @@ def _default_v2_selections_for_host(host: str) -> list[dict[str, str]]:
     ]
 
 
+def _advance_default_ref_residue(root: Path, parsed: dict[str, Any]) -> None:
+    """Advance aa-written default-pack rows to the bundled default ref.
+
+    aa's own reconciliation writes a minimal ``{name, source: {url, ref}}``
+    row into the user-level config and the project ``agent-config.yaml``.
+    The resolver lets the most specific layer win, so after a bundled pin bump
+    that row would keep the old ref and hold every consumer on it. The
+    ``anywhere-agents`` CLI advanced such a row in the project file only;
+    bootstrap ran this composer directly and never did, and nothing touched
+    the user-level row. Doing it here, before any layer is resolved, makes
+    bootstrap and the CLI agree. See ``packs/residue.py`` for the predicate
+    and the ledger.
+
+    Housekeeping must not block composition, so every failure is a warning.
+    """
+    try:
+        residue_mod.advance_residue(
+            user_config_path=config_mod.user_config_path(),
+            project_root=root,
+            bundled_packs=parsed.get("packs", []),
+            default_names=DEFAULT_V2_SELECTION_NAMES,
+            emit=lambda message: sys.stderr.write(f"{message}\n"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail composition over this
+        sys.stderr.write(
+            f"warning: could not advance stale default pack refs: {exc}\n"
+        )
+
+
 def _pack_def_passive_from_paths(pack_def: dict[str, Any]) -> set[str]:
     """Return the set of ``passive[].files[].from`` source paths declared
     by a pack definition (may be the bundled-fallback substitute).
@@ -1187,6 +1217,16 @@ def _compose_main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
+
+    # Advance aa-written default rows that still carry a previous bundled
+    # ref, in the user-level config and the project agent-config.yaml,
+    # before any layer is resolved: both resolver passes below then see the
+    # advanced rows, and a stale row cannot pin a default pack to an old ref.
+    # An explicit ``--manifest`` is a one-off input for this invocation, not
+    # the bundled default: its refs must never be written into the user-level
+    # or project config, so the advance is skipped for it.
+    if args.manifest is None:
+        _advance_default_ref_residue(root, parsed)
 
     # v0.5.0 Phase 8 carry-forward A: parse-time credential-URL rejection
     # across every config layer (user-level, project-tracked,

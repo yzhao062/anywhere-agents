@@ -108,6 +108,63 @@ def _load_scope_predicates(candidates=None):
 PROSE_EXTENSIONS, AGENT_IO_SEGMENT = _load_scope_predicates()
 
 
+def _load_hook_detectors(candidates=None):
+    """Return (rules, path_aware) from guard.py's release-gated loader.
+
+    `audit()` follows the CLI, which keeps its published bench scope fixed.
+    It therefore omits the detectors only hooks run: RULE-03 from agent-style
+    0.6.0 and RULE-A from 0.7.0. The guard already decides which detectors a
+    release promises, so the audit asks the guard rather than keeping a
+    second list.
+
+    The guard shipped beside this script comes first and the deployed hook is
+    the fallback. A consumer's deployed hook can be older than the package it
+    runs against, and a release-gated loader that predates a detector would
+    leave it out without a trace. A candidate must expose both the loader and
+    `_PATH_AWARE_RULES`; one that lacks either is passed over. With no usable
+    guard, `rules` is None, and the caller reports the package's own hook
+    detectors as not run.
+    """
+    if candidates is None:
+        candidates = list(reversed(_guard_candidates()))
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location("_ir_guard_rules", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            loader = getattr(module, "_agent_style_mechanical", None)
+            path_aware = getattr(module, "_PATH_AWARE_RULES", None)
+            if not callable(loader) or path_aware is None:
+                continue
+            return list(loader() or []), frozenset(path_aware)
+        except Exception:
+            continue
+    return None, frozenset()
+
+
+def _package_hook_rules():
+    """Labels of the `_rule_*` detectors the installed package carries.
+
+    Used only for coverage. A detector here that neither `audit()` nor the
+    guard's set ran is reported as a detector that did not run, so a missing
+    guard or a failed hook check cannot read as full coverage.
+    """
+    try:
+        from agent_style.review import detectors_mech
+    except Exception:
+        return set()
+    return {
+        name.replace("_rule_", "RULE-").upper()
+        for name in dir(detectors_mech)
+        if name.startswith("_rule_") and name[6:].isalnum()
+        and callable(getattr(detectors_mech, name, None))
+    }
+
+
 def is_prose_target(path):
     """True when path is prose the author owns, rather than text being carried.
 
@@ -215,8 +272,14 @@ def _materialize_index_blob(repo, rel, tmpdir):
     return path
 
 
-def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False):
+def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
+                hook_rules=None):
     """Run the deterministic audit over paths.
+
+    `hook_rules` is `(rules, path_aware)` as `_load_hook_detectors` returns
+    it, and is loaded from the guard when None. Each of those rules runs only
+    where `audit()` did not already run its mechanical detector, so no rule is
+    reported twice.
 
     With `from_index`, each file is audited as it is STAGED rather than as it
     sits in the working tree. Returns (findings, coverage, error). `coverage`
@@ -233,6 +296,10 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False):
         return [], {}, f"agent_style is not importable ({exc.__class__.__name__})"
 
     import dataclasses
+
+    if hook_rules is None:
+        hook_rules = _load_hook_detectors()
+    extra_rules, path_aware = hook_rules
 
     findings = []
     ran_detectors = {}
@@ -275,6 +342,53 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False):
                         "detail": v.get("detail", ""),
                         "excerpt": v.get("excerpt", ""),
                     })
+            if not extra_rules:
+                continue
+            already = {
+                r.get("rule") for r in result.get("rule_results", [])
+                if r.get("detector") == "mechanical" and r.get("status") != "skipped"
+            }
+            try:
+                with open(target, encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+            except OSError as exc:
+                problem(rel, f"could not read for hook-only rules: {exc.__class__.__name__}")
+                for label, _ in extra_rules:
+                    skipped_detectors.setdefault(label, set()).add("mechanical")
+                continue
+            for label, fn in extra_rules:
+                if label in already:
+                    continue
+                try:
+                    # The repository path, not the temp blob's hashed name:
+                    # these detectors read the file name to recognise an
+                    # abstract, an introduction, or an appendix.
+                    violations = fn(text, file_path=rel) if label in path_aware else fn(text)
+                except Exception as exc:
+                    problem(rel, f"{label} detector raised {exc.__class__.__name__}")
+                    skipped_detectors.setdefault(label, set()).add("mechanical")
+                    continue
+                ran_detectors.setdefault(label, set()).add("mechanical")
+                if label in noisy_rules:
+                    continue
+                for v in violations:
+                    findings.append({
+                        "file": rel,
+                        "line": getattr(v, "line", 0),
+                        "column": getattr(v, "column", 0),
+                        "rule": label,
+                        "detail": getattr(v, "detail", ""),
+                        "excerpt": getattr(v, "excerpt", ""),
+                    })
+
+    # A detector the package carries that nothing ran, because no guard could
+    # supply it or its release gate left it out, is a detector that did not
+    # run. Without this, a structural RULE-A pass reads as full coverage while
+    # the table check never ran.
+    if ran_detectors:
+        for label in _package_hook_rules():
+            if "mechanical" not in ran_detectors.get(label, set()):
+                skipped_detectors.setdefault(label, set()).add("mechanical")
 
     findings.sort(key=lambda f: (f["file"], f["line"], f["column"]))
     # A suppressed rule ran and had its findings discarded, so it belongs in
@@ -409,7 +523,8 @@ def _run(args):
     if coverage.get("partial"):
         print(f"Partially covered ({len(coverage['partial'])}): "
               f"{', '.join(coverage['partial'])}")
-        print("  The mechanical half ran; the semantic half did not.")
+        print("  Some detectors ran and others did not: the semantic half, or a "
+              "hook-only check that failed or that no guard could supply.")
     if coverage.get("suppressed"):
         print(f"Suppressed by policy ({len(coverage['suppressed'])}): "
               f"{', '.join(coverage['suppressed'])}")

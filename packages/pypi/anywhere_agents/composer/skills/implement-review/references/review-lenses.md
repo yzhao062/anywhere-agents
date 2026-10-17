@@ -32,10 +32,10 @@ In a revision, flag accretion too. Keep evidence, methods, and disclosures neede
 1. **Soundness** -- Are claims well-supported by theoretical analysis or experimental evidence? Are there methodological flaws? (NeurIPS 1-4, ACL 1-5)
 2. **Novelty and originality** -- Does the work present new ideas, methods, or combinations? How does it differ from prior work? (NeurIPS, ICLR, AAAI)
 3. **Significance** -- Does it address an important problem? Will it influence future research or practice? (NeurIPS 1-4, ICLR)
-4. **Clarity and presentation** -- Can a knowledgeable reader follow the exposition? Is it well-organized? Does the prose state each result's pattern and leave full numbers and intervals to tables, without precise figures stacked across consecutive sentences or crowding the abstract and introduction? (NeurIPS 1-4, ICLR)
+4. **Clarity and presentation** -- Can a knowledgeable reader follow the exposition? Is it well-organized? Does the prose state each result's pattern at the precision its claim needs? Per-item numbers, intervals, and test statistics belong in tables, and precise figures should not stack across sentences, least of all in the abstract and introduction. A robustness check or estimator detail that leaves a claim unchanged gets one main-text clause and an appendix, unless a reader or the venue needs more. (NeurIPS 1-4, ICLR)
 5. **Related work** -- Are key references present and fairly characterized? Is the positioning in the literature accurate? (ICLR, AISTATS)
 6. **Reproducibility** -- Is there enough detail (setup, hyperparameters, code, data) to reproduce the results? (ACL 1-5, AISTATS)
-7. **Figures and tables** -- Do they add information? Are captions self-contained? Are axes labeled and readable?
+7. **Figures and tables** -- Do they add information? Each table cell should hold a number, a label, or a short phrase, with anything that needs a sentence in the text. A caption names what the display shows, the pattern to read, and what a reader needs to read it, such as an error-bar definition. Results, setup narration, and caveats go to the text or an appendix. Are axes labeled and readable?
 8. **Limitations and ethical concerns** -- Are limitations honestly disclosed, with material scope attached to each claim and general limitations collected in a dedicated section? Any potential negative societal impact? (NeurIPS, ACL)
 9. **Writing quality** -- Grammar, consistency of notation, adherence to venue style.
 
