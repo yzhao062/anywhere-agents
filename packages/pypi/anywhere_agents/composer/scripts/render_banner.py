@@ -376,6 +376,95 @@ def read_event_ts(root: str) -> Optional[float]:
     return None
 
 
+_AGENT_STYLE_BLOCK_RE = re.compile(r"<!--\s*rule-pack:agent-style:begin\s+version=(?P<ref>[^\s>]+)")
+# One pack entry: its indented lines up to the next "- name:" item.
+_PACK_ENTRY_RE = re.compile(
+    r"-[ \t]*name:[ \t]*['\"]?agent-style['\"]?[ \t]*\n"
+    r"(?P<body>(?:(?![ \t]*-[ \t]*name:)[ \t]+.*\n|[ \t]*\n)*)"
+)
+_PACK_REF_RE = re.compile(r"^\s*ref:\s*['\"]?(?P<ref>[^'\"\s#]+)", re.MULTILINE)
+# A stable release ref, whole. A branch, a prerelease such as v0.8.0rc1, or a
+# suffixed ref such as v0.7.0-dev has no package version to pin.
+_RELEASE_REF_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+_HOOK_OFF_VALUES = ("off", "0", "disabled", "false", "no")
+
+
+def agent_style_installed() -> Optional[str]:
+    """The agent_style release this interpreter imports, or None when it has none.
+
+    In a Claude Code consumer session the SessionStart hook renders the banner
+    with the interpreter that the guard also resolves through
+    ~/.claude/hooks/_python, so there this is the package the guard's advisory
+    imports. A render from a source repository, a standalone bootstrap, or a
+    Codex session reads the interpreter that rendered it. A package without a
+    version reads as "unknown", which the check treats as older, as the guard
+    does.
+    """
+    try:
+        import importlib
+        module = importlib.import_module("agent_style")
+    except Exception:
+        return None
+    version = getattr(module, "__version__", None)
+    return str(version) if version else "unknown"
+
+
+def _bundled_agent_style_ref(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    entry = _PACK_ENTRY_RE.search(text)
+    if not entry:
+        return None
+    ref = _PACK_REF_RE.search(entry.group("body"))
+    return ref.group("ref") if ref else None
+
+
+def agent_style_expected(root: str, consumer: bool) -> Optional[str]:
+    """The agent-style release whose rules this repository loads.
+
+    A consumer reads the version its composed AGENTS.md block records, so a
+    repository without the pack expects nothing. A source repository has no
+    composed block and reads the bundled default from bootstrap/packs.yaml.
+    """
+    if consumer:
+        match = _AGENT_STYLE_BLOCK_RE.search(_read_text(os.path.join(root, "AGENTS.md")) or "")
+        return match.group("ref") if match else None
+    return _bundled_agent_style_ref(_read_text(os.path.join(root, "bootstrap", "packs.yaml")))
+
+
+def _switch_off(name: str, env: Any, settings_env: dict) -> bool:
+    value = env.get(name)
+    if value is None:
+        value = settings_env.get(name, "")
+    return str(value).strip().lower() in _HOOK_OFF_VALUES
+
+
+def python_command(python: str, platform: Optional[str] = None) -> str:
+    """The interpreter as a command a shell runs. A path with a space is
+    quoted, and on Windows it also takes PowerShell's call operator, without
+    which a quoted path is printed as a string rather than run."""
+    if " " not in python:
+        return python
+    quoted = '"%s"' % python
+    return "& " + quoted if (platform or sys.platform) == "win32" else quoted
+
+
+def agent_style_fields(root: str, consumer: bool, environ: Optional[dict] = None) -> dict:
+    env = os.environ if environ is None else environ
+    settings_env = _settings_env(os.path.join(home_dir(), ".claude", "settings.json"))
+    python = sys.executable or "python"
+    return {
+        "installed": agent_style_installed(),
+        "expected": agent_style_expected(root, consumer),
+        "python": python,
+        "command": python_command(python),
+        # The guard turns its advisory off under either switch: the per-gate
+        # AGENT_STYLE_HOOK or the legacy AGENT_CONFIG_GATES blanket.
+        "disabled": _switch_off("AGENT_STYLE_HOOK", env, settings_env)
+        or _switch_off("AGENT_CONFIG_GATES", env, settings_env),
+    }
+
+
 def pack_fields(root: str) -> dict:
     """Gap and update counts through the vendored helper beside this file."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -431,6 +520,35 @@ def codex_issues(codex: dict) -> list:
     return issues
 
 
+def agent_style_issues(state: Optional[dict]) -> list:
+    """A guard advisory that cannot run the rules this repository loads.
+
+    The guard imports agent_style from the hook interpreter and gates its
+    rule set on that release, so a missing or older package narrows the
+    advisory without any error. A ref that is not a stable release, such as
+    main or v0.8.0rc1, has no version to pin and is not reported.
+    """
+    if not state or state.get("disabled"):
+        return []
+    expected = state.get("expected")
+    match = _RELEASE_REF_RE.match(str(expected).strip()) if expected else None
+    if match is None:
+        return []
+    want = tuple(int(part) for part in match.groups())
+    python = state.get("python") or "python"
+    command = state.get("command") or python_command(python)
+    pin = "%d.%d.%d" % want
+    installed = state.get("installed")
+    if installed is None:
+        return ["agent-style advisory off: %s has no agent_style (run `%s -m pip install agent-style==%s`)"
+                % (python, command, pin)]
+    have = _parse_version(installed)
+    if have is None or have < want:
+        return ["agent-style %s in %s is older than the %s rules (run `%s -m pip install -U agent-style==%s`)"
+                % (installed, python, expected, command, pin)]
+    return []
+
+
 def bootstrap_issues(ledger: Optional[dict], bootstrap_rc: Optional[int]) -> list:
     """What an incomplete refresh looks like in the check line."""
     issues = []
@@ -469,6 +587,7 @@ def collect(root: str, event_ts: Optional[float] = None, bootstrap_rc: Optional[
         "codex": codex_fields(),
         "skills": skill_buckets(root),
         "hooks": hook_state(),
+        "agent_style": agent_style_fields(root, consumer, environ),
         "workflows": workflow_findings(root),
         "ledger": read_ledger(root) if consumer else None,
         "event_ts": event_ts if event_ts is not None else (read_event_ts(root) if consumer else None),
@@ -488,6 +607,8 @@ def session_check(fields: dict) -> str:
         issues.append("guard.py missing from ~/.claude/hooks (run bootstrap)")
     if not hooks["session_bootstrap"]:
         issues.append("session_bootstrap.py missing from ~/.claude/hooks (run bootstrap)")
+    if hooks["guard"]:
+        issues.extend(agent_style_issues(fields.get("agent_style")))
     claude = fields["claude"]
     if claude["effort"] not in ("xhigh", "max"):
         issues.append("Claude effort is %s; set CLAUDE_CODE_EFFORT_LEVEL=xhigh in ~/.claude/settings.json env" % claude["effort"])
@@ -557,7 +678,17 @@ def render_lines(fields: dict) -> list:
     skills_row = "Skills: " + (" + ".join(parts) if parts else "none")
     hooks = fields["hooks"]
     hook_parts = []
-    hook_parts.append("PreToolUse guard.py" if hooks["guard"] else "PreToolUse guard.py missing")
+    style = fields.get("agent_style")
+    if not hooks["guard"]:
+        hook_parts.append("PreToolUse guard.py missing")
+    elif not style:
+        hook_parts.append("PreToolUse guard.py")
+    elif style.get("disabled"):
+        hook_parts.append("PreToolUse guard.py (agent-style advisory off)")
+    elif style.get("installed") is None:
+        hook_parts.append("PreToolUse guard.py (no agent-style)")
+    else:
+        hook_parts.append("PreToolUse guard.py (agent-style %s)" % style["installed"])
     hook_parts.append(
         "SessionStart session_bootstrap.py" if hooks["session_bootstrap"] else "SessionStart session_bootstrap.py missing"
     )

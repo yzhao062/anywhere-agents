@@ -94,18 +94,23 @@ class _HermeticCase(unittest.TestCase):
         }}))
         env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
         for name in ("DISABLE_AUTOUPDATER", "CLAUDE_CODE_EFFORT_LEVEL", "AGENT_CONFIG_HOST",
-                     "XDG_CONFIG_HOME", "APPDATA"):
+                     "XDG_CONFIG_HOME", "APPDATA", "AGENT_STYLE_HOOK", "AGENT_CONFIG_GATES"):
             env[name] = ""
         self._env = mock.patch.dict(os.environ, env)
         self._env.start()
         self.addCleanup(self._env.stop)
         for name in ("DISABLE_AUTOUPDATER", "CLAUDE_CODE_EFFORT_LEVEL", "AGENT_CONFIG_HOST",
-                     "XDG_CONFIG_HOME", "APPDATA"):
+                     "XDG_CONFIG_HOME", "APPDATA", "AGENT_STYLE_HOOK", "AGENT_CONFIG_GATES"):
             os.environ.pop(name, None)
         versions = {"claude": "2.1.0", "codex": "0.150.0"}
         self._versions = mock.patch.object(render_banner, "_run_version", side_effect=versions.get)
         self._versions.start()
         self.addCleanup(self._versions.stop)
+        # The agent_style probe imports from the test interpreter; pin it so
+        # the result does not depend on what that interpreter has installed.
+        self._style = mock.patch.object(render_banner, "agent_style_installed", return_value="0.7.0")
+        self._style.start()
+        self.addCleanup(self._style.stop)
 
 
 class MetadataContractTests(unittest.TestCase):
@@ -215,7 +220,7 @@ class ConsumerRenderTests(_HermeticCase):
         self.assertTrue(lines[1].endswith("OS: %s" % sys.platform))
         self.assertIn("Claude Code: 2.1.0 (auto-update: on) · <model> · effort=max", lines[2])
         self.assertIn("Codex: 0.150.0 · gpt-6-astra · xhigh · standard · fast_mode=false", lines[3])
-        self.assertIn("Hooks: PreToolUse guard.py, SessionStart session_bootstrap.py", lines[5])
+        self.assertIn("Hooks: PreToolUse guard.py (agent-style 0.7.0), SessionStart session_bootstrap.py", lines[5])
         self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
         meta = render_banner.parse_metadata("\n".join(report))
         self.assertEqual(meta["event_ts"], 123.5)
@@ -263,6 +268,60 @@ class ConsumerRenderTests(_HermeticCase):
         self.assertIsNone(meta["run_id"])
         self.assertIsNone(meta["completed"])
         self.assertFalse(render_banner.report_is_current("\n".join(report), None, "anything"))
+
+    def test_missing_agent_style_under_loaded_rules_is_named_with_the_fix(self) -> None:
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _write(self.root / "AGENTS.md", "# rules\n<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=abc -->\nbody\n")
+        with mock.patch.object(render_banner, "agent_style_installed", return_value=None):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (no agent-style)", lines[5])
+        self.assertIn("agent-style advisory off", lines[6])
+        self.assertIn("-m pip install agent-style==0.7.0", lines[6])
+
+    def test_older_agent_style_than_the_loaded_rules_is_named(self) -> None:
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _write(self.root / "AGENTS.md", "<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=abc -->\n")
+        with mock.patch.object(render_banner, "agent_style_installed", return_value="0.6.0"):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (agent-style 0.6.0)", lines[5])
+        self.assertIn("agent-style 0.6.0 in", lines[6])
+        self.assertIn("older than the v0.7.0 rules", lines[6])
+        self.assertIn("-m pip install -U agent-style==0.7.0", lines[6])
+
+    def test_a_consumer_without_the_pack_expects_no_agent_style(self) -> None:
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _write(self.root / "AGENTS.md", "# rules without the agent-style block\n")
+        with mock.patch.object(render_banner, "agent_style_installed", return_value=None):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (no agent-style)", lines[5])
+        self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
+
+    def test_the_advisory_switch_turns_the_check_off(self) -> None:
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _write(self.root / "AGENTS.md", "<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=abc -->\n")
+        _write(self.home / ".claude" / "settings.json",
+               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "AGENT_STYLE_HOOK": "off"}}))
+        with mock.patch.object(render_banner, "agent_style_installed", return_value=None):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (agent-style advisory off)", lines[5])
+        self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
+
+    def test_the_legacy_gates_switch_also_turns_the_check_off(self) -> None:
+        """The guard drops its advisory under AGENT_CONFIG_GATES as well, so
+        the banner must not ask for a package the guard would not use."""
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _write(self.root / "AGENTS.md", "<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=abc -->\n")
+        with mock.patch.object(render_banner, "agent_style_installed", return_value=None), \
+                mock.patch.dict(os.environ, {"AGENT_CONFIG_GATES": "off", "AGENT_STYLE_HOOK": "on"}):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (agent-style advisory off)", lines[5])
+        self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
+        _write(self.home / ".claude" / "settings.json",
+               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "AGENT_CONFIG_GATES": "0"}}))
+        with mock.patch.object(render_banner, "agent_style_installed", return_value="0.7.0"), \
+                mock.patch.dict(os.environ, {"AGENT_STYLE_HOOK": "on"}):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("PreToolUse guard.py (agent-style advisory off)", lines[5])
 
     def test_missing_hooks_and_effort_drift_are_named(self) -> None:
         os.remove(self.home / ".claude" / "hooks" / "guard.py")
@@ -359,6 +418,69 @@ class CheckTests(unittest.TestCase):
         self.assertIn("set project_doc_max_bytes = 262144", render_banner.codex_issues(small_budget)[0])
         not_installed = dict(base, installed=False)
         self.assertEqual(render_banner.codex_issues(not_installed), [])
+
+    def test_agent_style_issues(self) -> None:
+        base = {"installed": "0.7.0", "expected": "v0.7.0", "python": "/env/bin/python",
+                "command": "/env/bin/python", "disabled": False}
+        self.assertEqual(render_banner.agent_style_issues(base), [])
+        self.assertEqual(render_banner.agent_style_issues(dict(base, installed="0.8.1")), [])
+        self.assertEqual(render_banner.agent_style_issues(dict(base, installed="0.10.0")), [])
+        older = render_banner.agent_style_issues(dict(base, installed="0.6.0"))
+        self.assertEqual(older, ["agent-style 0.6.0 in /env/bin/python is older than the v0.7.0 rules "
+                                 "(run `/env/bin/python -m pip install -U agent-style==0.7.0`)"])
+        missing = render_banner.agent_style_issues(dict(base, installed=None))
+        self.assertEqual(missing, ["agent-style advisory off: /env/bin/python has no agent_style "
+                                   "(run `/env/bin/python -m pip install agent-style==0.7.0`)"])
+        self.assertIn("older than", render_banner.agent_style_issues(dict(base, installed="unknown"))[0])
+        windows = "C:/Program Files/py/python.exe"
+        spaced = dict(base, python=windows, command=render_banner.python_command(windows, "win32"))
+        missing = render_banner.agent_style_issues(dict(spaced, installed=None))[0]
+        self.assertIn("advisory off: C:/Program Files/py/python.exe has no agent_style", missing)
+        self.assertIn('`& "C:/Program Files/py/python.exe" -m pip install agent-style==0.7.0`', missing)
+        older = render_banner.agent_style_issues(dict(spaced, installed="0.6.0"))[0]
+        self.assertIn('`& "C:/Program Files/py/python.exe" -m pip install -U agent-style==0.7.0`', older)
+        # Only a whole stable release is pinned; a branch, a prerelease, or a suffixed ref is not.
+        for ref in ("main", "v0.7.0-dev", "0.7.0-feature", "v0.8.0rc1", "v0.7", "0123abc"):
+            self.assertEqual(render_banner.agent_style_issues(dict(base, installed=None, expected=ref)), [], ref)
+        self.assertEqual(len(render_banner.agent_style_issues(dict(base, installed=None, expected="0.7.0"))), 1)
+        for quiet in (dict(base, expected=None), dict(base, disabled=True),
+                      dict(base, installed=None, disabled=True)):
+            self.assertEqual(render_banner.agent_style_issues(quiet), [], quiet)
+        self.assertEqual(render_banner.agent_style_issues(None), [])
+
+    def test_python_command_quotes_a_spaced_path_and_calls_it_on_windows(self) -> None:
+        self.assertEqual(render_banner.python_command("/env/bin/python", "darwin"), "/env/bin/python")
+        self.assertEqual(render_banner.python_command("/my env/bin/python", "linux"), '"/my env/bin/python"')
+        self.assertEqual(render_banner.python_command("C:/Program Files/py/python.exe", "win32"),
+                         '& "C:/Program Files/py/python.exe"')
+        self.assertEqual(render_banner.python_command("C:/py/python.exe", "win32"), "C:/py/python.exe")
+
+    def test_agent_style_expected(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="banner-style-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertIsNone(render_banner.agent_style_expected(str(tmp), True))
+        _write(tmp / "AGENTS.md", "x\n<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=1 -->\n")
+        self.assertEqual(render_banner.agent_style_expected(str(tmp), True), "v0.7.0")
+        # A source repository reads the bundled default; another pack's ref never answers.
+        _write(tmp / "bootstrap" / "packs.yaml", "\n".join([
+            "version: 2", "packs:",
+            "  - name: agent-style", "    description: >", "      Writing rules.",
+            "    source:", "      repo: https://github.com/yzhao062/agent-style", "      ref: v0.7.0",
+            "  - name: other", "    source:", "      ref: v9.9.9", "",
+        ]))
+        self.assertEqual(render_banner.agent_style_expected(str(tmp), False), "v0.7.0")
+        _write(tmp / "bootstrap" / "packs.yaml", "\n".join([
+            "packs:", "  - name: agent-style", "    source:", "      repo: x",
+            "  - name: other", "    source:", "      ref: v9.9.9", "",
+        ]))
+        self.assertIsNone(render_banner.agent_style_expected(str(tmp), False))
+
+    def test_agent_style_installed_reads_the_imported_release(self) -> None:
+        fake = mock.Mock(__version__="0.7.0")
+        with mock.patch.dict(sys.modules, {"agent_style": fake}):
+            self.assertEqual(render_banner.agent_style_installed(), "0.7.0")
+        with mock.patch.dict(sys.modules, {"agent_style": None}):
+            self.assertIsNone(render_banner.agent_style_installed())
 
     def test_latest_arrow_only_when_newer(self) -> None:
         self.assertEqual(render_banner._with_latest("2.1.275", "2.1.274"), "2.1.275")
