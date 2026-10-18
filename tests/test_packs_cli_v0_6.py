@@ -2072,12 +2072,12 @@ class TestAutoReconciledResidueSetStaysComplete(unittest.TestCase):
         listed = residue.AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(
             "agent-style", set()
         )
-        expected_through_v070 = {
-            "v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0", "v0.7.0",
+        expected_through_v080 = {
+            "v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0", "v0.7.0", "v0.8.0",
         }
         self.assertEqual(
             listed,
-            expected_through_v070,
+            expected_through_v080,
             "append each new bundled ref to this ledger and the production "
             "set; do not replace an earlier ref",
         )

@@ -62,11 +62,11 @@ except ImportError:
 # remembered: the current bundled ref must itself be listed, so each ref is
 # added while it is the default and is already here by the time a later bump
 # moves away from it. This list was incomplete twice before that test existed.
-# `v0.7.0` is listed while it *is* the default. Advancing a row to the ref it
+# `v0.8.0` is listed while it *is* the default. Advancing a row to the ref it
 # already holds is a no-op: the rewrite is guarded by `entry_ref != bundled_ref`,
 # which short-circuits first.
 AUTO_RECONCILED_DEFAULT_REF_REWRITES: dict[str, set[str]] = {
-    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0", "v0.7.0"},
+    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1", "v0.5.0", "v0.6.0", "v0.7.0", "v0.8.0"},
 }
 
 # Project-tracked config file name. ``agent-config.local.yaml`` is hand
