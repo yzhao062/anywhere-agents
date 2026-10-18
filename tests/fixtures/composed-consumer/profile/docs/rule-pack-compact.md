@@ -55,4 +55,4 @@ Loop control: after plan-review or several rounds on the same point, challenge o
 ## Defaults Agents Should Follow
 
 - Mark a citation `[UNVERIFIED]` when it cannot be verified, and never invent BibTeX venue or year fields.
-- Treat the writing rules in `agent-style` as binding for every `.md` / `.tex` / `.rst` / `.txt` write.
+- Treat `agent-style` as binding for `.md` / `.tex` / `.rst` / `.txt` writes; for a paper or proposal abstract, introduction, or conclusion, also load `author-voice` if installed.
