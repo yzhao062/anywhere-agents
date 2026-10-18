@@ -238,7 +238,28 @@
       "source_note": "User-supplied screenshot including the caption; original attachment filename retained.",
       "changes": "User-supplied screenshot of the paper figure and caption; copied without further modification.",
       "feedback_updated_on": "2026-09-26"
+    },
+    {
+      "id": "16-meta-central-mechanism",
+      "repository": "NSF-Proposal-Template-Yue",
+      "source_path": "proposals/meta-saac-recsys-2027/figure/output/figure1-v8f-final.pdf",
+      "copied_file": "16-meta-central-mechanism/figure1-v8f-final.pdf",
+      "preview": "16-meta-central-mechanism/preview.png",
+      "page": 1,
+      "sha256": "770959ed55889232824dca824e9447583800d25ca4b909d4f07008ead967241b",
+      "title": "Meta SAAC RecSys · Central mechanism",
+      "role": "中段技术示意：VLM、LoRA、缓存、冻结 Ranker 与梯度路径；预览为局部裁切",
+      "collected_on": "2026-10-17",
+      "preference_status": "confirmed: strong preference for central illustration; sides only acceptable",
+      "feedback_updated_on": "2026-10-17",
+      "preview_crop_pdf_points": [
+        296.0,
+        24.0,
+        722.0,
+        244.0
+      ],
+      "source_note": "Author-approved v8c center retained in v8f; v8e typography polish and v8f arrow alignment. Full PDF preserved, preview cropped to the preferred center; crop coordinates use top-left-origin, y-down PDF points. Author explicitly authorized gallery inclusion and anywhere-agents sync on 2026-10-17. Draft proposal, not an awarded-proposal claim. Object illustrations are pictures; labels and connectors remain native in the project PPTX."
     }
   ],
-  "updated_on": "2026-09-26"
+  "updated_on": "2026-10-17"
 }

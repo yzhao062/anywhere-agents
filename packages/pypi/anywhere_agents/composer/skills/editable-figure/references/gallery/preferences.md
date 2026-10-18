@@ -104,7 +104,15 @@ Initial feedback was recorded on 2026-09-25; later additions carry their own dat
 
 **Design implication:** Borrow the clear comparative organization and professional technical detail. Avoid transferring the heavy color treatment; use a palette supported by another liked reference or current instructions. This is a positive structural and technical reference with a negative color preference, not a uniformly liked or disliked example.
 
+## 16 Meta SAAC RecSys · Central mechanism
+
+**作者反馈：** 2026-10-17，对 v8c：“这一版我特别喜欢中间的这个示意图，左右还可以。”随后要求把中间正式加入图库；指出“箭头没对齐”，要求修正。
+
+**Design implication:** Use the center as a strongly preferred reference for detailed technical objects integrated with native notation and relationships. The layered VLM, distinct LoRA plate, cache feature glyphs, and ranker show the mechanism with shallow depth and coordinated color. These are observed treatments, not separate author endorsements of every object. Preserve useful visual substance during editable reconstruction and align connection ports to shared guides. The v8f reference corrects the arrow geometry without redesigning the liked art. Approval belongs to the v8c center; the later geometry fix has been inspected locally, not separately approved by the author. The sides remain acceptable context rather than equally strong style donors. Faint cleanup halos visible at high zoom are residual artifacts, not a preferred treatment to imitate. The cropped preview omits the input/output panels and objectives; use the full PDF to interpret the mechanism.
+
 ## Working Interpretation Across Examples
+
+**Workflow feedback, 2026-10-17:** “我发现没有经过 imagegen 或者 agy 生图的草稿的图都很没有 visual 和吸引力”。For new paper/proposal overviews, new standalone mechanism figures, and substantial redesigns, use a whole-figure generated concept before editable reconstruction, with the main skill's scoped exceptions. [Recent workflow feedback](../recent-workflow-feedback.md) preserves the project-specific evidence and the Meta center's strong approval separately from its less strongly endorsed sides.
 
 The current evidence favors recognizable domain content, visual variety, and color, supported by clear organization. Novel forms can be useful, and technical detail is welcome when it contributes to the story. Reduce redundant explanation without removing useful substance merely to achieve a minimal appearance.
 
