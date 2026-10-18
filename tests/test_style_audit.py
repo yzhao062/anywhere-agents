@@ -412,6 +412,296 @@ class HookOnlyDetectorTests(unittest.TestCase):
         self.assertIn("RULE-03", {f["rule"] for f in findings})
 
 
+class PackageRuleLabelTests(unittest.TestCase):
+    """Coverage names a package detector by the rule it stands for.
+
+    `_rule_12_profile` and `_rule_08_repeats` carry a descriptor after the rule
+    id. Reading the whole remainder as the id gives `RULE-12_PROFILE`, which
+    no rule pack uses, and filtering such names out leaves their rules
+    unaccounted for in the coverage report.
+    """
+
+    def setUp(self) -> None:
+        self.mod = load_module(AUDIT, "_style_audit_labels")
+
+    def test_a_function_name_gives_the_label_of_its_rule(self) -> None:
+        for name, label in (
+            ("_rule_03", "RULE-03"),
+            ("_rule_a", "RULE-A"),
+            ("_rule_12_profile", "RULE-12"),
+            ("_rule_08_repeats", "RULE-08"),
+            ("_rule_03_scan", "RULE-03"),
+            ("_rule_12_profile_scan", "RULE-12"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(self.mod._rule_label(name), label)
+
+    def test_a_name_that_is_not_a_rule_function_gives_no_label(self) -> None:
+        for name in ("rule_12", "_rules", "_rule_", "_rule__scan", "_rule_-x",
+                     "_other_12", ""):
+            with self.subTest(name=name):
+                self.assertIsNone(self.mod._rule_label(name))
+
+    def test_the_package_set_counts_multi_segment_detectors_under_their_rule(self) -> None:
+        try:
+            from agent_style.review import detectors_mech
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+
+        def quiet(text, file_path=""):
+            return []
+
+        with unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", quiet, create=True), \
+                unittest.mock.patch.object(
+                    detectors_mech, "_rule_08_repeats", quiet, create=True):
+            labels = self.mod._package_hook_rules()
+        self.assertLessEqual({"RULE-08", "RULE-12"}, labels)
+        self.assertEqual([label for label in labels if "_" in label], [],
+                         "a descriptor must never reach the label")
+
+
+# One sentence over RULE-12's thirty words. The CLI's per-sentence detector
+# reports it as "sentence length 34 words (>30)", which is what the profile
+# substitution has to keep out of the audit.
+_LONG = (
+    "This is a deliberately long sentence written purely so that it will "
+    "comfortably exceed the thirty word threshold that RULE-12 enforces on "
+    "prose, and therefore reach the audit path under test in this case.\n"
+)
+
+
+class Rule12ProfileSubstitutionTests(unittest.TestCase):
+    """From agent-style 0.8.0 the hook's RULE-12 is a document-level profile.
+
+    The CLI audit still runs the per-sentence `_rule_12`. Without a
+    substitution the /vet audit would list every sentence over thirty words
+    beside a profile that treats most of them as ordinary. Substitution
+    applies when the guard's set holds the package's own `_rule_12_profile`, and the
+    coverage report has to stay true in both directions: a profile that ran
+    covers RULE-12, and one that failed leaves it uncovered rather than
+    resting on a CLI result that was thrown away.
+    """
+
+    def setUp(self) -> None:
+        self.mod = load_module(AUDIT, "_style_audit_profile")
+        try:
+            import agent_style.review  # noqa: F401
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+
+    @staticmethod
+    def _profile(text, file_path=""):
+        class V:
+            line, column, excerpt = 1, 1, ""
+            detail = "profile-path=" + str(file_path)
+        return [V()]
+
+    @staticmethod
+    def _failing_profile(text, file_path=""):
+        raise RuntimeError("simulated")
+
+    def _audit(self, tmp, hook_rules, text=_LONG, name="notes.md"):
+        repo = make_repo(Path(tmp) / "repo")
+        stage(repo, name, text)
+        return self.mod.audit_files(
+            [name], str(repo), from_index=True, hook_rules=hook_rules)
+
+    def _details(self, findings, rule="RULE-12"):
+        return sorted(f["detail"] for f in findings if f["rule"] == rule)
+
+    def test_the_profile_stands_in_for_the_cli_rule_12(self) -> None:
+        from agent_style.review import detectors_mech
+
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", self._profile, create=True):
+            findings, coverage, error = self._audit(
+                tmp, ([("RULE-12", self._profile)], frozenset({"RULE-12"})))
+        self.assertIsNone(error)
+        self.assertEqual(
+            self._details(findings), ["profile-path=notes.md"],
+            "the profile reports once, with the repository path, and the "
+            "per-sentence hit on the same text is not listed",
+        )
+        self.assertIn("RULE-12", coverage["covered"])
+
+    def test_a_per_sentence_rule_12_under_the_same_label_keeps_the_cli_result(self) -> None:
+        """Older releases run `_rule_12` in the hook under the label RULE-12.
+
+        That function is not the package's `_rule_12_profile`. The audit
+        therefore keeps the CLI's own result, and the hook's copy still does
+        not run twice. Keying the swap on the label alone would silence RULE-12.
+        """
+        from agent_style.review import detectors_mech
+
+        def legacy(text, file_path=""):
+            raise AssertionError("the CLI already ran RULE-12; this must not run")
+
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", self._profile, create=True):
+            findings, coverage, _ = self._audit(
+                tmp, ([("RULE-12", legacy)], frozenset({"RULE-12"})))
+        self.assertEqual(self._details(findings), ["sentence length 34 words (>30)"])
+        self.assertEqual([f for f in findings if f["rule"] == "AUDIT"], [])
+        self.assertIn("RULE-12", coverage["covered"])
+
+    def test_a_failing_profile_leaves_rule_12_uncovered(self) -> None:
+        from agent_style.review import detectors_mech
+
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", self._failing_profile, create=True):
+            findings, coverage, _ = self._audit(
+                tmp, ([("RULE-12", self._failing_profile)], frozenset({"RULE-12"})))
+        self.assertEqual(self._details(findings), [],
+                         "the discarded CLI hit must not come back as a finding")
+        problems = [f["detail"] for f in findings if f["rule"] == "AUDIT"]
+        self.assertEqual(problems, ["RULE-12 detector raised RuntimeError"])
+        self.assertNotIn("RULE-12", coverage["covered"])
+        self.assertNotIn("RULE-12", coverage["partial"])
+        self.assertIn("RULE-12", coverage["uncovered"])
+
+    def test_the_profile_is_recognised_only_by_function_and_label_together(self) -> None:
+        from agent_style.review import detectors_mech
+
+        with unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", self._profile, create=True):
+            self.assertEqual(
+                self.mod._replaced_cli_rules([("RULE-12", self._profile)]),
+                frozenset({"RULE-12"}))
+            self.assertEqual(
+                self.mod._replaced_cli_rules([("RULE-12", self._failing_profile)]),
+                frozenset(), "another function under the label is not the profile")
+            self.assertEqual(
+                self.mod._replaced_cli_rules([("RULE-08", self._profile)]),
+                frozenset(), "the profile reports as RULE-12 and replaces nothing else")
+        self.assertEqual(self.mod._replaced_cli_rules([]), frozenset())
+
+    def _patched_release(self, version):
+        """Real guard, real package, but a release the package does not have yet."""
+        import contextlib
+        import agent_style
+        from agent_style.review import detectors_mech
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(unittest.mock.patch.object(
+            agent_style, "__version__", version))
+        for name in ("_rule_12_profile", "_rule_08_repeats"):
+            stack.enter_context(unittest.mock.patch.object(
+                detectors_mech, name, self._profile, create=True))
+        return stack
+
+    def test_the_real_guard_at_0_8_0_swaps_the_profile_in(self) -> None:
+        """End to end through guard.py's loader, with the release patched.
+
+        At 0.8.0 the guard's set holds the profile under RULE-12 and RULE-08
+        under its own label, both path-aware, and the audit drops the CLI's
+        per-sentence hit. RULE-08 has no CLI mechanical detector and is
+        therefore partial: its semantic half is skipped and the hook half ran.
+        """
+        with tempfile.TemporaryDirectory() as tmp, self._patched_release("0.8.0"):
+            hook_rules = self.mod._load_hook_detectors([str(GUARD)])
+            rules, path_aware = hook_rules
+            self.assertEqual(
+                [label for label, _ in rules],
+                ["RULE-03", "RULE-A", "RULE-08", "RULE-05", "RULE-06", "RULE-12",
+                 "RULE-B", "RULE-D", "RULE-I"])
+            self.assertLessEqual({"RULE-08", "RULE-12"}, path_aware)
+            findings, coverage, error = self._audit(tmp, hook_rules)
+        self.assertIsNone(error)
+        self.assertEqual(self._details(findings), ["profile-path=notes.md"])
+        self.assertEqual(self._details(findings, "RULE-08"), ["profile-path=notes.md"])
+        self.assertIn("RULE-12", coverage["covered"])
+        self.assertIn("RULE-08", coverage["partial"])
+
+    def test_the_real_guard_at_0_7_0_keeps_the_cli_rule_12(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, self._patched_release("0.7.0"):
+            hook_rules = self.mod._load_hook_detectors([str(GUARD)])
+            self.assertNotIn("RULE-08", [label for label, _ in hook_rules[0]])
+            findings, coverage, _ = self._audit(tmp, hook_rules)
+        self.assertEqual(self._details(findings), ["sentence length 34 words (>30)"])
+        self.assertIn("RULE-12", coverage["covered"])
+        self.assertEqual(self._details(findings, "RULE-08"), [])
+
+    # Over eighty words in one sentence, as the profile counts them.
+    _EXTREME = "The committee met" + ", and then it met again" * 20 + "."
+
+    def _revise_the_third_line(self, tmp, hook_rules):
+        """Stage a file whose line 1 is unchanged and whose line 3 was rewritten.
+
+        Line 1 holds an extreme sentence in both versions. Line 3 is a short
+        sentence in the base and a second extreme sentence in the revision.
+        Returns the audit's JSON payload for that staged revision.
+        """
+        base = f"{self._EXTREME}\n\nThe committee adjourned.\n"
+        revised = f"{self._EXTREME}\n\n{self._EXTREME}\n"
+        repo = make_repo(Path(tmp) / "repo")
+        stage(repo, "notes.md", base)
+        git(repo, "commit", "-qm", "base")
+        stage(repo, "notes.md", revised)
+        with unittest.mock.patch.object(
+                self.mod, "_load_hook_detectors", return_value=hook_rules):
+            rc, out = run_main(self.mod, ["--repo", str(repo), "--json"])
+        self.assertEqual(rc, 0)
+        return json.loads(out)
+
+    def test_a_profile_finding_outlives_a_change_to_a_later_sentence(self) -> None:
+        """The collapsed extreme-sentence finding sits on the FIRST such sentence.
+
+        A new extreme sentence further down leaves that line untouched, and the
+        count in the finding is what changed. Every finding of the profile is
+        about the document, and line scoping must not drop it. The same text from
+        an ordinary detector at the same line is about one place and is dropped.
+        """
+        from agent_style.review import detectors_mech
+
+        class V:
+            column, excerpt = 1, ""
+
+            def __init__(self, detail):
+                self.line, self.detail = 1, detail
+
+        def collapsed(text, file_path=""):
+            return [V("2 sentences over 80 words, the first at line 1, a length "
+                      "that is uncommon in human-written prose; consider whether "
+                      "each carries one connected thought")]
+
+        def local(text, file_path=""):
+            return [V("an interval written into the first sentence")]
+
+        hook_rules = ([("RULE-12", collapsed), ("RULE-03", local)],
+                      frozenset({"RULE-12", "RULE-03"}))
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(
+                detectors_mech, "_rule_12_profile", collapsed, create=True):
+            payload = self._revise_the_third_line(tmp, hook_rules)
+        listed = {(f["rule"], f["line"]) for f in payload["findings"]}
+        self.assertIn(("RULE-12", 1), listed)
+        self.assertNotIn(("RULE-03", 1), listed)
+        profile = [f for f in payload["findings"] if f["rule"] == "RULE-12"]
+        self.assertTrue(all(f["document_level"] is True for f in profile))
+
+    def test_the_real_profile_keeps_the_collapsed_finding_after_a_later_change(self) -> None:
+        """End to end with the package's own profile, from agent-style 0.8.0."""
+        import agent_style
+
+        release = tuple(int(p) for p in agent_style.__version__.split(".")[:3])
+        if release < (0, 8, 0):
+            self.skipTest("the RULE-12 profile ships with agent-style 0.8.0")
+        hook_rules = self.mod._load_hook_detectors([str(GUARD)])
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._revise_the_third_line(tmp, hook_rules)
+        rule_12 = [(f["line"], f["detail"]) for f in payload["findings"]
+                   if f["rule"] == "RULE-12"]
+        self.assertEqual(len(rule_12), 1, rule_12)
+        line, detail = rule_12[0]
+        self.assertEqual(line, 1)
+        self.assertTrue(detail.startswith("2 sentences over 80 words, the first "
+                                          "at line 1"), detail)
+
+
 class FileLevelProblemTests(unittest.TestCase):
     """A finding about a file has no line, and must not be filtered by line.
 
@@ -563,6 +853,203 @@ class ChangedLinesTests(unittest.TestCase):
             self.mod.scope_to_changed_lines(findings, "/repo")
         self.assertEqual(spy.call_count, 2,
                          "one git query per file, regardless of finding count")
+
+
+class DocumentLevelScopingTests(unittest.TestCase):
+    """A finding about the whole document survives the changed-line filter.
+
+    agent-style 0.8.0 opens the findings that describe a document (a share of
+    long sentences, a run of `, so` joins, a caveat stated again and again)
+    with `_PF_DOCUMENT_PREFIX`, and anchors each on the first sentence, join
+    or member behind it. Revising another part of the file leaves that line
+    untouched. Line scoping alone then reports the file clean, although the
+    revision is what moved the profile. A finding about one place in the text
+    keeps the line scoping.
+    """
+
+    PREFIX = "Across the document, "
+
+    def setUp(self) -> None:
+        self.mod = load_module(AUDIT, "_style_audit_document")
+        try:
+            from agent_style.review import detectors_mech  # noqa: F401
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+
+    def _prefix(self, value):
+        """The detector module's marker, set to `value` for one test."""
+        from agent_style.review import detectors_mech
+
+        return unittest.mock.patch.object(
+            detectors_mech, "_PF_DOCUMENT_PREFIX", value, create=True)
+
+    @staticmethod
+    def _finding(rule, line, detail):
+        return {"file": "a.md", "line": line, "column": 1, "rule": rule,
+                "detail": detail, "excerpt": ""}
+
+    def test_the_marker_is_read_from_the_package(self) -> None:
+        with self._prefix(self.PREFIX):
+            self.assertEqual(self.mod._document_level_prefix(), self.PREFIX)
+
+    def test_a_missing_empty_or_odd_marker_marks_nothing(self) -> None:
+        """An empty prefix is the dangerous value: every string starts with it."""
+        from agent_style.review import detectors_mech
+
+        for value in ("", None, 0, 5, b"Across", ["Across"]):
+            with self.subTest(value=value), self._prefix(value):
+                self.assertIsNone(self.mod._document_level_prefix())
+        # A release that predates the constant has no such attribute at all.
+        with unittest.mock.patch.dict(vars(detectors_mech)):
+            vars(detectors_mech).pop("_PF_DOCUMENT_PREFIX", None)
+            self.assertIsNone(self.mod._document_level_prefix())
+
+    def test_an_unimportable_package_marks_nothing(self) -> None:
+        import builtins
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name.startswith("agent_style"):
+                raise ImportError("blocked by test")
+            return real_import(name, *args, **kwargs)
+
+        with unittest.mock.patch.object(builtins, "__import__", blocked):
+            self.assertIsNone(self.mod._document_level_prefix())
+
+    def test_a_document_level_finding_is_kept_when_its_line_is_untouched(self) -> None:
+        findings = [
+            self._finding("RULE-12", 3, self.PREFIX + "about 50% of the 60 sentences"),
+            self._finding("RULE-12", 4, self.PREFIX + "7 sentences join clauses"),
+            self._finding("RULE-08", 5, self.PREFIX + "the same caveat framing"),
+        ]
+        with self._prefix(self.PREFIX), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={40}):
+            kept, dropped, fell_back = self.mod.scope_to_changed_lines(
+                findings, "/repo")
+        self.assertEqual(kept, findings)
+        self.assertEqual((dropped, fell_back), (0, []))
+
+    def test_a_finding_about_one_place_keeps_the_line_scoping(self) -> None:
+        """A local detector's finding names the text it sits on and is scoped."""
+        findings = [
+            self._finding("RULE-03", 3, "an interval written into prose"),
+            self._finding("RULE-B", 4, "a casual em dash"),
+            self._finding("RULE-03", 40, "an interval written into prose"),
+        ]
+        with self._prefix(self.PREFIX), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={40}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines(findings, "/repo")
+        self.assertEqual([f["line"] for f in kept], [40])
+        self.assertEqual(dropped, 2)
+
+    def test_a_flagged_finding_is_kept_whatever_its_text(self) -> None:
+        """The profile's collapsed finding names the first extreme sentence.
+
+        Line 1 keeps the first extreme sentence, and line 3 adds another.
+        Without a document marker, the finding survives only because the
+        audit marks the profile result as document-level. Removing that flag
+        restores changed-line scoping.
+        """
+        detail = ("2 sentences over 80 words, the first at line 1, a length "
+                  "that is uncommon in human-written prose")
+        flagged = dict(self._finding("RULE-12", 1, detail), document_level=True)
+        plain = self._finding("RULE-12", 1, detail)
+        with self._prefix(self.PREFIX), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={3}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines(
+                [flagged, plain], "/repo")
+        self.assertEqual(kept, [flagged])
+        self.assertEqual(dropped, 1)
+
+    def test_the_flag_needs_no_marker_from_the_package(self) -> None:
+        """An old package has no marker, and the flag still holds."""
+        flagged = dict(self._finding("RULE-12", 1, "text"), document_level=True)
+        with self._prefix(None), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={3}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines([flagged], "/repo")
+        self.assertEqual((kept, dropped), ([flagged], 0))
+
+    def test_a_flag_that_is_off_or_odd_marks_nothing(self) -> None:
+        findings = [dict(self._finding("RULE-12", 1, "text"), document_level=value)
+                    for value in (False, None, 0, "")]
+        with self._prefix(None), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={3}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines(findings, "/repo")
+        self.assertEqual((kept, dropped), ([], 4))
+
+    def test_the_prefix_counts_only_at_the_start_of_the_detail(self) -> None:
+        findings = [self._finding(
+            "RULE-12", 3, "a sentence that begins " + self.PREFIX + "here")]
+        with self._prefix(self.PREFIX), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={40}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines(findings, "/repo")
+        self.assertEqual((kept, dropped), ([], 1))
+
+    def test_without_a_marker_the_old_package_scopes_every_finding_by_line(self) -> None:
+        """agent-style before 0.8.0 has no document-level findings to keep."""
+        findings = [self._finding("RULE-12", 3, self.PREFIX + "about 50%")]
+        for value in (None, ""):
+            with self.subTest(value=value), self._prefix(value), \
+                    unittest.mock.patch.object(
+                        self.mod, "changed_lines", return_value={40}):
+                kept, dropped, _ = self.mod.scope_to_changed_lines(
+                    findings, "/repo")
+            self.assertEqual((kept, dropped), ([], 1))
+
+    def test_a_detail_that_is_not_text_does_not_raise(self) -> None:
+        findings = [self._finding("RULE-12", 3, None),
+                    {"file": "a.md", "line": 4, "rule": "RULE-12"}]
+        with self._prefix(self.PREFIX), unittest.mock.patch.object(
+                self.mod, "changed_lines", return_value={40}):
+            kept, dropped, _ = self.mod.scope_to_changed_lines(findings, "/repo")
+        self.assertEqual((kept, dropped), ([], 2))
+
+    def test_the_staged_audit_keeps_the_document_finding_of_a_revised_file(self) -> None:
+        """End to end: the diff touches the last line, the anchors sit on line 1.
+
+        The planted detectors stand for RULE-08, which anchors a document-level
+        finding on its first member, and for a finding about one place. The CLI
+        runs neither label, which leaves both to the hook set. Only the
+        document-level one may appear, and the other is counted as pre-existing
+        rather than listed.
+        """
+        prefix = self.PREFIX
+
+        class V:
+            column, excerpt = 1, ""
+
+            def __init__(self, line, detail):
+                self.line, self.detail = line, detail
+
+        def document_level(text, file_path=""):
+            return [V(1, prefix + "about 50% of the 60 sentences run past 30 words")]
+
+        def one_place(text, file_path=""):
+            return [V(1, "an interval written into the first sentence")]
+
+        hook_rules = (
+            [("RULE-08", document_level), ("RULE-03", one_place)],
+            frozenset({"RULE-08", "RULE-03"}),
+        )
+        base = "".join(f"Sentence number {i} is short.\n\n" for i in range(1, 13))
+        with tempfile.TemporaryDirectory() as tmp, self._prefix(prefix):
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "notes.md", base)
+            git(repo, "commit", "-qm", "base")
+            stage(repo, "notes.md", base + "A final sentence was added.\n")
+            with unittest.mock.patch.object(
+                    self.mod, "_load_hook_detectors", return_value=hook_rules):
+                rc, out = run_main(self.mod, ["--repo", str(repo), "--json"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        listed = {(f["rule"], f["line"]) for f in payload["findings"]}
+        self.assertIn(("RULE-08", 1), listed)
+        self.assertNotIn(("RULE-03", 1), listed)
+        self.assertEqual(payload["pre_existing_not_listed"], 1)
+        self.assertTrue(payload["status"].startswith("FINDINGS:"))
 
 
 class InvocationSurfaceTests(unittest.TestCase):

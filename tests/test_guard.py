@@ -888,15 +888,22 @@ class WritingStyleGateTests(unittest.TestCase):
         self.assertIsNone(resp)
 
 
-# Deliberately over RULE-12's thirty-word threshold. Counted, not eyeballed:
-# an earlier version of this fixture sat at twenty-nine words and silently
-# tested nothing, which is the failure mode the paired clean-prose test above
-# exists to catch.
+# Deliberately over both RULE-12 thresholds: thirty words, which the
+# per-sentence rule of agent-style before 0.8.0 flags, and eighty, which the
+# profile of 0.8.0 and later flags for a single sentence. Counted, not
+# eyeballed: an earlier version of this fixture sat at twenty-nine words and
+# silently tested nothing, which is the failure mode the paired clean-prose
+# test above exists to catch. At 88 words it keeps firing whichever release
+# of the package the machine carries.
 _LONG_SENTENCE = (
     "This is a deliberately long sentence written purely so that it will "
-    "comfortably exceed the thirty word threshold that RULE-12 enforces on "
-    "prose, and therefore reach the advisory code path that is under test in "
-    "this particular case."
+    "comfortably exceed both the thirty word threshold that the per-sentence "
+    "RULE-12 enforces and the eighty word threshold that the RULE-12 profile "
+    "applies to a single sentence, and therefore reach the advisory code path "
+    "that is under test in this particular case, whichever release of the rule "
+    "pack happens to be installed on the machine that runs the suite, because a "
+    "fixture that quietly stopped firing would leave every test built on it "
+    "passing without exercising anything."
 )
 
 
@@ -944,9 +951,28 @@ _SIX_DETECTORS = (
     "_rule_05", "_rule_06", "_rule_12", "_rule_b", "_rule_d", "_rule_i",
 )
 
+# The six with the profile in the place of `_rule_12`, and the full set a
+# 0.8.0 package is held to: the display rules and RULE-08 on top. A real 0.8.0
+# package may still carry `_rule_12` (the CLI dispatches to it). Tests that
+# need it add it to `detectors` themselves.
+_PROFILE_DETECTORS = (
+    "_rule_05", "_rule_06", "_rule_12_profile", "_rule_b", "_rule_d", "_rule_i",
+)
+_RELEASE_0_8_DETECTORS = _PROFILE_DETECTORS + (
+    "_rule_03", "_rule_a", "_rule_08_repeats",
+)
+
+# Detectors the hook hands the file path to, and what each one echoes of it.
+_FAKE_PATH_PARAMS = {
+    "_rule_03": "path=",
+    "_rule_a": "a-path=",
+    "_rule_12_profile": "profile-path=",
+    "_rule_08_repeats": "repeats-path=",
+}
+
 
 def _write_release_fake_agent_style(
-    root: Path, *, version, detectors, raising=(),
+    root: Path, *, version, detectors, raising=(), silent=(),
 ) -> str:
     """Plant a stand-in `agent_style` whose release and detector set are chosen.
 
@@ -954,9 +980,12 @@ def _write_release_fake_agent_style(
     need to say which release they are standing in for. Every detector reports
     exactly one finding, which makes "how many rules ran" readable from the
     advisory's own count: six findings mean six detectors ran, seven mean
-    seven. `_rule_03` and `_rule_a` echo the `file_path` they were given into
-    their findings, so a test can see the path arrive. A detector named in `raising` raises
-    instead of reporting. Passing `version=None` plants no `__version__` at all.
+    seven. `_rule_03`, `_rule_a`, `_rule_12_profile` and `_rule_08_repeats`
+    echo the `file_path` they were given into their findings, so a test can
+    see the path arrive. A detector named in `raising` raises instead of
+    reporting, and one named in `silent` returns nothing, which lets a test
+    read one rule's finding without the five-finding cap hiding it. Passing
+    `version=None` plants no `__version__` at all.
     """
     pkg = root / "agent_style" / "review"
     pkg.mkdir(parents=True)
@@ -969,18 +998,58 @@ def _write_release_fake_agent_style(
         "        self.detail = detail\n"
     ]
     for name in detectors:
-        params = "text, file_path=''" if name in ("_rule_03", "_rule_a") else "text"
+        params = "text, file_path=''" if name in _FAKE_PATH_PARAMS else "text"
         if name in raising:
             body = "    raise RuntimeError('simulated detector failure')\n"
-        elif name == "_rule_03":
-            body = "    return [_V('path=' + file_path)]\n"
-        elif name == "_rule_a":
-            body = "    return [_V('a-path=' + file_path)]\n"
+        elif name in silent:
+            body = "    return []\n"
+        elif name in _FAKE_PATH_PARAMS:
+            body = f"    return [_V({_FAKE_PATH_PARAMS[name]!r} + file_path)]\n"
         else:
             body = f"    return [_V('{name} ran')]\n"
         source.append(f"\ndef {name}({params}):\n{body}")
     (pkg / "detectors_mech.py").write_text("".join(source), encoding="utf-8")
     return str(root)
+
+
+def _fake_agent_style_modules(version, detectors):
+    """In-process stand-in for the package, for tests that read the loader.
+
+    Returns `(modules, functions)`: a mapping for `unittest.mock.patch.dict`
+    over `sys.modules`, and the planted callables by name. A test uses them
+    to ask whether the loader handed back the package's own function or a
+    wrapper.
+    """
+    import types
+
+    functions = {}
+    for name in detectors:
+        def make(label):
+            if label in _FAKE_PATH_PARAMS:
+                def fn(text, file_path=None):
+                    return [f"{label} ran"]
+            else:
+                # Text only, as the real `_rule_12` is: handing it a path is
+                # a TypeError, which the loader's callers must never provoke.
+                def fn(text):
+                    return [f"{label} ran"]
+            fn.__name__ = label
+            return fn
+        functions[name] = make(name)
+    mech = types.ModuleType("agent_style.review.detectors_mech")
+    for name, fn in functions.items():
+        setattr(mech, name, fn)
+    review = types.ModuleType("agent_style.review")
+    review.detectors_mech = mech
+    package = types.ModuleType("agent_style")
+    package.__version__ = version
+    package.review = review
+    modules = {
+        "agent_style": package,
+        "agent_style.review": review,
+        "agent_style.review.detectors_mech": mech,
+    }
+    return modules, functions
 
 
 class AgentStyleAdvisoryTests(unittest.TestCase):
@@ -1178,7 +1247,8 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         shipped guard-hook docs name the set. A release that renamed the private
         functions behind some of them should fail here, before it quietly
         narrows what the advisory covers. The set is six before
-        agent-style 0.6.0, seven from it, and eight from 0.7.0. CI installs the package
+        agent-style 0.6.0, seven from it, eight from 0.7.0, and nine from 0.8.0,
+        where RULE-12 stays in the set as the profile. CI installs the package
         unpinned, so the expectation is read from the installed release. It is
         parsed here independently of the guard's own parser on purpose.
         """
@@ -1194,8 +1264,58 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
             expected.add("RULE-03")
         if release >= (0, 7, 0):
             expected.add("RULE-A")
+        if release >= (0, 8, 0):
+            expected.add("RULE-08")
         labels = {label for label, _ in guard._agent_style_mechanical()}
         self.assertEqual(labels, expected)
+
+    def test_the_installed_0_8_0_detectors_report_through_the_advisory(self) -> None:
+        """The real profile and RULE-08, called as the hook calls them.
+
+        The fake releases above prove the wiring; this proves the wiring fits
+        the package it was written for, which it can do only once a 0.8.0
+        package is installed. Until then it skips. The text is synthetic: 50
+        short sentences read as a clipped paper, and one caveat stated three
+        times in different sections reads as a repeat. The assertions check
+        the label and a count. Rewording a message therefore does not fail it.
+        """
+        self._require_agent_style()
+        import agent_style
+
+        release = tuple(
+            int(p) for p in agent_style.__version__.split(".")[:3]
+        )
+        if release < (0, 8, 0):
+            self.skipTest("the RULE-12 profile and RULE-08 ship with agent-style 0.8.0")
+        guard = _load_guard_module()
+        clipped = (
+            "\\documentclass{article}\n\\begin{document}\n\\section{Method}\n"
+            + "The model reads the input. It returns a label. " * 25
+            + "\n\\end{document}\n"
+        )
+        advice = guard.advise_writing_style(
+            "Write", {"file_path": "/tmp/paper.tex", "content": clipped})
+        self.assertIn("RULE-12: ", advice)
+        self.assertIn("50 sentences", advice)
+        self.assertNotIn("_PROFILE", advice)
+
+        caveat = (
+            "The analysis does not establish whether the effect transfers to "
+            "larger crystal lattices."
+        )
+        repeated = (
+            "\\begin{document}\n"
+            f"\\section{{Results}}\n{caveat} The gain is steady.\n\n"
+            f"\\section{{Discussion}}\nAs before, {caveat[0].lower()}{caveat[1:]} "
+            "Cost falls with batch size.\n\n"
+            f"\\section{{Conclusion}}\nAgain, {caveat[0].lower()}{caveat[1:]}\n"
+            "\\end{document}\n"
+        )
+        advice = guard.advise_writing_style(
+            "Write", {"file_path": "/tmp/paper.tex", "content": repeated})
+        self.assertIn("RULE-08: ", advice)
+        self.assertIn("stated 3 times", advice)
+        self.assertNotIn("_REPEATS", advice)
 
     def test_a_detector_that_raises_disables_the_whole_advisory(self) -> None:
         """Incompatibility that only shows up at call time gets the same
@@ -1210,19 +1330,26 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         """
         self._require_agent_style()
         guard = _load_guard_module()
+        import agent_style
         from agent_style.review import detectors_mech
 
-        def boom(_text):
+        release = tuple(
+            int(p) for p in agent_style.__version__.split(".")[:3]
+        )
+        rule_12 = "_rule_12_profile" if release >= (0, 8, 0) else "_rule_12"
+
+        def boom(*_args, **_kwargs):
             raise RuntimeError("simulated incompatible detector")
 
         # Three positions, because each catches a different way of getting
         # this wrong. RULE-12 is the only rule that fires on this content, so:
-        # `_rule_05` raises before anything is collected, `_rule_12` removes
-        # the one finding-producing rule, and `_rule_i` raises after RULE-12
-        # has already contributed. Only the last distinguishes discarding the
-        # collected findings from stopping at the failure and reporting them,
-        # which is partial coverage wearing a complete advisory's output.
-        for broken in ("_rule_05", "_rule_12", "_rule_i"):
+        # `_rule_05` raises before anything is collected, the RULE-12 function
+        # removes the one finding-producing rule, and `_rule_i` raises after
+        # RULE-12 has already contributed. Only the last distinguishes
+        # discarding the collected findings from stopping at the failure and
+        # reporting them, which is partial coverage wearing a complete
+        # advisory's output. The RULE-12 function is the profile from 0.8.0.
+        for broken in ("_rule_05", rule_12, "_rule_i"):
             with self.subTest(broken=broken):
                 with unittest.mock.patch.object(detectors_mech, broken, boom):
                     self.assertIsNone(guard.advise_writing_style(
@@ -1236,12 +1363,19 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
         If a future agent-style keeps `_rule_12` and renames the rest, a
         subset loader would report one rule's findings under documentation
         promising six, and no output would reveal the gap. All or nothing.
+        From 0.8.0 the RULE-12 function the hook needs is the profile, and
+        that is the one removed when the installed release is that new.
         """
         self._require_agent_style()
         guard = _load_guard_module()
+        import agent_style
         from agent_style.review import detectors_mech
 
-        for missing in ("_rule_12", "_rule_i"):
+        release = tuple(
+            int(p) for p in agent_style.__version__.split(".")[:3]
+        )
+        rule_12 = "_rule_12_profile" if release >= (0, 8, 0) else "_rule_12"
+        for missing in (rule_12, "_rule_i"):
             with self.subTest(missing=missing):
                 with unittest.mock.patch.object(detectors_mech, missing, None):
                     self.assertIsNone(guard._agent_style_mechanical())
@@ -1250,7 +1384,9 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
                         {"file_path": "/tmp/probe.md", "content": _LONG_SENTENCE},
                     ))
 
-    def _advice_from_fake_release(self, *, version, detectors, raising=()):
+    def _advice_from_fake_release(
+        self, *, version, detectors, raising=(), silent=(),
+    ):
         """Run the real hook against a planted package; return its advisory.
 
         Goes through the subprocess harness with PYTHONPATH, the pattern the
@@ -1262,6 +1398,7 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
             fake = _write_release_fake_agent_style(
                 Path(tmp) / "fakepkg",
                 version=version, detectors=detectors, raising=raising,
+                silent=silent,
             )
             resp = run_guard_with_payload(
                 {
@@ -1319,20 +1456,25 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
     def test_the_release_is_compared_numerically(self) -> None:
         """0.10.0 is newer than 0.6.0, though it sorts before it as a string.
 
-        Both halves matter: with both functions present it runs eight, and
-        with `_rule_a` missing the advisory is off. A string comparison reads
-        0.10.0 as old, runs six in both cases, and fails each assertion.
+        Both halves matter: with the nine functions of the 0.8.0 set present
+        it runs nine, and with `_rule_08_repeats` missing the advisory is off.
+        A string comparison reads 0.10.0 as old, runs six in both cases, and
+        fails each assertion.
         """
         advice = self._advice_from_fake_release(
-            version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
+            version="0.10.0", detectors=_RELEASE_0_8_DETECTORS,
         )
-        self.assertIn("8 finding(s)", advice)
+        self.assertIn("9 finding(s)", advice)
         self.assertEqual(
             self._advice_from_fake_release(
-                version="0.10.0", detectors=_SIX_DETECTORS + ("_rule_03",),
+                version="0.10.0",
+                detectors=tuple(
+                    d for d in _RELEASE_0_8_DETECTORS if d != "_rule_08_repeats"
+                ),
             ),
             "",
-            "0.10.0 without _rule_a is incompatible and must disable the advisory",
+            "0.10.0 without _rule_08_repeats is incompatible and must disable "
+            "the advisory",
         )
 
     def test_0_6_0_without_rule_03_disables_the_whole_advisory(self) -> None:
@@ -1386,6 +1528,179 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
             raising=("_rule_a",),
         )
         self.assertEqual(advice, "")
+
+    @staticmethod
+    def _silent_except(detectors, *loud):
+        """Every detector in `detectors` that is not named in `loud`."""
+        return tuple(d for d in detectors if d not in loud)
+
+    def test_0_8_0_runs_the_profile_in_place_of_rule_12(self) -> None:
+        """From 0.8.0 RULE-12 is the profile, and `_rule_12` does not run.
+
+        The package here still carries `_rule_12`, as a real 0.8.0 does for
+        the CLI. Both would report if both ran. A count of one finding with
+        the profile's text therefore shows the swap. The profile takes the path, and the
+        label stays RULE-12.
+        """
+        detectors = _RELEASE_0_8_DETECTORS + ("_rule_12",)
+        advice = self._advice_from_fake_release(
+            version="0.8.0", detectors=detectors,
+            silent=self._silent_except(detectors, "_rule_12_profile", "_rule_12"),
+        )
+        self.assertIn("1 finding(s)", advice)
+        self.assertIn("RULE-12: profile-path=/tmp/abstract.md", advice)
+        self.assertNotIn("_rule_12 ran", advice)
+
+    def test_a_release_before_0_8_0_keeps_the_per_sentence_rule_12(self) -> None:
+        """The release picks the set, not the presence of the function.
+
+        A 0.7.9 package that carries the profile and RULE-08 anyway runs the
+        eight rules the 0.7.0 documentation names: `_rule_12` reports, and
+        neither new function is called. `_rule_12` here takes the text alone,
+        as the real one does. A path handed to it would raise and switch
+        the advisory off. Silence would then fail the first assertion.
+        """
+        detectors = (
+            _SIX_DETECTORS + ("_rule_03", "_rule_a")
+            + ("_rule_12_profile", "_rule_08_repeats")
+        )
+        advice = self._advice_from_fake_release(
+            version="0.7.9", detectors=detectors,
+            silent=self._silent_except(
+                detectors, "_rule_12", "_rule_12_profile", "_rule_08_repeats"),
+        )
+        self.assertIn("1 finding(s)", advice)
+        self.assertIn("RULE-12: _rule_12 ran", advice)
+        self.assertNotIn("profile-path", advice)
+        self.assertNotIn("RULE-08", advice)
+
+    def test_0_8_0_labels_are_spelled_out_not_derived(self) -> None:
+        """`_rule_12_profile` is RULE-12 and `_rule_08_repeats` is RULE-08.
+
+        Deriving the label from the function name gives `RULE-12_PROFILE` and
+        `RULE-08_REPEATS`, which no rule pack uses and which the audit would
+        list as rules of their own.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.8.0", detectors=_RELEASE_0_8_DETECTORS,
+            silent=self._silent_except(
+                _RELEASE_0_8_DETECTORS, "_rule_12_profile", "_rule_08_repeats"),
+        )
+        self.assertIn("2 finding(s)", advice)
+        self.assertIn("RULE-12: profile-path=/tmp/abstract.md", advice)
+        self.assertIn("RULE-08: repeats-path=/tmp/abstract.md", advice)
+        self.assertNotIn("_PROFILE", advice)
+        self.assertNotIn("_REPEATS", advice)
+
+    def test_0_8_0_keeps_the_display_rules_first_and_rule_08_after_them(self) -> None:
+        """The five-finding cap shows RULE-03, RULE-A, RULE-08, then the baseline.
+
+        All nine detectors report. Four findings are therefore withheld. The
+        first five are the display rules and RULE-08, then RULE-05 and
+        RULE-06, and the profile sits in RULE-12's old place below the cap.
+        This set also works without `_rule_12`, which 0.8.0 no longer
+        requires.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.8.0", detectors=_RELEASE_0_8_DETECTORS,
+        )
+        self.assertIn("9 finding(s)", advice)
+        self.assertIn("(+4 more)", advice)
+        order = [
+            advice.index(label)
+            for label in ("RULE-03:", "RULE-A:", "RULE-08:", "RULE-05:", "RULE-06:")
+        ]
+        self.assertEqual(order, sorted(order), advice)
+        self.assertNotIn("RULE-12", advice)
+
+    def test_0_8_0_without_the_profile_or_rule_08_disables_the_whole_advisory(self) -> None:
+        """A release that promises nine rules and carries eight is incompatible.
+
+        The first case is the one a fallback would hide: a package that kept
+        `_rule_12` and lost the profile must not run the old rule under the
+        documentation of the new one. The other detectors would all report.
+        Silence therefore means the loader refused the package.
+        """
+        for missing in ("_rule_12_profile", "_rule_08_repeats"):
+            with self.subTest(missing=missing):
+                detectors = tuple(
+                    d for d in _RELEASE_0_8_DETECTORS + ("_rule_12",)
+                    if d != missing
+                )
+                self.assertEqual(
+                    self._advice_from_fake_release(
+                        version="0.8.0", detectors=detectors),
+                    "",
+                )
+
+    def test_a_raising_profile_or_rule_08_disables_the_whole_advisory(self) -> None:
+        """The two new rules are held to the all-or-nothing contract at call time."""
+        for broken in ("_rule_12_profile", "_rule_08_repeats"):
+            with self.subTest(broken=broken):
+                self.assertEqual(
+                    self._advice_from_fake_release(
+                        version="0.8.0", detectors=_RELEASE_0_8_DETECTORS,
+                        raising=(broken,)),
+                    "",
+                )
+
+    def test_the_loader_hands_back_the_profile_itself_and_a_path_tolerant_rule_12(
+        self,
+    ) -> None:
+        """RULE-12 is one label for two functions, and the loader reconciles them.
+
+        `_PATH_AWARE_RULES` is keyed by label and therefore lists RULE-12. The
+        profile takes the path and is returned as the package defines it,
+        which the audit relies on to recognise it. Before 0.8.0 the same label
+        is the text-only per-sentence rule, returned behind an adapter that
+        accepts and drops the path.
+        """
+        guard = _load_guard_module()
+        self.assertEqual(
+            guard._PATH_AWARE_RULES,
+            frozenset({"RULE-03", "RULE-A", "RULE-08", "RULE-12"}),
+        )
+        every = _RELEASE_0_8_DETECTORS + ("_rule_12",)
+
+        modules, fns = _fake_agent_style_modules("0.8.0", every)
+        with unittest.mock.patch.dict(sys.modules, modules):
+            rules = guard._agent_style_mechanical()
+        self.assertEqual(
+            [label for label, _ in rules],
+            ["RULE-03", "RULE-A", "RULE-08", "RULE-05", "RULE-06", "RULE-12",
+             "RULE-B", "RULE-D", "RULE-I"],
+        )
+        self.assertIs(dict(rules)["RULE-12"], fns["_rule_12_profile"])
+        self.assertIs(dict(rules)["RULE-08"], fns["_rule_08_repeats"])
+
+        modules, fns = _fake_agent_style_modules("0.7.0", every)
+        with unittest.mock.patch.dict(sys.modules, modules):
+            rules = guard._agent_style_mechanical()
+        self.assertEqual(
+            [label for label, _ in rules],
+            ["RULE-03", "RULE-A", "RULE-05", "RULE-06", "RULE-12", "RULE-B",
+             "RULE-D", "RULE-I"],
+        )
+        legacy = dict(rules)["RULE-12"]
+        self.assertIsNot(legacy, fns["_rule_12"])
+        self.assertEqual(legacy("text", file_path="/tmp/x.md"), ["_rule_12 ran"])
+
+    def test_the_summary_marks_departures_and_lets_a_good_sentence_stay(self) -> None:
+        """The advisory's own line says what a finding is, in a few words.
+
+        Humans break any single default now and then. A finding marks where
+        the text leaves typical human prose and does not call it wrong. The
+        closing sentence, which says the hook did not block the write, stays.
+        """
+        advice = self._advice_from_fake_release(
+            version="0.7.0", detectors=_SIX_DETECTORS + ("_rule_03", "_rule_a"),
+        )
+        self.assertIn("8 finding(s)", advice)
+        self.assertRegex(
+            advice,
+            r"These mark departures from typical human prose; one that reads "
+            r"well can stay\. Advisory only; this hook did not block the write\.$",
+        )
 
     def test_an_unreadable_version_is_treated_as_an_older_release(self) -> None:
         """Missing and unparsable versions both run the six-rule baseline.
@@ -1488,22 +1803,194 @@ class AgentStyleAdvisoryTests(unittest.TestCase):
     def test_the_advisory_is_capped(self) -> None:
         """A wall of findings is one the reader learns to skip.
 
-        RULE-12 alone reports hundreds of hits on a large CHANGELOG, so the
-        line is capped and says how many it withheld.
+        A rule that reports each hit can run to hundreds on a large CHANGELOG.
+        The line is therefore capped and says how many it withheld. This test
+        writes a contraction repeated twelve times: RULE-I reports every one in every
+        release. Long sentences would not do, because from 0.8.0 the RULE-12
+        profile folds them into a single finding.
         """
         self._require_agent_style()
-        many = "\n\n".join(f"{_LONG_SENTENCE}" for _ in range(12))
+        many = "\n\n".join("We don't claim more here." for _ in range(12))
         resp = run_guard_with_payload({
             "tool_name": "Write",
             "tool_input": {"file_path": "/tmp/probe.md", "content": many},
         })
         advice = self._advice(resp)
         self.assertIn("[agent-style]", advice)
+        self.assertIn("12 finding(s)", advice)
         self.assertIn("more)", advice, "a truncated list must say what it withheld")
-        self.assertLessEqual(
-            advice.count("RULE-12"), 5 + 1,
-            "at most the cap should be listed",
+        self.assertEqual(
+            advice.count("RULE-I:"), 5,
+            "exactly the cap should be listed",
         )
+
+    def test_the_profile_folds_long_sentences_into_one_finding(self) -> None:
+        """From 0.8.0 twelve long sentences are one RULE-12 finding, not twelve.
+
+        This is why the cap test above does not use them. One finding per
+        document keeps a paper full of long sentences from crowding the share
+        and `, so` findings out of the five the hook shows. Skips until a
+        0.8.0 package is installed.
+        """
+        self._require_agent_style()
+        import agent_style
+
+        release = tuple(int(p) for p in agent_style.__version__.split(".")[:3])
+        if release < (0, 8, 0):
+            self.skipTest("the RULE-12 profile ships with agent-style 0.8.0")
+        guard = _load_guard_module()
+        many = "\n\n".join(_LONG_SENTENCE for _ in range(12))
+        advice = guard.advise_writing_style(
+            "Write", {"file_path": "/tmp/probe.md", "content": many})
+        self.assertIn("1 finding(s)", advice)
+        self.assertIn("12 sentences over 80 words", advice)
+
+
+class StyleCheckLineNumberTests(unittest.TestCase):
+    """The text a detector reads keeps the line numbers of the text written.
+
+    The advisory strips fenced code, inline code and LaTeX verbatim before it
+    runs the detectors, so that examples quoted in a style guide produce no
+    findings. A stripped span used to collapse to one space. Every detector
+    that reports where it found something, RULE-08 most visibly ("also on
+    lines 9, 13"), then reported lines counted from a file with the fences
+    deleted, and the author looked at the wrong place.
+    """
+
+    @staticmethod
+    def _marked_lines(text, marker="CAVEAT"):
+        return [n for n, line in enumerate(text.split("\n"), 1) if marker in line]
+
+    def test_a_stripped_markdown_fence_keeps_every_later_line_number(self) -> None:
+        guard = _load_guard_module()
+        fence = "```python\n" + "x = 1\n" * 8 + "```"
+        text = f"# Notes\n\n{fence}\n\nCAVEAT one.\n\nCAVEAT two.\n"
+        out = guard._content_for_style_check(text, ".md")
+        self.assertNotIn("x = 1", out)
+        self.assertEqual(out.count("\n"), text.count("\n"))
+        self.assertEqual(self._marked_lines(out), self._marked_lines(text))
+
+    def test_every_stripped_form_keeps_its_newlines(self) -> None:
+        guard = _load_guard_module()
+        cases = {
+            ".md": [
+                "a\n~~~\nline\nline\n~~~\nCAVEAT\n",
+                "a ``tick ` inside`` b\nCAVEAT\n",
+                "a `code` b `more` c\nCAVEAT\n",
+                "````\n```\nnested\n```\n````\nCAVEAT\n",
+            ],
+            ".rst": ["a\n```\nline\n```\nCAVEAT\n"],
+            ".tex": [
+                "a\n\\begin{verbatim}\nl1\nl2\nl3\n\\end{verbatim}\nCAVEAT\n",
+                "a \\verb|x| b\nCAVEAT\n",
+                "a \\texttt{split\nacross\nlines} b\nCAVEAT\n",
+            ],
+        }
+        for ext, texts in cases.items():
+            for text in texts:
+                with self.subTest(ext=ext, text=text):
+                    out = guard._content_for_style_check(text, ext)
+                    self.assertEqual(out.count("\n"), text.count("\n"))
+                    self.assertEqual(
+                        self._marked_lines(out), self._marked_lines(text))
+
+    def test_an_inline_span_is_still_one_space(self) -> None:
+        """Nothing changes for a span without a newline, which is most of them."""
+        guard = _load_guard_module()
+        self.assertEqual(
+            guard._content_for_style_check("a `code` b", ".md"), "a   b")
+        self.assertEqual(
+            guard._content_for_style_check("a \\verb|x| b", ".tex"), "a   b")
+
+    def test_the_banned_word_scan_still_skips_the_stripped_span(self) -> None:
+        """The gate shares the stripping and must still skip the stripped code."""
+        guard = _load_guard_module()
+        text = "Intro.\n```\nThis is pivotal.\n```\nOutro.\n"
+        self.assertIsNone(guard.check_writing_style(
+            "Write", {"file_path": "/tmp/notes.md", "content": text}))
+        self.assertIsNotNone(guard.check_writing_style(
+            "Write", {"file_path": "/tmp/notes.md", "content": text.replace(
+                "```", "")}))
+
+    def _lines_a_detector_sees(self, path, content):
+        """Run the real advisory loop against a detector that reports lines.
+
+        The planted RULE-08 reads the text it was handed and names the lines
+        that carry the marker. Whatever it names is what an author would be
+        told. The test compares it with the lines of the file as written.
+        """
+        import types
+
+        guard = _load_guard_module()
+        modules, fns = _fake_agent_style_modules("0.8.0", _RELEASE_0_8_DETECTORS)
+
+        def repeats(text, file_path=None):
+            seen = [n for n, line in enumerate(text.split("\n"), 1) if "CAVEAT" in line]
+            return [types.SimpleNamespace(detail=f"caveat on lines {seen}")]
+
+        modules["agent_style.review.detectors_mech"]._rule_08_repeats = repeats
+        with unittest.mock.patch.dict(sys.modules, modules):
+            advice = guard.advise_writing_style(
+                "Write", {"file_path": path, "content": content})
+        found = [part for part in advice.split("; ") if "caveat on lines" in part]
+        self.assertEqual(len(found), 1, advice)
+        return found[0].split("caveat on lines ")[1].split("]")[0] + "]"
+
+    def test_three_caveats_after_a_fence_are_reported_on_their_own_lines(self) -> None:
+        fence = "```text\n" + "log line\n" * 8 + "```"
+        text = (
+            "# Notes\n\n" + fence + "\n\n"
+            "CAVEAT the first.\n\nFiller sentence here.\n\n"
+            "CAVEAT the second.\n\nMore filler here.\n\n"
+            "CAVEAT the third.\n"
+        )
+        expected = self._marked_lines(text)
+        self.assertEqual(expected, [14, 18, 22])
+        self.assertEqual(
+            self._lines_a_detector_sees("/tmp/notes.md", text), str(expected))
+
+    def test_three_caveats_after_a_verbatim_block_keep_their_lines(self) -> None:
+        verbatim = "\\begin{verbatim}\n" + "log line\n" * 6 + "\\end{verbatim}"
+        text = (
+            "\\section{Results}\n" + verbatim + "\n"
+            "CAVEAT the first.\n\nFiller sentence here.\n\n"
+            "CAVEAT the second.\n\nCAVEAT the third.\n"
+        )
+        expected = self._marked_lines(text)
+        self.assertEqual(
+            self._lines_a_detector_sees("/tmp/paper.tex", text), str(expected))
+
+    def test_the_real_rule_08_names_the_true_lines_after_a_fence(self) -> None:
+        """The failure as reported, with the real detector. Skips before 0.8.0."""
+        AgentStyleAdvisoryTests._require_agent_style(self)
+        import agent_style
+
+        release = tuple(int(p) for p in agent_style.__version__.split(".")[:3])
+        if release < (0, 8, 0):
+            self.skipTest("RULE-08 ships with agent-style 0.8.0")
+        guard = _load_guard_module()
+        caveat = (
+            "The analysis does not establish whether the effect "
+            "transfers to larger crystal lattices."
+        )
+        fence = "```text\n" + "log line\n" * 8 + "```"
+        text = (
+            "# Notes\n\n" + fence + "\n\n"
+            f"{caveat} The gain is steady.\n\n"
+            "The cost falls with batch size.\n\n"
+            f"As before, {caveat[0].lower()}{caveat[1:]} Cost falls.\n\n"
+            "The runs finished on time.\n\n"
+            f"Again, {caveat[0].lower()}{caveat[1:]}\n"
+        )
+        expected = [n for n, line in enumerate(text.split("\n"), 1)
+                    if "analysis does not establish" in line.lower()]
+        self.assertEqual(len(expected), 3)
+        advice = guard.advise_writing_style(
+            "Write", {"file_path": "/tmp/notes.md", "content": text})
+        self.assertIn("RULE-08", advice)
+        match = re.search(r"also on lines (\d+), (\d+)", advice)
+        self.assertIsNotNone(match, advice)
+        self.assertEqual([int(match.group(1)), int(match.group(2))], expected[1:])
 
 
 def load_guard_module():

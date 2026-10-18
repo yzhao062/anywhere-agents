@@ -567,6 +567,19 @@ def _content_for_write(tool_name, tool_input):
     return ""
 
 
+def _stand_in(match):
+    """What a stripped span leaves behind: one space and the span's newlines.
+
+    The advisory's detectors report line numbers, and the author reads them
+    against the file. A fence that collapsed to a single space moved every
+    later line up by the fence's height, and a repeated caveat far below it
+    was reported far above its place. Keeping the span's own newlines keeps
+    each later line where the file has it. An inline span has none and still
+    becomes one space, as before.
+    """
+    return " " + "\n" * match.group(0).count("\n")
+
+
 def _content_for_style_check(content, ext):
     """Strip quoted/code examples before prose style matching. Banned words
     inside code fences (``` … ```) or inline code (`foo`) are almost always
@@ -574,22 +587,26 @@ def _content_for_style_check(content, ext):
     these avoids flagging legitimate style-guide documentation, generated
     CLAUDE.md / agents/codex.md files, and CHANGELOG entries that quote the
     ban list. Similarly for LaTeX verbatim / \\verb / \\texttt environments.
+
+    The line structure survives the stripping (see `_stand_in`): the text
+    handed to a detector has the same number of lines as the text written,
+    and every line that was not inside a stripped span is on its own number.
     """
     if ext in (".md", ".rst"):
         # Fenced code blocks (``` ... ``` or ~~~ ... ~~~)
-        content = re.sub(r"(`{3,}|~{3,})[\s\S]*?\1", " ", content)
+        content = re.sub(r"(`{3,}|~{3,})[\s\S]*?\1", _stand_in, content)
         # Double-backtick inline code (for literals containing a single backtick)
-        content = re.sub(r"``[^`\n]+``", " ", content)
+        content = re.sub(r"``[^`\n]+``", _stand_in, content)
         # Single-backtick inline code
-        content = re.sub(r"`[^`\n]+`", " ", content)
+        content = re.sub(r"`[^`\n]+`", _stand_in, content)
     elif ext == ".tex":
         content = re.sub(
             r"\\begin\{verbatim\}[\s\S]*?\\end\{verbatim\}",
-            " ",
+            _stand_in,
             content,
         )
-        content = re.sub(r"\\verb(.).*?\1", " ", content)
-        content = re.sub(r"\\texttt\{[^{}]*\}", " ", content)
+        content = re.sub(r"\\verb(.).*?\1", _stand_in, content)
+        content = re.sub(r"\\texttt\{[^{}]*\}", _stand_in, content)
     return content
 
 
@@ -711,7 +728,8 @@ _STYLE_ADVISORY_LIMIT = 5
 # match: advertising six rules while silently running one is worse than
 # running none, because the reader cannot tell the difference from the output.
 #
-# This is the baseline, the set every release the advisory supports carries.
+# This is the baseline, the set every release before 0.8.0 carries. From 0.8.0
+# the profile `_rule_12_profile` takes the place of `_rule_12`, as below.
 # agent-style 0.6.0 added `_rule_03` (confidence intervals in prose, and
 # precise figures stacked across consecutive sentences of an abstract or an
 # introduction). The set therefore follows the package's release, read in
@@ -737,11 +755,49 @@ _RULE_03_MIN_VERSION = (0, 6, 0)
 _RULE_A_ATTR = "_rule_a"
 _RULE_A_MIN_VERSION = (0, 7, 0)
 
+# agent-style 0.8.0 swaps the per-sentence `_rule_12` for `_rule_12_profile`,
+# which reads a whole document and reports under the same RULE-12 label, and
+# adds `_rule_08_repeats` (a caveat restated three or more times outside the
+# limitations). Both are required from that release on, under the same
+# contract. `_rule_12` is not required: the profile replaces it in the set from
+# 0.8.0, and a package that dropped the old function is still complete. RULE-08
+# runs third, after the two display rules, because the findings are capped and
+# RULE-12 can fill the cap on its own.
+_RULE_12_ATTR = "_rule_12"
+_RULE_12_PROFILE_ATTR = "_rule_12_profile"
+_RULE_08_REPEATS_ATTR = "_rule_08_repeats"
+_PROFILE_MIN_VERSION = (0, 8, 0)
+
+# The label a finding carries, spelled out for the detectors whose function
+# name does not derive it. `name.replace("_rule_", "RULE-").upper()` turns
+# `_rule_12_profile` into `RULE-12_PROFILE`, a label no rule pack uses, and
+# the profile has to report under RULE-12 so the audit and the documentation
+# keep one name for the rule.
+_ADVISORY_LABELS = {
+    _RULE_12_PROFILE_ATTR: "RULE-12",
+    _RULE_08_REPEATS_ATTR: "RULE-08",
+}
+
 # Detectors that take the path of the file being written as well as its text.
-# RULE-03 reads it to recognise abstract and introduction files, and both read
-# it to tell a LaTeX source and an appendix or supplement apart. The others
-# are called with the text alone, as they were before these existed.
-_PATH_AWARE_RULES = frozenset({"RULE-03", "RULE-A"})
+# RULE-03 reads it to recognise abstract and introduction files. RULE-A, the
+# RULE-12 profile and RULE-08 read it to tell a LaTeX source and an appendix or
+# supplement apart, and the profile and RULE-08 also read the file name to find
+# an abstract, an introduction, or a limitations section. The others are
+# called with the text alone, as they were before these existed.
+#
+# The set is keyed by label, and RULE-12 is one label for two functions: the
+# profile takes the path and the per-sentence `_rule_12` of earlier releases
+# does not. `_agent_style_mechanical()` therefore hands back the old function
+# behind `_ignore_path`. A caller can then pass the path to every RULE-12,
+# whichever release is installed.
+_PATH_AWARE_RULES = frozenset({"RULE-03", "RULE-A", "RULE-08", "RULE-12"})
+
+
+def _ignore_path(fn):
+    """Wrap a text-only detector so it accepts, and drops, `file_path`."""
+    def call(text, file_path=None):
+        return fn(text)
+    return call
 
 
 def _agent_style_version():
@@ -785,7 +841,9 @@ def _agent_style_mechanical():
     functions would have left the hook running one rule, the documentation
     promising six, and every behaviour test green. The release decides which
     set that is. Before 0.6.0, or with a version that cannot be read, it is
-    `_ADVISORY_RULE_ATTRS`. 0.6.0 adds `_rule_03`, and 0.7.0 adds `_rule_a`.
+    `_ADVISORY_RULE_ATTRS`. 0.6.0 adds `_rule_03`, 0.7.0 adds `_rule_a`, and
+    0.8.0 adds `_rule_08_repeats` and runs `_rule_12_profile` in place of
+    `_rule_12`.
     """
     try:
         from agent_style.review import detectors_mech
@@ -801,7 +859,12 @@ def _agent_style_mechanical():
     # still runs it, where a human asked for the full audit.
     attrs = _ADVISORY_RULE_ATTRS
     version = _agent_style_version()
-    if version is not None and version >= _RULE_A_MIN_VERSION:
+    if version is not None and version >= _PROFILE_MIN_VERSION:
+        attrs = (_RULE_03_ATTR, _RULE_A_ATTR, _RULE_08_REPEATS_ATTR) + tuple(
+            _RULE_12_PROFILE_ATTR if name == _RULE_12_ATTR else name
+            for name in _ADVISORY_RULE_ATTRS
+        )
+    elif version is not None and version >= _RULE_A_MIN_VERSION:
         attrs = (_RULE_03_ATTR, _RULE_A_ATTR) + _ADVISORY_RULE_ATTRS
     elif version is not None and version >= _RULE_03_MIN_VERSION:
         attrs = (_RULE_03_ATTR,) + _ADVISORY_RULE_ATTRS
@@ -812,7 +875,10 @@ def _agent_style_mechanical():
             # An installed but incompatible agent-style. Treated exactly like
             # an absent one: silent, and the banned-word gate is unaffected.
             return None
-        rules.append((name.replace("_rule_", "RULE-").upper(), fn))
+        label = _ADVISORY_LABELS.get(name) or name.replace("_rule_", "RULE-").upper()
+        if name == _RULE_12_ATTR:
+            fn = _ignore_path(fn)
+        rules.append((label, fn))
     return rules
 
 
@@ -820,10 +886,13 @@ def advise_writing_style(tool_name, tool_input):
     """Report agent-style's deterministic findings without blocking the write.
 
     Advisory rather than deny, deliberately. The banned-word gate denies
-    because each hit has a one-word substitution; these rules do not. RULE-12
-    fires on any sentence over thirty words, which is a judgement call in
-    prose a human is typing and a mechanical fix only when an agent is
-    drafting. Denying on it would make the hook something to switch off.
+    because each hit has a one-word substitution; these rules do not. Before
+    agent-style 0.8.0, RULE-12 fires on any sentence over thirty words, which
+    is a judgement call in prose a human is typing and a mechanical fix only
+    when an agent is drafting. From 0.8.0 it reports where a document's
+    sentence lengths and clause joins leave the human range, a statement about
+    the draft as a whole. Denying on either would make the hook something to
+    switch off.
 
     Returns a message, or None. The caller passes the tool call through
     either way and hands any message to make_advisory_response().
@@ -884,7 +953,11 @@ def advise_writing_style(tool_name, tool_input):
         # would be a promise this hook is not in a position to make.
         f"[agent-style] {len(findings)} finding(s) in {os.path.basename(file_path)}"
         f"{tail}: " + "; ".join(shown) +
-        ". Advisory only; this hook did not block the write."
+        # Humans break any single default now and then, and a draft that obeys
+        # every default reads as uniform. The findings mark where the text
+        # leaves typical human prose, and the author keeps one that reads well.
+        ". These mark departures from typical human prose; one that reads "
+        "well can stay. Advisory only; this hook did not block the write."
     )
 
 

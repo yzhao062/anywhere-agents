@@ -30,11 +30,12 @@ outcome and no review-loop invocation produces one.
 
 Style findings never enter Round history, never count toward the verdict, and
 never earn another round. Three properties make that risk concrete rather
-than theoretical. RULE-12 fires on any sentence over thirty words, so
-splitting one long sentence can produce another, and the rule has no fixed
-point. A prose fix is a diff change, and a diff change earns a round under
-the normal loop rules. Handed a list of style findings, a reviewer will treat
-them as findings and ask for them to be resolved.
+than theoretical. Through agent-style 0.7.0, RULE-12 fires on any sentence over
+thirty words. Splitting one long sentence can therefore produce another, and the
+rule has no fixed point. From 0.8.0 it reads a document's sentence-length profile,
+which a rewrite moves as well. A prose fix is a diff change, and a diff change
+earns a round under the normal loop rules. Handed a list of style findings, a
+reviewer will treat them as findings and ask for them to be resolved.
 
 Callers that want an exit code should read `Style status:` from stdout, or
 pass --json. Nothing in the review loop should do either.
@@ -113,9 +114,11 @@ def _load_hook_detectors(candidates=None):
 
     `audit()` follows the CLI, which keeps its published bench scope fixed.
     It therefore omits the detectors only hooks run: RULE-03 from agent-style
-    0.6.0 and RULE-A from 0.7.0. The guard already decides which detectors a
-    release promises, so the audit asks the guard rather than keeping a
-    second list.
+    0.6.0, RULE-A from 0.7.0, and RULE-08 from 0.8.0. From 0.8.0 the hook also
+    runs a document-level RULE-12 profile in place of the CLI's per-sentence
+    RULE-12; `_replaced_cli_rules` says when the audit follows suit. The guard
+    already decides which detectors a release promises, and the audit asks it
+    rather than keeping a second list.
 
     The guard shipped beside this script comes first and the deployed hook is
     the fallback. A consumer's deployed hook can be older than the package it
@@ -146,23 +149,69 @@ def _load_hook_detectors(candidates=None):
     return None, frozenset()
 
 
+# Hook detectors that take over a rule the CLI also runs, by function name and
+# the label they report under. The profile reads a whole document, where the
+# CLI's `_rule_12` flags each sentence over thirty words. Reporting both
+# would list every long sentence beside a document-level reading that treats
+# most of them as ordinary. Every finding the profile returns is about the
+# document, and `audit_files` marks it so for the changed-line filter.
+_CLI_REPLACED_BY_HOOK = {"_rule_12_profile": "RULE-12"}
+
+
+def _replaced_cli_rules(extra_rules):
+    """Labels whose CLI detector the guard's set replaces, as a frozenset.
+
+    A hook rule counts only when its function is the package's own attribute
+    of that name. The label alone is not enough, since an older release runs
+    a per-sentence RULE-12 under the same label and must keep its CLI result.
+    """
+    try:
+        from agent_style.review import detectors_mech
+    except Exception:
+        return frozenset()
+    return frozenset(
+        label for label, fn in extra_rules
+        for attr, target in _CLI_REPLACED_BY_HOOK.items()
+        if label == target and fn is getattr(detectors_mech, attr, None)
+    )
+
+
+def _rule_label(name):
+    """The rule label a `_rule_*` function name stands for, or None.
+
+    The rule identifier is the text after `_rule_` and before the next `_`.
+    Any remainder is a descriptor: `_rule_12_profile` is RULE-12 and
+    `_rule_08_repeats` is RULE-08. Taking the whole remainder would yield
+    `RULE-12_PROFILE`, a label no rule pack uses, which names no detector and
+    would leave the real one uncounted.
+    """
+    if not name.startswith("_rule_"):
+        return None
+    ident = name[len("_rule_"):].split("_", 1)[0]
+    return "RULE-" + ident.upper() if ident.isalnum() else None
+
+
 def _package_hook_rules():
     """Labels of the `_rule_*` detectors the installed package carries.
 
     Used only for coverage. A detector here that neither `audit()` nor the
-    guard's set ran is reported as a detector that did not run, so a missing
-    guard or a failed hook check cannot read as full coverage.
+    guard's set ran is reported as a detector that did not run. A missing
+    guard or a failed hook check therefore cannot read as full coverage.
+    Helper functions that share a rule's prefix, such as `_rule_03_scan`,
+    resolve to a label already in the set.
     """
     try:
         from agent_style.review import detectors_mech
     except Exception:
         return set()
-    return {
-        name.replace("_rule_", "RULE-").upper()
+    labels = {
+        _rule_label(name)
         for name in dir(detectors_mech)
-        if name.startswith("_rule_") and name[6:].isalnum()
+        if name.startswith("_rule_")
         and callable(getattr(detectors_mech, name, None))
     }
+    labels.discard(None)
+    return labels
 
 
 def is_prose_target(path):
@@ -300,6 +349,7 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
     if hook_rules is None:
         hook_rules = _load_hook_detectors()
     extra_rules, path_aware = hook_rules
+    replaced = _replaced_cli_rules(extra_rules or [])
 
     findings = []
     ran_detectors = {}
@@ -329,6 +379,11 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
             for rule_result in result.get("rule_results", []):
                 rule = rule_result.get("rule", "?")
                 is_skipped = rule_result.get("status") == "skipped"
+                if (rule in replaced and not is_skipped
+                        and rule_result.get("detector") == "mechanical"):
+                    # The hook's profile reports this rule below. Counting the
+                    # CLI run as coverage would hide a profile that fails.
+                    continue
                 bucket = skipped_detectors if is_skipped else ran_detectors
                 bucket.setdefault(rule, set()).add(rule_result.get("detector", "?"))
                 if is_skipped or rule in noisy_rules:
@@ -347,6 +402,7 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
             already = {
                 r.get("rule") for r in result.get("rule_results", [])
                 if r.get("detector") == "mechanical" and r.get("status") != "skipped"
+                and r.get("rule") not in replaced
             }
             try:
                 with open(target, encoding="utf-8", errors="replace") as handle:
@@ -379,6 +435,12 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
                         "rule": label,
                         "detail": getattr(v, "detail", ""),
                         "excerpt": getattr(v, "excerpt", ""),
+                        # The profile that replaced the CLI's RULE-12 gathers
+                        # every sentence over eighty words into one finding
+                        # anchored at the first. A later extreme sentence can
+                        # change the count while leaving that anchor alone.
+                        # Treat the finding as document-level whatever its text.
+                        "document_level": label in replaced,
                     })
 
     # A detector the package carries that nothing ran, because no guard could
@@ -407,6 +469,30 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
     return findings, coverage, None
 
 
+def _document_level_prefix():
+    """The text that opens a finding about a whole document, or None.
+
+    agent-style 0.8.0 starts the findings that describe a document, not a
+    place in it (the share of long sentences, a run of `, so` joins, a caveat
+    stated again and again), with `_PF_DOCUMENT_PREFIX`. Those findings anchor
+    on the first sentence, join or member that triggered them. A revision to
+    another part of the file leaves that anchor line untouched. Line scoping
+    alone would then count them as pre-existing, although the revision is what
+    moved the document's profile.
+
+    None when the package is absent, predates the constant, or carries a value
+    that is not a non-empty string. An empty prefix must never count: every
+    string starts with it, and every finding would then pass for one about the
+    document.
+    """
+    try:
+        from agent_style.review import detectors_mech
+    except Exception:
+        return None
+    prefix = getattr(detectors_mech, "_PF_DOCUMENT_PREFIX", None)
+    return prefix if isinstance(prefix, str) and prefix else None
+
+
 def scope_to_changed_lines(findings, repo):
     """Drop findings outside the staged hunks.
 
@@ -415,11 +501,21 @@ def scope_to_changed_lines(findings, repo):
     file, and asking per finding would launch that many git processes, each
     with its own timeout. An audit advertised as unable to hold the loop open
     must not be able to spend hours before returning 0.
+
+    Two kinds of finding keep their place whatever the hunks say. One is about
+    the file (an AUDIT problem, or any finding at line 0). The other describes
+    the document as a whole. `audit_files` marks the findings of a rule that
+    replaced the CLI's `document_level`, and `_document_level_prefix` names the
+    ones that open with the package's own marker. This function sees only
+    files the staged diff touches. Every document-level finding here
+    therefore belongs to a changed file. Findings about one place in the
+    text keep the line scoping.
     """
     kept = []
     dropped = 0
     fell_back = set()
     cache = {}
+    document_prefix = _document_level_prefix()
     for f in findings:
         path = f["file"]
         if path not in cache:
@@ -427,8 +523,13 @@ def scope_to_changed_lines(findings, repo):
         touched = cache[path]
         if touched is None:
             fell_back.add(path)
-        # An AUDIT finding is about the file, so it has no line to match.
-        if (f["rule"] == "AUDIT" or f["line"] <= 0
+        detail = f.get("detail")
+        about_the_document = bool(f.get("document_level")) or (
+            document_prefix is not None and isinstance(detail, str)
+            and detail.startswith(document_prefix)
+        )
+        # An AUDIT finding is about the file and has no line to match.
+        if (f["rule"] == "AUDIT" or f["line"] <= 0 or about_the_document
                 or touched is None or f["line"] in touched):
             kept.append(f)
         else:

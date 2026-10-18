@@ -10,6 +10,8 @@ For an audit, show the operation that produces the conclusion: locate a reported
 
 Several source-derived cases can show distinct outcomes, such as a smaller gain, a reversed ranking, and a comparison excluded by a quality constraint. Choose cases for those differences. Do not pad the panel with invented values or redundant copies of the same lesson. Shared row structure and aligned axes let additional cases add evidence with little extra text.
 
+When a paper studies text or agent behavior, consider showing one real instance among the first figures. Mark the decisive span, and place the figure no later than just after the first headline aggregate. A prompt, a trajectory excerpt, or a model reply all work, and readers then see the phenomenon early. Chen et al. (2021, the Codex paper) show real HumanEval prompts with a shaded successful completion as Figure 2, right after a single pass-rate plot. Keep the instance verbatim apart from the marking, and say whether it is typical.
+
 ## Make Comparisons Interpretable
 
 Keep the metric, direction, comparator, and necessary setting near the values. Prefer a familiar word such as "baseline" when a term such as "arm" adds no useful distinction. "Another reported baseline" needs a visible explanation of what changed and what stayed fixed.
