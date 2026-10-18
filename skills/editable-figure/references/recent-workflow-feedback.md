@@ -8,7 +8,7 @@ Merged into the canonical skill on 2026-10-17 from `internal-writing/figure-pref
 
 **Application:** Default new paper/proposal overviews, new standalone mechanism figures, and substantial redesigns to a whole-figure image-generation concept before native reconstruction. This records the author's experience and desired workflow, not a controlled comparison proving that one backend or image generation always wins. Keep accepted compositions during local edits. Apply the exceptions and authorization boundaries in the main skill.
 
-## Meta: preferred central technical illustration
+## Meta: preferred central illustration and full overview
 
 Project record: `NSF-Proposal-Template-Yue/figure-preferences/index.md`, Meta SAAC RecSys entry. On 2026-10-17 the author rejected v7: “这个全是文字用不了啊”. For v8c: “这一版我特别喜欢中间的这个示意图，左右还可以。” The subsequent request was for small refinements such as thrust or section labels; v8e was later requested for manuscript insertion.
 
@@ -18,7 +18,9 @@ Inspected images in `NSF-Proposal-Template-Yue/proposals/meta-saac-recsys-2027/f
 
 The earlier complaint that v6 felt childish was followed by an agent interpretation favoring one accent, no gradients, and fewer illustrated elements. The author rejected the resulting v7. Those prescriptions are not confirmed preferences or general bans. Preserve the strongly liked center when refining the rest.
 
-**Gallery status:** Registered as [16, Meta central mechanism](gallery/16-meta-central-mechanism/preview.png) on 2026-10-17 after the author explicitly requested inclusion and shared distribution. Strong approval remains scoped to the v8c center; the sides are acceptable. The stored full PDF and cropped preview use v8f, which retains the art and corrects the subsequently reported arrow misalignment. The correction has local visual verification, not a new author approval. See [source version and crop](gallery/sources.json).
+**Gallery status:** Reference [16, central detail](gallery/16-meta-central-mechanism/preview.png) retains the original strong center preference. After viewing the full corrected v8f, the author explicitly requested [17, full overview](gallery/17-meta-overview/preview.png) as a positive reference and said the upper part is generally good. The stated reasons are attractive visuals, effective 3D treatment, clear LoRA and frozen-component roles, and a figure that explains itself. Optimization of the lower objective strip is deferred, without claiming every detail is approved. The full PDF is shared by both entries; see [source versions](gallery/sources.json).
+
+The author also asked to retain the assessment of the complete narrative: concrete input edits, a distinctive technical center, personalized output behavior, and corresponding training objectives. This is an agent interpretation selected for reuse. Preserve each region's explanatory role and consistent notation when applicable, with the upper part as the confirmed aesthetic reference. The lower strip's density and small-label readability remain possible revision targets, not confirmed author dislikes.
 
 ## Amazon: columns and asset sheets do not establish visual composition
 

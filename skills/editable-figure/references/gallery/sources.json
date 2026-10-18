@@ -250,7 +250,7 @@
       "title": "Meta SAAC RecSys · Central mechanism",
       "role": "中段技术示意：VLM、LoRA、缓存、冻结 Ranker 与梯度路径；预览为局部裁切",
       "collected_on": "2026-10-17",
-      "preference_status": "confirmed: strong preference for central illustration; sides only acceptable",
+      "preference_status": "confirmed: strong central-illustration preference; subsequent whole-figure approval recorded in reference 17",
       "feedback_updated_on": "2026-10-17",
       "preview_crop_pdf_points": [
         296.0,
@@ -258,7 +258,22 @@
         722.0,
         244.0
       ],
-      "source_note": "Author-approved v8c center retained in v8f; v8e typography polish and v8f arrow alignment. Full PDF preserved, preview cropped to the preferred center; crop coordinates use top-left-origin, y-down PDF points. Author explicitly authorized gallery inclusion and anywhere-agents sync on 2026-10-17. Draft proposal, not an awarded-proposal claim. Object illustrations are pictures; labels and connectors remain native in the project PPTX."
+      "source_note": "Author-approved v8c center retained in v8f; v8e typography polish and v8f arrow alignment. Full PDF preserved, preview cropped to the center; crop coordinates use top-left-origin, y-down PDF points. Later feedback approves the whole figure as a positive reference, especially its upper part; see reference 17. Author explicitly authorized gallery inclusion and shared distribution on 2026-10-17. Draft proposal, not an awarded-proposal claim. Object illustrations are pictures; labels and connectors remain native in the project PPTX."
+    },
+    {
+      "id": "17-meta-overview",
+      "repository": "NSF-Proposal-Template-Yue",
+      "source_path": "proposals/meta-saac-recsys-2027/figure/output/figure1-v8f-final.pdf",
+      "copied_file": "16-meta-central-mechanism/figure1-v8f-final.pdf",
+      "preview": "17-meta-overview/preview.png",
+      "page": 1,
+      "sha256": "770959ed55889232824dca824e9447583800d25ca4b909d4f07008ead967241b",
+      "title": "Meta SAAC RecSys · Full overview",
+      "role": "完整总览：具体编辑案例 → 3D 技术机制 → 个性化响应；下方训练目标保留，上半部分整体认可，下半部分暂缓优化",
+      "collected_on": "2026-10-17",
+      "preference_status": "confirmed positive full-figure reference; upper part liked for attractive 3D visuals, clear LoRA/frozen roles and self-explanation; lower part optimization deferred",
+      "feedback_updated_on": "2026-10-17",
+      "source_note": "Same corrected v8f PDF as reference 16, with the full native-export PNG copied unchanged. Reference 16 remains the central detail view. Subsequent author feedback explicitly broadens approval to the whole figure as a positive reference, especially the upper part. Deferring work on the lower objective strip is not approval of every detail or evidence that no improvement is needed. Draft proposal, not an awarded-proposal claim."
     }
   ],
   "updated_on": "2026-10-17"
