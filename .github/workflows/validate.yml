@@ -134,13 +134,3 @@ jobs:
             tests.test_packs_auth_chain.TestRedactSecretText \
             tests.test_packs_auth_chain.TestRejectCredentialURLRedaction \
             -v
-
-      # End-to-end Compose smoke deferred to v0.5.1: the test-fixture
-      # needs the bundled bootstrap manifest seeded with agent-style and
-      # the agent-style fetch path exercised, which is broader than the
-      # v0.5.0 token-leak / auth-chain assertion this job is meant to
-      # gate. Token method smoke + Sentinel redaction smoke above
-      # already validate the v0.5.0 auth chain primitive, and
-      # tests/test_compose_packs_v0_5.* exercises the composer end-to-end
-      # in unit form. TODO(v0.6.0): wire the ANYWHERE_AGENTS_CMDLOG
-      # harness for end-to-end token-leak coverage.

@@ -267,6 +267,19 @@ strict_test_files=(
   # both STRICT-shared under the recursive prun tree, and reads each repo's own
   # README and docs. Registered in the commit that adds it, not after drift.
   tests/test_prun_executors.py
+  # Byte-identical on both sides but unregistered until the 2026-10-18
+  # slimming audit, though each covers STRICT code: agent-quota.py,
+  # generate_agent_configs.py, the editable-figure and prun trees, and every
+  # skill shell script. test_skill_size.py caps the two coordinator SKILL.md
+  # files, which are STRICT under the recursive skill trees.
+  tests/test_agent_quota_refresh.py
+  tests/test_figure_gallery.py
+  tests/test_gather.py
+  tests/test_generator.py
+  tests/test_inspect_figure_pdf.py
+  tests/test_monitor.py
+  tests/test_shell_nounset_arrays.py
+  tests/test_skill_size.py
 )
 for f in "${strict_test_files[@]}"; do
   $AA_INTERNAL_ONLY && break

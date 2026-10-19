@@ -59,7 +59,7 @@
 When a skill is invoked, the agent looks for its `SKILL.md` in this order:
 
 1. **Project-local**: `skills/<name>/SKILL.md` in the consuming project. Use this to override a shared skill or add project-specific skills.
-2. **Pack-deployed**: `.claude/skills/<name>/SKILL.md` installed by `anywhere-agents pack install`. The `.claude/` prefix is a historical Claude Code convention; the SKILL.md contents are agent-agnostic.
+2. **Pack-deployed**: `.claude/skills/<name>/SKILL.md` deployed by bootstrap from the configured packs (`anywhere-agents pack add` adds one). The `.claude/` prefix is a historical Claude Code convention; the SKILL.md contents are agent-agnostic.
 3. **Bootstrapped shared**: `.agent-config/repo/skills/<name>/SKILL.md` in the consuming project (synced by bootstrap).
 4. **Plugin-provided**: agent-platform plugins may provide skills too (e.g., Claude Code plugins).
 

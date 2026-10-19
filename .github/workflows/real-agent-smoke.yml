@@ -99,26 +99,6 @@ jobs:
           fi
           echo "PASS: all ${#EXPECTED_SKILLS[@]} shipped skills mentioned"
 
-  multi_agent_smoke:
-    name: Compose host=${{ matrix.agent }} on ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        agent: [claude-code, codex]
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      AGENT_CONFIG_HOST: ${{ matrix.agent }}
-    steps:
-      - uses: actions/checkout@v5
-      # End-to-end multi-host Compose smoke deferred to v0.5.1: needs a
-      # full bundled-bootstrap fixture. The --host flag is unit-tested
-      # via tests/test_compose_packs_v0_5.TestDetectHost; the v0.5.0
-      # auth chain is validated by validate.yml's v0_5_token_smoke job.
-      # No setup-python or pip install needed while this matrix is a no-op.
-      - name: Multi-host compose smoke (deferred to v0.5.1)
-        run: echo "Deferred"
-
   # The two Codex probes are separate jobs: codex-action's drop-sudo
   # strategy removes passwordless sudo when it starts and cannot start a
   # second time in the same job.
