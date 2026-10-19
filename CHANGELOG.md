@@ -9,6 +9,10 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+_No unreleased changes queued._
+
+## [0.10.0] — 2026-10-18
+
 ### Added
 
 - **The bundled agent-style default moves to v0.9.0.** Both copies of `bootstrap/packs.yaml` pin it, and the residue ledger lists it while it is the default, so bootstrap advances a row still on v0.8.0. It adds a House Style section, habits measured from the maintainer's pre-AI papers, that ranks above the rules where they conflict, and it pairs with the `author-voice` skill in `agent-pack`'s `acad-skills` pack, which the `profile` pack now names for abstracts, introductions, and conclusions. The composed-consumer fixture takes the v0.9.0 compact body (22,544 bytes) and the current `profile` body (4,299 bytes), and the composed CLAUDE.md is 61,431 of 61,440 bytes.
@@ -1319,7 +1323,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.18...v0.8.0
 [0.7.18]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.17...v0.7.18
