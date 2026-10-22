@@ -1,6 +1,6 @@
 # Guard Hook
 
-Bootstrap deploys `scripts/guard.py` to `~/.claude/hooks/guard.py` and wires it as a `PreToolUse` hook in `~/.claude/settings.json`. It runs before every tool call. `AGENTS.md` § "Git Safety and Mechanical Gates" holds the gate table and the escape hatches. The table says what each gate matches and whether it denies, asks, or advises. This page holds the reasoning behind each gate and the measurements that settled its shape.
+Bootstrap deploys `scripts/guard.py` to `~/.claude/hooks/guard.py` and wires it as a `PreToolUse` hook in `~/.claude/settings.json`, and for Codex in `~/.codex/hooks.json`. It runs before every tool call. `AGENTS.md` § "Git Safety and Mechanical Gates" holds the gate table and the escape hatches. The table says what each gate matches and whether it denies, asks, or advises. This page holds the reasoning behind each gate and the measurements that settled its shape.
 
 ## Deny Where a Reroute Exists, Ask Where None Does
 
@@ -64,9 +64,17 @@ Five review rounds produced the rule: every widening of the parser closed one ga
 
 The banner gate is the mechanical half of the Session Start Check. Its first arm denies every tool call except reads and the acknowledgement write while a session event is pending with no acknowledgement file. Its second arm passes a stale acknowledgement through with a `[banner-gate]` advisory, so a re-fire never blocks work (anywhere-agents#7). The event file, the acknowledgement file, the report the agent reads, and the acceptance rule are described in [Session banner](session-banner.md). Precomputing the banner did not retire the gate: precomputation does not guarantee visible emission, and removing enforcement while changing production would confound the measurement. The gate is revisited after the 2026-09 rollout with an eligible-session denominator.
 
+## Under Codex
+
+Codex 0.153.3 and later run `PreToolUse` hooks with the payload and the deny shape Claude Code uses, so bootstrap registers the same file there. `scripts/merge_codex_hooks.py` adds one group to `~/.codex/hooks.json` that matches `Bash|apply_patch` and runs `guard.py --agent codex` from `~/.claude/hooks/`. Other hooks in that file stay as they were, and a group where the user put the guard beside handlers of their own is left alone with a warning. A machine without a Codex home is skipped, and the Windows entry point does not register the hook yet.
+
+Codex runs a hook only after the user trusts it at its startup review, and it skips an untrusted hook without a message. Bootstrap cannot grant that trust, so it prints a reminder on each run until `~/.codex/config.toml` records trust for the group's current definition, checked by computing the hash Codex records. A hook the user disabled there gets no reminder. The trust hash covers the hook definition and leaves out the script, so one approval survives every later `guard.py` update. A `/vet` reviewer dispatched with `--ignore-user-config` loads no trust records and runs without the hook, as a dispatched Claude reviewer runs without the user-level one.
+
+The Codex path differs from the Claude Code path in three places. File edits arrive as `apply_patch` with the raw patch, so the writing-style gate reads the `+` lines of each file the patch adds, updates, or moves, and judges the destination with the `Write` scope test. Code spans are found on the file as the patch would leave it, read from disk and patched in memory, so a line inside a fence stays exempt wherever the fence opens. When the file cannot be read or a hunk does not match it, the added lines are judged alone. Codex rejects an `ask` as invalid output and runs the call, so the four `ask` rows deny there and tell the agent to show the user the command. The user then runs it by typing `!` and the command at the Codex prompt, a route no hook sees. Claude Code keeps the banner gate and the compound-`cd` gate, because Codex never writes the banner acknowledgement and the compound-`cd` prompt is a Claude Code behaviour. A Codex hook that crashes, times out, or prints malformed output lets the call run, which is why the Codex path prints one deny document or nothing.
+
 ## Escape Hatches
 
-Each hatch is an env var in the `env` block of `~/.claude/settings.json`. The disable values are `off`, `0`, `disabled`, `false`, and `no`.
+Each hatch is an env var in the `env` block of `~/.claude/settings.json`; under Codex, set it in the environment Codex starts in, since Codex does not read that file. The disable values are `off`, `0`, `disabled`, `false`, and `no`.
 
 | Env var | Disables |
 |---|---|

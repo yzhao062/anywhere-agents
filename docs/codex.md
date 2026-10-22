@@ -68,7 +68,7 @@ Windows gets no links in this release, and the compose summary says so whenever 
 
 ## Hooks
 
-Codex 0.153.3 and later ship hooks, including `SessionStart`, but this project has not wired `session_bootstrap.py` and `guard.py` into them (anywhere-agents#50). Hook trust hashing, installation, and permission semantics need their own scope. Until then, a Codex session runs bootstrap through the block at the top of `AGENTS.md` and prints the session banner on its first reply; see [Session banner](session-banner.md).
+Codex 0.153.3 and later ship hooks. Bootstrap registers `guard.py` as a `PreToolUse` hook in `~/.codex/hooks.json`, and the hook takes effect once the user chooses Trust at Codex's startup review. [Guard hook](guard-hook.md#under-codex) describes what it checks under Codex and where that differs from Claude Code. `session_bootstrap.py` is not wired to `SessionStart` (anywhere-agents#50), so a Codex session still runs bootstrap through the block at the top of `AGENTS.md` and prints the session banner on its first reply; see [Session banner](session-banner.md).
 
 ## The MCP Route (Retired)
 

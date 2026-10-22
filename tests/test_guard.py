@@ -1165,6 +1165,224 @@ class ShellProseWriteTests(unittest.TestCase):
             self._decision('"delve" | Out-File notes.md', tool="PowerShell"), "deny")
 
 
+class CodexHookTests(unittest.TestCase):
+    """`guard.py --agent codex`, the hook bootstrap registers with Codex.
+
+    Codex sends its shell tool as `Bash` and its file edits as `apply_patch`
+    with the raw patch, and it rejects an `ask` as invalid output and runs the
+    call, so the approval gates deny there.
+    """
+
+    @staticmethod
+    def _run(tool, command, env=None, cwd="/repo"):
+        env_dict = dict(os.environ)
+        env_dict.pop("AGENT_CONFIG_GATES", None)
+        env_dict.pop("AGENT_STYLE_HOOK", None)
+        env_dict.update(env or {})
+        payload = {
+            "hook_event_name": "PreToolUse", "turn_id": "t1", "cwd": cwd,
+            "tool_name": tool, "tool_input": {"command": command},
+        }
+        result = subprocess.run(
+            [sys.executable, str(GUARD), "--agent", "codex"],
+            input=json.dumps(payload), capture_output=True, text=True,
+            check=False, env=env_dict,
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    def _decision(self, tool, command, env=None, cwd="/repo"):
+        resp = self._run(tool, command, env, cwd)
+        return resp["hookSpecificOutput"]["permissionDecision"] if resp else None
+
+    @staticmethod
+    def _patch(*body):
+        return "\n".join(("*** Begin Patch",) + body + ("*** End Patch",))
+
+    def test_patch_adding_prose_is_denied(self):
+        resp = self._run("apply_patch", self._patch(
+            "*** Add File: notes.md", "+We delve into the results."))
+        self.assertEqual(set(resp), {"hookSpecificOutput"})
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/repo/notes.md", reason)
+        self.assertNotIn("~/.claude/settings.json", reason)
+
+    def test_patch_reads_added_lines_only(self):
+        self.assertEqual(self._decision("apply_patch", self._patch(
+            "*** Update File: notes.md", "@@", " context", "+We delve here.")), "deny")
+        self.assertIsNone(self._decision("apply_patch", self._patch(
+            "*** Update File: notes.md", "@@", "-We delve here.", "+We look here.")))
+        self.assertIsNone(self._decision("apply_patch", self._patch(
+            "*** Delete File: notes.md")))
+
+    def test_patch_fences_come_from_the_patched_file(self):
+        # Round 1 (Codex): a line changed inside a fence is code, even when
+        # the hunk does not show the fence. Round 2 (Codex): a hunk that
+        # starts inside one block must not hide prose added before the next.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "notes.md").write_text(
+                'Intro.\n\n```python\nfirst = 0\nvalue = "old"\nlast = 1\n```\n'
+                "\n\n```\nnext = 2\n```\n")
+            self.assertIsNone(self._decision("apply_patch", self._patch(
+                "*** Update File: notes.md", "@@",
+                '-value = "old"', '+value = "delve"'), cwd=tmp))
+            self.assertEqual(self._decision("apply_patch", self._patch(
+                "*** Update File: notes.md", "@@", " last = 1", " ```", " ",
+                "+We delve here.", " ", " ```", " next = 2"), cwd=tmp), "deny")
+        # Round 3 (Codex): the edit lands where apply_patch puts it, so an
+        # end-of-file hunk and each matching pass pick the same line Codex does.
+        cases = [
+            ("```\nold\n```\n\nold\n", ("-old", "+We delve here.", "*** End of File"), "deny"),
+            ("```\n old\n```\n\nold  \n", ("-old", "+We delve here."), "deny"),
+            ('```\nvalue = “old”\n```\n',
+             ('-value = "old"', '+value = "delve"'), None),
+        ]
+        for content, body, expected in cases:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, "notes.md").write_text(content, encoding="utf-8")
+                self.assertEqual(self._decision("apply_patch", self._patch(
+                    "*** Update File: notes.md", "@@", *body), cwd=tmp), expected)
+        # A file that cannot be read leaves the added lines to be judged alone.
+        self.assertEqual(self._decision("apply_patch", self._patch(
+            "*** Update File: notes.md", "@@", " ```python",
+            '-value = "old"', '+value = "delve"', " ```")), "deny")
+
+    def test_patch_scope_follows_the_write_gate(self):
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io", "p.md")
+        self.assertIsNone(self._decision("apply_patch", self._patch(
+            "*** Add File: tool.py", "+# delve")))
+        self.assertIsNone(self._decision("apply_patch", self._patch(
+            f"*** Add File: {scratch}", "+delve")))
+        self.assertEqual(self._decision("apply_patch", self._patch(
+            "*** Update File: tool.py", "*** Move to: notes.md", "@@", "+delve")), "deny")
+
+    def test_shell_writes_and_approval_gates(self):
+        resp = self._run("Bash", "cat > notes.md <<'EOF'\ndelve\nEOF")
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("with apply_patch", reason)
+        self.assertNotIn("Edit tool", reason)
+        self.assertIsNone(self._decision("Bash", "echo delve > build.log"))
+        resp = self._run("Bash", "git push origin main")
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("`!`", resp["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIsNone(self._decision("Bash", "git status"))
+
+    def test_claude_only_gates_and_other_tools_pass(self):
+        self.assertIsNone(self._decision("Bash", "cd /tmp && ls"))
+        self.assertIsNone(self._decision("mcp__docs__write", "delve"))
+        self.assertIsNone(self._decision("apply_patch", self._patch(
+            "*** Add File: notes.md", "+delve"), env={"AGENT_STYLE_HOOK": "off"}))
+
+    def test_claude_path_ignores_apply_patch(self):
+        self.assertIsNone(run_guard_with_payload({
+            "tool_name": "apply_patch",
+            "tool_input": {"command": self._patch("*** Add File: notes.md", "+delve")},
+        }))
+
+
+class CodexHookRegistrationTests(unittest.TestCase):
+    """scripts/merge_codex_hooks.py adds the guard group to a Codex home's
+    hooks.json and leaves every other hook alone."""
+
+    MERGE = ROOT / "scripts" / "merge_codex_hooks.py"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name) / ".codex"
+        self.home.mkdir()
+        self.hooks = self.home / "hooks.json"
+
+    def _merge(self, home=None):
+        result = subprocess.run(
+            [sys.executable, str(self.MERGE), str(home or self.home)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, result.stderr
+
+    def test_registers_beside_existing_hooks_once(self):
+        other = {"hooks": [{"type": "command", "command": "notify"}]}
+        self.hooks.write_text(json.dumps({"hooks": {
+            "Stop": [other], "PreToolUse": [dict(other, matcher="*")]}}))
+        out, _ = self._merge()
+        self.assertIn("registered", out)
+        self.assertIn("Trust", out)
+        data = json.loads(self.hooks.read_text())
+        self.assertEqual(data["hooks"]["Stop"], [other])
+        groups = data["hooks"]["PreToolUse"]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[1]["matcher"], "Bash|apply_patch")
+        self.assertIn("guard.py\" --agent codex", groups[1]["hooks"][0]["command"])
+        before = self.hooks.read_bytes()
+        out, _ = self._merge()
+        self.assertNotIn("registered", out)
+        self.assertEqual(self.hooks.read_bytes(), before)
+
+    def _state(self, body):
+        key = f'"{self.hooks}:pre_tool_use:0:0"'
+        (self.home / "config.toml").write_text(f"[hooks.state.{key}]\n{body}\n")
+
+    def test_trust_follows_the_recorded_hash(self):
+        spec = importlib.util.spec_from_file_location("merge_codex_hooks", self.MERGE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self._merge()
+        self._state(f'trusted_hash = "{module.trust_hash(module.GROUP)}"')
+        self.assertEqual(self._merge(), ("", ""))
+        # Round 1 (Codex): a stale hash is not trust, and a disabled hook is
+        # the user's choice.
+        self._state('trusted_hash = "sha256:stale"')
+        self.assertIn("Trust", self._merge()[0])
+        self._state('enabled = false')
+        self.assertEqual(self._merge(), ("", ""))
+        # Round 1 (Agy): an undecodable config.toml still exits quietly.
+        (self.home / "config.toml").write_bytes(b"\xff\xfe")
+        self.assertIn("Trust", self._merge()[0])
+
+    def test_shared_group_is_left_alone(self):
+        self._merge()
+        data = json.loads(self.hooks.read_text())
+        data["hooks"]["PreToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "echo audit"})
+        self.hooks.write_text(json.dumps(data))
+        before = self.hooks.read_bytes()
+        out, err = self._merge()
+        self.assertEqual(self.hooks.read_bytes(), before)
+        self.assertIn("left", err)
+
+    @unittest.skipIf(os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0,
+                     "needs POSIX permissions and a non-root user")
+    def test_unwritable_home_warns(self):
+        self.home.chmod(0o500)
+        self.addCleanup(self.home.chmod, 0o700)
+        out, err = self._merge()
+        self.assertIn("could not write", err)
+        self.assertFalse(self.hooks.exists())
+
+    def test_changed_group_is_replaced_in_place(self):
+        self._merge()
+        data = json.loads(self.hooks.read_text())
+        data["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 5
+        self.hooks.write_text(json.dumps(data))
+        out, _ = self._merge()
+        self.assertIn("registered", out)
+        groups = json.loads(self.hooks.read_text())["hooks"]["PreToolUse"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["hooks"][0]["timeout"], 30)
+
+    def test_unreadable_file_and_missing_home_are_left_alone(self):
+        self.hooks.write_text("{not json")
+        out, err = self._merge()
+        self.assertEqual(self.hooks.read_text(), "{not json")
+        self.assertIn("left", err)
+        missing = self.home.parent / "absent"
+        self.assertEqual(self._merge(missing), ("", ""))
+        self.assertFalse(missing.exists())
+
+
 # Deliberately over both RULE-12 thresholds: thirty words, which the
 # per-sentence rule of agent-style before 0.8.0 flags, and eighty, which the
 # profile of 0.8.0 and later flags for a single sentence. Counted, not
@@ -2445,9 +2663,9 @@ class AgentIoScopeTests(unittest.TestCase):
             "both guards should reach scope through the shared predicate",
         )
         self.assertEqual(
-            source.count("agent_io_requires_scratch=True"), 2,
+            source.count("agent_io_requires_scratch=True"), 3,
             "only the callers that deny should take the narrower trust: the "
-            "Write gate and the shell-write gate",
+            "Write gate, the shell-write gate, and the Codex patch gate",
         )
 
 

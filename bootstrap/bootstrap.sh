@@ -992,6 +992,13 @@ if [ -f .agent-config/repo/scripts/guard.py ]; then
     exit 1
   fi
   _ledger_target '~/.claude/hooks/guard.py'
+  # Codex runs the same guard from its own hooks file, once the user trusts
+  # the entry. A machine without a Codex home is skipped.
+  if [ -n "$_py" ] && [ -d "${CODEX_HOME:-$HOME/.codex}" ] \
+    && [ -f .agent-config/repo/scripts/merge_codex_hooks.py ]; then
+    "$_py" .agent-config/repo/scripts/merge_codex_hooks.py
+    _ledger_target '~/.codex/hooks.json'
+  fi
 fi
 if [ -f .agent-config/repo/scripts/session_bootstrap.py ]; then
   if ! _atomic_deploy_helper .agent-config/repo/scripts/session_bootstrap.py "$HOME/.claude/hooks/session_bootstrap.py"; then

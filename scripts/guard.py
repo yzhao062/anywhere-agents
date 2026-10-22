@@ -1,5 +1,6 @@
 """
-Claude Code PreToolUse hook guard.
+Claude Code PreToolUse hook guard. Codex runs it as `guard.py --agent codex`,
+a narrower path described in the Codex block before main().
 
 Dispatches by tool_name. Shared checks:
 
@@ -2534,10 +2535,220 @@ def classify_command(cmd, shell, depth=0):
     return None, None
 
 
+# --- Codex ------------------------------------------------------------------
+#
+# Codex 0.153.3 and later run PreToolUse hooks with Claude Code's payload and
+# deny shape, and bootstrap registers this file there as `guard.py --agent
+# codex`. Three differences shape the Codex path. Its shell tool arrives as
+# `Bash` (a PowerShell command on Windows) and its file edits as `apply_patch`
+# with the raw patch text. It has no `ask`: the decision is rejected as
+# invalid and the call runs, so an approval gate denies instead and names the
+# route the user owns, a `!` command typed at the Codex prompt, which no hook
+# sees. The banner gate stays with Claude Code, whose acknowledgement file
+# Codex never writes, and so does the compound-cd gate, which exists for a
+# Claude Code permission prompt Codex does not show.
+_PATCH_FILE = re.compile(r"\*\*\* (Add|Update|Delete) File: (.+)")
+_CODEX_ASK = (
+    " Codex hooks cannot ask for approval, so the call is denied. Show the "
+    "user the command; once they approve, they run it themselves by typing "
+    "`!` and the command at the Codex prompt."
+)
+
+
+def _patch_files(patch):
+    """Return `[action, source, destination, hunks]` for each file an
+    apply_patch adds or updates.
+
+    A hunk is `[anchor, eof, body]`: the text after an `@@ ` marker (None for
+    a bare `@@`), whether `*** End of File` closes it, and its lines as
+    `(mark, text)` pairs, mark one of " ", "+", "-". The destination is the
+    `*** Move to:` path, else the source.
+    """
+    files = []
+    hunk = None
+    for line in patch.splitlines():
+        match = _PATCH_FILE.match(line)
+        if match:
+            hunk = None
+            if match.group(1) != "Delete":
+                path = match.group(2).strip()
+                hunk = [None, False, []]
+                files.append([match.group(1), path, path, [hunk]])
+        elif hunk is None:
+            continue
+        elif line == "*** End of File":
+            hunk[1] = True
+        elif line.startswith("*** End"):
+            continue
+        elif line.startswith("*** Move to: "):
+            files[-1][2] = line[len("*** Move to: "):].strip()
+        elif line.startswith("@@"):
+            hunk = [line[3:] if line.startswith("@@ ") else None, False, []]
+            files[-1][3].append(hunk)
+        else:
+            mark = line[:1] if line[:1] in ("+", "-") else " "
+            hunk[2].append((mark, line[1:]))
+    return files
+
+
+_PATCH_TYPOGRAPHY = str.maketrans({
+    **dict.fromkeys("\u2010\u2011\u2012\u2013\u2014\u2015\u2212", "-"),
+    **dict.fromkeys("\u2018\u2019\u201a\u201b", "'"),
+    **dict.fromkeys("\u201c\u201d\u201e\u201f", '"'),
+    **dict.fromkeys("\u00a0\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+                    "\u2009\u200a\u202f\u205f\u3000", " "),
+})
+_PATCH_FOLDS = (
+    None,
+    str.rstrip,
+    str.strip,
+    lambda s: s.strip().translate(_PATCH_TYPOGRAPHY),
+)
+
+
+def _seek(lines, target, start, eof=False):
+    """Index of `target` in `lines`, searched as apply_patch searches (its
+    seek_sequence.rs): from `start`, or for an end-of-file hunk from the last
+    place it fits, matching exactly, then ignoring trailing whitespace, then
+    surrounding whitespace, then also typographic dashes, quotes, and spaces.
+    None when nothing matches."""
+    if not target:
+        return start
+    if len(target) > len(lines):
+        return None
+    if eof:
+        start = max(start, len(lines) - len(target))
+    for fold in _PATCH_FOLDS:
+        have = lines if fold is None else [fold(line) for line in lines]
+        want = target if fold is None else [fold(line) for line in target]
+        for i in range(start, len(lines) - len(target) + 1):
+            if have[i:i + len(target)] == want:
+                return i
+    return None
+
+
+def _patched_document(old_lines, hunks):
+    """Apply `hunks` to `old_lines` as apply_patch does (its file_update.rs)
+    and return the result as `(added, line)` pairs, or None when a hunk does
+    not match, which Codex rejects too."""
+    replacements = []
+    index = 0
+    for anchor, eof, body in hunks:
+        if not body:
+            continue
+        if anchor is not None:
+            at = _seek(old_lines, [anchor], index)
+            if at is None:
+                return None
+            index = at + 1
+        old = [text for mark, text in body if mark != "+"]
+        new = [(mark == "+", text) for mark, text in body if mark != "-"]
+        if not old:
+            replacements.append((len(old_lines), 0, new))
+            continue
+        at = _seek(old_lines, old, index, eof)
+        if at is None and old[-1] == "":
+            # A trailing empty line can stand for the file's final newline.
+            old = old[:-1]
+            if new and new[-1][1] == "":
+                new = new[:-1]
+            at = _seek(old_lines, old, index, eof)
+        if at is None:
+            return None
+        replacements.append((at, len(old), new))
+        index = at + len(old)
+    doc, cursor = [], 0
+    for at, length, new in sorted(replacements, key=lambda r: r[0]):
+        doc.extend((False, line) for line in old_lines[cursor:at])
+        doc.extend(new)
+        cursor = at + length
+    doc.extend((False, line) for line in old_lines[cursor:])
+    return doc
+
+
+def check_patch_prose_write(patch, cwd=None):
+    """Run the Write gate over the lines each Codex `apply_patch` adds.
+
+    An updated file is patched in memory and code spans are found on the
+    whole result, so a line inside a fence stays exempt as code wherever the
+    fence opens. Only the added lines are then scanned, which lets a hunk that
+    removes a word pass. When the file cannot be read or a hunk does not
+    match it, the added lines are judged alone.
+    """
+    for action, source, path, hunks in _patch_files(patch):
+        if cwd and not os.path.isabs(path):
+            path = os.path.join(cwd, path)
+        ext = prose_extension(path, agent_io_requires_scratch=True)
+        if ext is None:
+            continue
+        doc = None
+        if action == "Add":
+            doc = _patched_document([], hunks)
+        else:
+            if cwd and not os.path.isabs(source):
+                source = os.path.join(cwd, source)
+            try:
+                with open(source, encoding="utf-8", errors="replace", newline="") as f:
+                    lines = re.split(r"\r\n|\r|\n", f.read())
+            except OSError:
+                lines = None
+            if lines is not None:
+                if lines[-1] == "":
+                    lines.pop()
+                doc = _patched_document(lines, hunks)
+        if doc is None:
+            doc = [(True, text) for _, _, body in hunks
+                   for mark, text in body if mark == "+"]
+        text = _content_for_style_check("\n".join(line for _, line in doc), ext)
+        added = [line for (is_added, _), line in zip(doc, text.split("\n"))
+                 if is_added]
+        deny = check_writing_style(
+            "Write", {"file_path": path, "content": "\n".join(added)})
+        if deny:
+            return deny
+    return None
+
+
+def main_codex(data):
+    tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input") or {}
+    cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(cmd, str) or not cmd.strip():
+        return
+    cwd = data.get("cwd") or os.getcwd()
+    style = gates_enabled() and writing_style_enabled()
+    deny = None
+    if tool_name == "apply_patch":
+        deny = check_patch_prose_write(cmd, cwd) if style else None
+    elif tool_name == "Bash":
+        cmd = cmd.strip()
+        shell = "powershell" if os.name == "nt" else "bash"
+        if style:
+            deny = check_shell_prose_write(
+                "PowerShell" if shell == "powershell" else "Bash",
+                {"command": cmd}, cwd,
+            )
+        if not deny and nested_git_init_enabled():
+            deny = nested_git_init_deny_message(cmd, cwd)
+        if not deny:
+            decision, reason = classify_command(cmd, shell)
+            if decision == "ask":
+                deny = reason + _CODEX_ASK
+    if deny:
+        deny = deny.replace(
+            "in ~/.claude/settings.json env", "in the environment Codex starts in",
+        ).replace("with the Edit tool", "with apply_patch")
+        print(make_response("deny", deny))
+
+
 def main():
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        return
+    if sys.argv[1:] == ["--agent", "codex"]:
+        if isinstance(data, dict):
+            main_codex(data)
         return
 
     tool_name = data.get("tool_name", "")

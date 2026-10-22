@@ -159,6 +159,7 @@ strict_files=(
   # Both bootstrap entry points execute this, so it is shared runtime code by
   # the same argument as the helpers above.
   scripts/merge_settings.py
+  scripts/merge_codex_hooks.py
   # The session banner renderer and the pack-identity helper it imports.
   # Both entry points and the SessionStart hook run them from the sparse
   # clone, and the wheel vendors the pair, so the banner is one calculation
