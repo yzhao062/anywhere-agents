@@ -863,7 +863,10 @@ def _lex_shell(cmd, shell):
         elif ch == '"':
             i += 1
             while i < n and cmd[i] != '"':
-                if cmd[i] == escape and i + 1 < n:
+                # Inside bash double quotes a backslash escapes only these
+                # characters, so `"C:\Users\me\notes.md"` keeps its path.
+                if cmd[i] == escape and i + 1 < n and (
+                        shell == "powershell" or cmd[i + 1] in '$`"\\\n'):
                     i += 1
                 buf.append(cmd[i])
                 i += 1

@@ -909,6 +909,20 @@ class ShellProseWriteTests(unittest.TestCase):
             return None
         return resp["hookSpecificOutput"]["permissionDecision"]
 
+    @staticmethod
+    def _scratch(*parts):
+        # The form a Bash command carries: Git Bash on Windows reads an
+        # unquoted backslash as an escape, so a native path would not survive.
+        return Path(tempfile.gettempdir(), "ir-probe", *parts).as_posix()
+
+    def test_backslash_inside_double_quotes_is_kept(self):
+        resp = run_guard_with_payload({
+            "tool_name": "Bash", "cwd": "/repo",
+            "tool_input": {"command": 'echo delve > "notes\\draft.md"'},
+        })
+        self.assertIn("notes\\draft.md",
+                      resp["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_heredoc_into_markdown_is_denied(self):
         resp = run_guard_with_payload({
             "tool_name": "Bash",
@@ -980,7 +994,7 @@ class ShellProseWriteTests(unittest.TestCase):
         self.assertEqual(self._decision('git commit -m "A pivotal fix"'), "ask")
 
     def test_declared_scratch_path_built_in_the_command_passes(self):
-        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        scratch = self._scratch()
         command = (
             f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
             "Check for delve and realm.\nEOF"
@@ -1021,7 +1035,7 @@ class ShellProseWriteTests(unittest.TestCase):
 
     def test_scratch_prompt_quoting_a_write_passes(self):
         """A review or dispatch prompt carries diffs and command examples."""
-        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        scratch = self._scratch("agent-io")
         self.assertIsNone(self._decision(
             f"cat > {scratch}/prompt.txt <<'EOF'\n"
             "Review this command: echo delve > notes.md\nEOF"))
@@ -1070,7 +1084,7 @@ class ShellProseWriteTests(unittest.TestCase):
 
     def test_assignment_inside_a_heredoc_body_is_not_one(self):
         """Round 1 (Agy): a body line `P=foo` overrode the real `P=`."""
-        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        scratch = self._scratch()
         self.assertIsNone(self._decision(
             f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
             "In the script, P=foo sets the parameter.\nWe delve.\nEOF"))
@@ -1116,7 +1130,7 @@ class ShellProseWriteTests(unittest.TestCase):
             'OUT=build.log; echo delve > "$OUT"; OUT=notes.md'))
         self.assertEqual(self._decision(
             'OUT=notes.md; echo delve > "$OUT"; OUT=build.log'), "deny")
-        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        scratch = self._scratch()
         self.assertIsNone(self._decision(
             f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
             "delve\nEOF\nP=/repo"))
@@ -1134,7 +1148,7 @@ class ShellProseWriteTests(unittest.TestCase):
         self.assertEqual(self._decision(
             "OUT=notes.md; OUT=build.log bash -c 'true'; echo delve > \"$OUT\""),
             "deny")
-        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        scratch = self._scratch("agent-io")
         self.assertIsNone(self._decision(
             f"P=/repo; P={scratch} bash -c 'echo delve > \"$P/prompt.txt\"'"))
         self.assertEqual(self._decision(
@@ -1206,7 +1220,7 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(set(resp), {"hookSpecificOutput"})
         self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("/repo/notes.md", reason)
+        self.assertIn(os.path.join("/repo", "notes.md"), reason)
         self.assertNotIn("~/.claude/settings.json", reason)
 
     def test_patch_reads_added_lines_only(self):

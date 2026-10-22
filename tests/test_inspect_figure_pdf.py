@@ -124,7 +124,10 @@ class FigurePDFTests(unittest.TestCase):
         result = self.run_cli("--width-mm", "127")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["page_count"], 1)
-        self.assertIn("MuPDF error", result.stderr)
+        # PyMuPDF 2.0 stopped printing MuPDF messages by default, so there is
+        # nothing to redirect; 1.x prints them and they must land on stderr.
+        if pymupdf.TOOLS.mupdf_display_errors():
+            self.assertIn("MuPDF error", result.stderr)
 
 
 if __name__ == "__main__":

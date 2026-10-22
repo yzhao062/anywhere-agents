@@ -33,8 +33,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.9", "3.12", "3.13"]
+        python-version: ["3.12", "3.13"]
         include:
+          # ubuntu-latest is 26.04, which has no Python 3.9 build.
+          - os: ubuntu-24.04
+            python-version: "3.9"
           - os: windows-latest
             python-version: "3.12"
           - os: macos-latest
