@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Fixed
+
+- **The banned-word gate now covers prose written through a shell.** A heredoc that wrote banned words into a Markdown file used to pass, while the same text through `Write` was denied. `guard.py` now reads a `Bash` or `PowerShell` command that writes a `.md`, `.tex`, `.rst`, or `.txt` file through a redirection, `tee`, an in-place `sed` or `perl`, or `Set-Content`, `Add-Content`, `Out-File`, or `Tee-Object`, including inside a `bash -c` payload. Such a command is denied when its text carries a banned word. A small lexer finds the targets, so a redirection spelled inside quotes, a comment, or a heredoc body, such as a command example in a review prompt, is not a write. The target path meets the same scope test as a `Write`, so an `agent-io` path under a temp root stays exempt, and a variable assigned in the command or held in the environment is expanded first. Because the gate reads the whole command, a command that only removes a banned word is denied too, and the message names `Edit` as the reroute. A script that opens the file itself and a path with an unknown variable stay unread. The style advisory is unchanged. In `AGENTS.md`, the reworded gate-table rows keep the composed consumer `CLAUDE.md` under its 61,440-byte budget. `docs/guard-hook.md` explains the shapes it reads and the two it leaves alone.
 
 ## [0.10.0] — 2026-10-18
 

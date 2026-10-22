@@ -13,10 +13,14 @@ Dispatches by tool_name. Shared checks:
    deny-style gates only; a permission allow is always safe to honor.
 1. Writing-style gate — Write/Edit/MultiEdit on prose files (.md/.tex/.rst/.txt)
    is denied when the outgoing content contains a banned AI-tell word from
-   AGENTS.md Writing Defaults. Skips code files, and skips a path a caller
+   AGENTS.md Writing Defaults. A Bash or PowerShell command that writes a
+   prose file (redirection, tee, in-place sed or perl, a PowerShell content
+   cmdlet) is denied when its whole text carries one; see
+   check_shell_prose_write(). Skips code files, and skips a path a caller
    marked as agent I/O when that path is under a temp root (see
    AGENT_IO_SEGMENT). The advisory in 1b honors the same marker anywhere.
-1b. agent-style advisory — the same writes are additionally scanned by the
+1b. agent-style advisory — Write/Edit/MultiEdit writes (not shell writes) are
+   additionally scanned by the
    agent-style package's mechanical detectors when it is importable, and any
    findings are reported to both the model and the user while the write
    proceeds. Runs only when step 1 did not deny, so a blocked write yields one
@@ -715,6 +719,430 @@ def check_writing_style(tool_name, tool_input):
         )
 
     return None
+
+
+# --- Prose written through a shell ----------------------------------------
+#
+# The gate above reads the Write, Edit, and MultiEdit tools, and a shell
+# command writes the same file just as well. On 2026-10-21 a heredoc that put
+# two banned words into a Markdown file passed with no output, while the same
+# text through Write was denied. Auto mode tells the agent to prefer the shell
+# for small edits, so this was a working route rather than a theoretical one.
+#
+# Two questions, answered by different readings of the command. Where does it
+# write? That needs the shell's own structure: a quoted search pattern, a
+# comment, and a heredoc body are not redirections even when they spell one,
+# and a review prompt that quotes `echo x > notes.md` writes only the prompt.
+# The first version matched redirections over the raw text and denied all
+# three. What does it write? Once a real target is a prose file, the whole
+# command text is scanned, heredoc body included, without trying to separate
+# content from command. A command that removes a banned word
+# (`sed -i 's/delve/examine/' notes.md`) is therefore denied too, and the Edit
+# tool, whose new text carries no banned word, is the reroute that always
+# exists.
+#
+# Writes are an output redirection, `tee`, an in-place `sed` or `perl`, and
+# `Set-Content`, `Add-Content`, `Out-File`, and `Tee-Object` in PowerShell. A
+# script that opens the file itself (`python - <<EOF`, a heredoc fed to
+# `bash`) is opaque, as it is to the destructive-command classifier, and so is
+# a path whose variable the command does not assign and the environment does
+# not hold. A blind spot restores the status quo; reading either would mean
+# guessing what a program does.
+_PS_FILE_WRITERS = frozenset({"set-content", "add-content", "out-file", "tee-object"})
+_PS_PATH_PARAMS = frozenset({"path", "literalpath", "pspath", "lp", "filepath"})
+_PS_SWITCH_PARAMS = frozenset({
+    "force", "nonewline", "passthru", "append", "noclobber", "asbytestream",
+    "confirm", "usetransaction",
+})
+_PS_HERESTRING_OPEN = re.compile(r"""@(['"])[ \t]*\r?\n""")
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SHELL_ASSIGNMENT_WORD = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
+# `$env:NAME` (PowerShell), `${NAME}`, `${NAME:-default}`, `${NAME-default}`,
+# and `$NAME`. Any other expansion keeps its `$` and leaves the path unknown.
+_SHELL_VARIABLE = re.compile(
+    r"\$(?:(?i:env):([A-Za-z_][A-Za-z0-9_]*)"
+    r"|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}"
+    r"|([A-Za-z_][A-Za-z0-9_]*))"
+)
+# A substring prefilter, the shared stem of each banned word's variants. Most
+# commands carry none and leave here; the word-boundary patterns run only once
+# a prose target is known, because a dispatch prompt that does carry one is
+# usually bound for agent-io, and on a 390 KB prompt the patterns alone took
+# about 85 ms where this takes a few.
+_BANNED_STEMS = tuple(sorted({
+    os.path.commonprefix(sorted(_word_variants(word))).lower()
+    for word in BANNED_WORDS
+}))
+
+
+def _skip_heredoc_bodies(cmd, i, heredocs):
+    """Return the index just past the bodies of `heredocs`, read from `i`."""
+    n = len(cmd)
+    for delimiter, strip_tabs in heredocs:
+        while i < n:
+            end = cmd.find("\n", i)
+            line = cmd[i:] if end == -1 else cmd[i:end]
+            i = n if end == -1 else end + 1
+            if strip_tabs:
+                line = line.lstrip("\t")
+            if line.rstrip("\r") == delimiter:
+                break
+    return i
+
+
+def _lex_shell(cmd, shell):
+    """Split a command into simple commands of `(kind, text)` tokens.
+
+    `kind` is "word", "out" for the operand of an output redirection, or "in"
+    for any other redirection operand. Quotes are removed from the text,
+    comments are dropped, and heredoc bodies are skipped. Simple commands end
+    at an unquoted `;`, `&`, `|`, `(`, `)`, or newline. This reads the common
+    shapes and stops there: it expands nothing and runs nothing.
+    """
+    escape = "`" if shell == "powershell" else "\\"
+    commands, tokens, buf = [], [], []
+    state = {"word": False, "next": None}
+    heredocs = []
+
+    def end_word():
+        if not state["word"]:
+            return
+        text = "".join(buf)
+        buf.clear()
+        state["word"] = False
+        kind, state["next"] = state["next"] or "word", None
+        if isinstance(kind, tuple):
+            heredocs.append((text, kind[1]))
+        else:
+            tokens.append((kind, text))
+
+    def end_command():
+        end_word()
+        state["next"] = None
+        if tokens:
+            commands.append(list(tokens))
+            tokens.clear()
+
+    i, n = 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch == "\n":
+            end_command()
+            i += 1
+            if heredocs:
+                i = _skip_heredoc_bodies(cmd, i, heredocs)
+                heredocs.clear()
+        elif ch in " \t\r":
+            end_word()
+            i += 1
+        elif ch == escape:
+            # An escaped newline continues the line; any other escaped
+            # character is literal text.
+            if i + 1 < n and cmd[i + 1] != "\n":
+                buf.append(cmd[i + 1])
+                state["word"] = True
+            i += 2
+        elif shell == "powershell" and _PS_HERESTRING_OPEN.match(cmd, i):
+            # A here-string runs to its quote and `@` at the start of a line;
+            # quotes inside it are text, so `user's` does not end it.
+            opener = _PS_HERESTRING_OPEN.match(cmd, i)
+            closing = re.compile(
+                r"(?m)^" + re.escape(opener.group(1) + "@")
+            ).search(cmd, opener.end())
+            end = n if closing is None else closing.start()
+            buf.append(cmd[opener.end():end])
+            state["word"] = True
+            i = n if closing is None else closing.end()
+        elif ch == "'":
+            end = cmd.find("'", i + 1)
+            end = n if end == -1 else end
+            buf.append(cmd[i + 1:end])
+            state["word"] = True
+            i = end + 1
+        elif ch == '"':
+            i += 1
+            while i < n and cmd[i] != '"':
+                if cmd[i] == escape and i + 1 < n:
+                    i += 1
+                buf.append(cmd[i])
+                i += 1
+            state["word"] = True
+            i += 1
+        elif ch == "#" and not state["word"]:
+            end = cmd.find("\n", i)
+            i = n if end == -1 else end
+        elif shell == "powershell" and cmd.startswith("<#", i):
+            end = cmd.find("#>", i + 2)
+            i = n if end == -1 else end + 2
+        elif ch == "&" and cmd.startswith("&>", i):
+            end_word()
+            state["next"] = "out"
+            i += 3 if cmd.startswith("&>>", i) else 2
+        elif ch in ";&|()":
+            end_command()
+            i += 1
+        elif ch in "<>":
+            # Digits written against the operator (`2>`) name a descriptor.
+            if state["word"] and "".join(buf).isdigit():
+                buf.clear()
+                state["word"] = False
+            else:
+                end_word()
+            if cmd.startswith(">&", i):
+                rest = cmd[i + 2:].lstrip(" \t")
+                state["next"] = "in" if rest[:1].isdigit() or rest[:1] == "-" else "out"
+                i += 2
+            elif cmd.startswith((">>", ">|"), i):
+                state["next"] = "out"
+                i += 2
+            elif ch == ">":
+                state["next"] = "out"
+                i += 1
+            elif cmd.startswith("<<<", i):
+                state["next"] = "in"
+                i += 3
+            elif cmd.startswith("<<-", i):
+                state["next"] = ("heredoc", True)
+                i += 3
+            elif cmd.startswith("<<", i):
+                state["next"] = ("heredoc", False)
+                i += 2
+            else:
+                state["next"] = "in"
+                i += 2 if cmd.startswith(("<&", "<>"), i) else 1
+        else:
+            buf.append(ch)
+            state["word"] = True
+            i += 1
+    end_command()
+    return commands
+
+
+def _edit_in_place_operands(head, args):
+    """Return the file operands of an in-place `sed` or `perl`, else [].
+
+    Option clusters are read the way the programs read them: `-i` may carry a
+    backup suffix, and `-e` or `-f` takes the rest of its cluster or the next
+    argument as its value, so `sed -e's/x/y/'` is not in place. Without `-e`,
+    the first operand is the script. An operand list that keeps a stray word
+    costs nothing, since prose_extension() decides which are prose.
+    """
+    in_place = script_given = False
+    operands = []
+    value_flags = "ef" if head != "perl" else "eE"
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == "--":
+            operands.extend(args[i:])
+            break
+        if arg.startswith("--"):
+            name = arg.split("=", 1)[0]
+            if name == "--in-place":
+                in_place = True
+            elif name in ("--expression", "--file", "--line-length"):
+                script_given = script_given or name != "--line-length"
+                if "=" not in arg:
+                    i += 1
+            continue
+        if arg.startswith("-") and len(arg) > 1:
+            for k, c in enumerate(arg[1:], 1):
+                if c == "i":
+                    in_place = True
+                    break
+                if c in value_flags:
+                    script_given = True
+                    if k == len(arg) - 1:
+                        i += 1
+                    break
+                if c == "l" or (head == "perl" and c in "MmIxCdDF0"):
+                    if head != "perl" and k == len(arg) - 1:
+                        i += 1
+                    break
+            continue
+        operands.append(arg)
+    if not in_place:
+        return []
+    return operands if script_given else operands[1:]
+
+
+def _ps_destinations(args):
+    """Return the file a PowerShell content cmdlet writes, or [] for -WhatIf."""
+    named, positional = [], []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg.startswith("-") and len(arg) > 1:
+            name, sep, value = arg[1:].partition(":")
+            name = name.lower()
+            if name == "whatif":
+                if value.lower() not in ("$false", "0"):
+                    return []
+                continue
+            if name in _PS_SWITCH_PARAMS:
+                continue
+            if not sep:
+                value = args[i] if i < len(args) else ""
+                i += 1
+            if name in _PS_PATH_PARAMS:
+                named.append(value)
+            continue
+        positional.append(arg)
+    return named or positional[:1]
+
+
+def _record_assignments(words, shell, assignments):
+    """Apply a simple command's lasting variable assignments to `assignments`.
+
+    Read from lexed words, so an assignment spelled inside a heredoc body or
+    a quoted argument is not one. In Bash an assignment lasts only when the
+    command is nothing but assignments (`export` and its kin included);
+    `OUT=x cmd` sets OUT for `cmd` alone and is skipped. PowerShell's
+    `$name = value` counts only as a whole three-word command, since anything
+    longer is an expression.
+    """
+    if shell == "powershell":
+        if not words or not words[0].startswith("$"):
+            return
+        name, sep, value = words[0][1:].partition("=")
+        if not sep:
+            if len(words) != 3 or words[1] != "=":
+                return
+            value = words[2]
+        if _SHELL_NAME.fullmatch(name):
+            assignments[name] = value
+        return
+    found = {}
+    for word in words:
+        if word in ("export", "local", "declare", "readonly"):
+            continue
+        match = _SHELL_ASSIGNMENT_WORD.fullmatch(word)
+        if not match:
+            return
+        found[match.group(1)] = match.group(2)
+    assignments.update(found)
+
+
+def _shell_prose_targets(commands, shell, assignments, depth=0):
+    """Return `(operand, variables)` for every operand a command writes to.
+
+    `commands` is the lexer's output. Redirections come from it directly. The
+    named writers are read per simple command, through the same wrappers the
+    destructive-command classifier sees through, so a `bash -c` payload is
+    read as a command of its own. Each operand carries the variables as they
+    stood when its command ran, so a later reassignment does not reach back,
+    and a child shell works on a copy that never flows back to its parent.
+    """
+    targets = []
+    for tokens in commands:
+        state = dict(assignments)
+        targets.extend((text, state) for kind, text in tokens if kind == "out")
+        words = [text for kind, text in tokens if kind == "word"]
+        _record_assignments(words, shell, assignments)
+        parts = strip_wrappers(words)
+        if not parts:
+            continue
+        payload, payload_shell = _wrapper_payload(parts, shell)
+        if payload is not None:
+            if depth < MAX_WRAPPER_DEPTH:
+                # `OUT=x bash -c ...` hands OUT=x to the child alone.
+                child = dict(state)
+                if shell != "powershell":
+                    for word in words[:len(words) - len(parts)]:
+                        match = _SHELL_ASSIGNMENT_WORD.fullmatch(word)
+                        if match:
+                            child[match.group(1)] = match.group(2)
+                targets.extend(_shell_prose_targets(
+                    _lex_shell(payload, payload_shell), payload_shell,
+                    child, depth + 1,
+                ))
+            continue
+        head = _basename(parts[0])
+        if head == "tee":
+            operands = [a for a in parts[1:] if not a.startswith("-")]
+        elif head in ("sed", "gsed", "perl"):
+            operands = _edit_in_place_operands(head, parts[1:])
+        elif head in _PS_FILE_WRITERS:
+            operands = _ps_destinations(parts[1:])
+        else:
+            operands = []
+        targets.extend((operand, state) for operand in operands)
+    return targets
+
+
+def _resolve_shell_path(word, cwd, assignments):
+    """Return the path a shell word names, or None when it cannot be known.
+
+    Variables come from assignments in the same command first, then from the
+    environment, because a scratch path is usually built in the command
+    itself (`P=/tmp/...; cat > "$P/agent-io/prompt.txt"`).
+    """
+    def expand(m):
+        if m.group(1):
+            return os.environ.get(m.group(1), m.group(0))
+        name = m.group(2) or m.group(5)
+        value = assignments.get(name, os.environ.get(name))
+        if m.group(3) and (value is None or (m.group(3) == ":-" and not value)):
+            return m.group(4)
+        return m.group(0) if value is None else value
+
+    path = word
+    for _ in range(2):
+        path = _SHELL_VARIABLE.sub(expand, path)
+    # A `$` left over is an expansion this reads no further; a backtick is a
+    # command substitution. Either way the path is not known.
+    if "$" in path or "`" in path:
+        return None
+    path = os.path.expanduser(path)
+    return path if os.path.isabs(path) else os.path.join(cwd, path)
+
+
+def check_shell_prose_write(tool_name, tool_input, cwd=None):
+    """Return a deny message if a Bash or PowerShell command writes banned
+    AI-tell words into a prose file, judged as `check_writing_style` judges
+    the same file written through Write."""
+    cmd = tool_input.get("command", "")
+    lowered = cmd.lower()
+    if not any(stem in lowered for stem in _BANNED_STEMS):
+        return None
+
+    shell = "powershell" if tool_name == "PowerShell" else "bash"
+    targets = _shell_prose_targets(_lex_shell(cmd, shell), shell, {})
+    base = cwd or os.getcwd()
+    judged = {}
+    for word, variables in targets:
+        path = _resolve_shell_path(word, base, variables)
+        if path is None:
+            continue
+        ext = prose_extension(path, agent_io_requires_scratch=True)
+        if ext is not None:
+            judged.setdefault(ext, word)
+
+    found = set()
+    target = None
+    for ext, word in judged.items():
+        scan_target = _content_for_style_check(cmd, ext)
+        hits = [w for w, p in _BANNED_PATTERNS if p.search(scan_target)]
+        if hits:
+            found.update(hits)
+            target = target or word
+    if not found:
+        return None
+
+    return (
+        f"Writing-style: this command writes to {target} and carries banned "
+        f"AI-tell words: {', '.join(sorted(found))}. {_suggest_rewrite(found)} "
+        f"Per AGENTS.md Writing Defaults, revise without these terms. The gate "
+        f"reads the whole command, so a command that only removes one of these "
+        f"words is stopped too; make that change with the Edit tool. A command "
+        f"that is not writing prose, such as a search saved to a file, can send "
+        f"its output under an agent-io directory in the session scratchpad or "
+        f"to a non-prose extension. If a real meta-use is still blocking you, "
+        f"set AGENT_STYLE_HOOK=off (per-guard) or AGENT_CONFIG_GATES=off "
+        f"(legacy blanket) in ~/.claude/settings.json env."
+    )
 
 
 # Cap on advisory findings per write. RULE-12 alone reports 268 hits on a
@@ -2130,11 +2558,15 @@ def main():
     # new gates and fall through to the Bash-only checks below, which run
     # whenever `tool_input.command` is populated.
     if tool_name and gates_enabled():
-        # Check 1 (new): writing-style gate on Write/Edit/MultiEdit to prose files.
+        # Check 1 (new): writing-style gate on prose files, written through
+        # Write/Edit/MultiEdit or through a shell command.
         # Honors the AGENT_STYLE_HOOK per-guard env in addition to AGENT_CONFIG_GATES.
         advice = None
         if writing_style_enabled():
-            deny = check_writing_style(tool_name, tool_input)
+            if tool_name in ("Bash", "PowerShell"):
+                deny = check_shell_prose_write(tool_name, tool_input, data.get("cwd"))
+            else:
+                deny = check_writing_style(tool_name, tool_input)
             if deny:
                 print(make_response("deny", deny))
                 return

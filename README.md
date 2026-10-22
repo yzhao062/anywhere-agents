@@ -152,7 +152,7 @@ Default AI output leans on a small set of filler words and em-dash rhythm. The `
 </tr>
 </table>
 
-The guard denies the `Write` / `Edit` tool call outright when the outgoing content contains a banned word. The agent sees the deny message with the hit list and revises before any file changes.
+The guard denies a `Write` / `Edit` call when its new prose contains a banned word. A shell command that writes a prose file is read whole, so a word in a search pattern or a deletion expression can also trigger the denial. Either way, the agent sees the hit list and a suggested route before the file changes.
 
 ### `git push` Is Never a Silent Action
 

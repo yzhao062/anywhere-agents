@@ -888,6 +888,283 @@ class WritingStyleGateTests(unittest.TestCase):
         self.assertIsNone(resp)
 
 
+class ShellProseWriteTests(unittest.TestCase):
+    """A shell command that writes a prose file meets the same banned-word
+    gate as Write.
+
+    On 2026-10-21 a heredoc put two banned words into a Markdown file and the
+    hook said nothing, while the same text through Write was denied. Each
+    denied shape below is paired with a neighbour that must pass, because the
+    commands an agent runs most often read prose files rather than write them,
+    and a gate that stopped a `grep` for a banned word would be switched off.
+    """
+
+    @staticmethod
+    def _decision(command, tool="Bash", env=None):
+        resp = run_guard_with_payload(
+            {"tool_name": tool, "tool_input": {"command": command}, "cwd": "/repo"},
+            env=env,
+        )
+        if not resp:
+            return None
+        return resp["hookSpecificOutput"]["permissionDecision"]
+
+    def test_heredoc_into_markdown_is_denied(self):
+        resp = run_guard_with_payload({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat > notes.md <<'EOF'\nWe delve into the realm.\nEOF"},
+            "cwd": "/repo",
+        })
+        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("delve, realm", reason)
+        self.assertIn("Suggested rewrite:", reason)
+        self.assertIn("Edit tool", reason)
+
+    def test_heredoc_with_redirect_after_it_is_denied(self):
+        self.assertEqual(
+            self._decision("cat <<'EOF' > notes.md\nA pivotal result.\nEOF"), "deny")
+
+    def test_clean_heredoc_passes(self):
+        self.assertIsNone(
+            self._decision("cat > notes.md <<'EOF'\nA central result.\nEOF"))
+
+    def test_echo_append_is_denied(self):
+        self.assertEqual(self._decision('echo "We delve." >> notes.md'), "deny")
+
+    def test_tee_is_denied(self):
+        self.assertEqual(
+            self._decision("printf 'A vast set.\\n' | tee -a notes.txt"), "deny")
+
+    def test_in_place_sed_is_denied(self):
+        self.assertEqual(
+            self._decision("sed -i '' 's/look at/delve into/' notes.md"), "deny")
+
+    def test_in_place_sed_that_removes_the_word_is_denied_too(self):
+        """The documented cost of reading the whole command. The Edit tool,
+        whose new text carries no banned word, is the reroute."""
+        self.assertEqual(
+            self._decision("sed -i 's/delve/examine/' notes.md"), "deny")
+
+    def test_in_place_perl_is_denied(self):
+        self.assertEqual(
+            self._decision("perl -pi -e 's/a/pivotal/' paper.tex"), "deny")
+
+    def test_powershell_set_content_is_denied(self):
+        self.assertEqual(
+            self._decision('Set-Content -Path notes.md -Value "We delve."',
+                           tool="PowerShell"),
+            "deny",
+        )
+
+    def test_writes_inside_a_bash_c_payload_are_denied(self):
+        self.assertEqual(
+            self._decision("bash -c \"sed -i 's/x/pivotal/' notes.md\""), "deny")
+        self.assertEqual(
+            self._decision("bash -c 'echo pivotal > notes.md'"), "deny")
+
+    def test_reading_a_prose_file_for_a_banned_word_passes(self):
+        self.assertIsNone(self._decision('grep -rn "delve" docs/*.md 2>/dev/null'))
+        self.assertIsNone(self._decision('sed -n "/delve/p" notes.md'))
+
+    def test_writing_a_code_file_passes(self):
+        self.assertIsNone(self._decision('echo "pivotal" > out.py'))
+
+    def test_inline_code_in_markdown_is_ignored(self):
+        self.assertIsNone(
+            self._decision("echo 'The word `pivotal` is banned.' > notes.md"))
+
+    def test_commit_message_is_left_to_the_git_gate(self):
+        # Not a prose file, so this gate stays out; the destructive-git row
+        # still asks for the commit itself.
+        self.assertEqual(self._decision('git commit -m "A pivotal fix"'), "ask")
+
+    def test_declared_scratch_path_built_in_the_command_passes(self):
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        command = (
+            f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
+            "Check for delve and realm.\nEOF"
+        )
+        self.assertIsNone(self._decision(command))
+
+    def test_declared_repo_path_is_still_denied(self):
+        self.assertEqual(
+            self._decision("cat > /repo/agent-io/prompt.md <<'EOF'\ndelve\nEOF"),
+            "deny",
+        )
+
+    def test_unresolvable_path_is_declined(self):
+        self.assertNotIn("GUARD_TEST_UNSET_DIR", os.environ)
+        self.assertIsNone(self._decision(
+            'cat > "$GUARD_TEST_UNSET_DIR/notes.md" <<EOF\ndelve\nEOF'))
+
+    def test_script_that_writes_the_file_itself_is_opaque(self):
+        self.assertIsNone(self._decision(
+            "python3 - <<'EOF'\nopen('notes.md', 'w').write('delve')\nEOF"))
+
+    def test_style_hook_off_disables_the_shell_gate(self):
+        self.assertIsNone(self._decision(
+            'echo "We delve." >> notes.md', env={"AGENT_STYLE_HOOK": "off"}))
+
+    # Where a command writes comes from the shell's structure. The first
+    # version matched redirections over the raw text, and review round 1
+    # reproduced a deny for each command below.
+
+    def test_redirection_spelled_inside_quotes_is_not_a_write(self):
+        self.assertIsNone(self._decision("rg -n 'delve > notes.md' tests/"))
+        self.assertIsNone(self._decision("git log --all --grep='delve > notes.md'"))
+
+    def test_redirection_inside_a_heredoc_body_is_not_a_write(self):
+        self.assertIsNone(self._decision(
+            "cat > test_example.py <<'EOF'\ncommand = 'echo delve > notes.md'\nEOF"))
+        self.assertIsNone(self._decision("cat <<'EOF'\necho delve > notes.md\nEOF"))
+
+    def test_scratch_prompt_quoting_a_write_passes(self):
+        """A review or dispatch prompt carries diffs and command examples."""
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        self.assertIsNone(self._decision(
+            f"cat > {scratch}/prompt.txt <<'EOF'\n"
+            "Review this command: echo delve > notes.md\nEOF"))
+        self.assertIsNone(self._decision(
+            f"cat > {scratch}/prompt.md <<'EOF'\nCheck delve.\ntee notes.md\nEOF"))
+
+    def test_redirection_in_a_comment_is_not_a_write(self):
+        self.assertIsNone(self._decision("true # echo delve > notes.md"))
+
+    def test_redirection_operand_is_read_whole(self):
+        self.assertIsNone(self._decision("echo delve > out.md-file.log"))
+        self.assertIsNone(self._decision("echo delve > result.md/log.txt.gz"))
+
+    def test_sed_expression_attached_to_e_is_not_in_place(self):
+        self.assertIsNone(self._decision("sed -e's/x/pivotal/' notes.md"))
+        self.assertIsNone(self._decision("sed --expression='s/x/pivotal/' notes.md"))
+        self.assertEqual(
+            self._decision("sed -i.bak -e 's/a/pivotal/' notes.md"), "deny")
+        self.assertEqual(self._decision("sed -Ei 's/a/pivotal/' notes.md"), "deny")
+
+    def test_filename_held_in_a_variable_is_resolved(self):
+        self.assertEqual(
+            self._decision('OUT=notes.md; echo delve > "$OUT"'), "deny")
+        self.assertEqual(
+            self._decision('echo delve > "$GUARD_TEST_OUT"',
+                           env={"GUARD_TEST_OUT": "notes.md"}),
+            "deny",
+        )
+
+    def test_powershell_value_is_not_a_destination(self):
+        self.assertIsNone(self._decision(
+            "Set-Content -Path output.log -Value 'Read pivotal notes.md'",
+            tool="PowerShell"))
+        self.assertIsNone(self._decision(
+            'Set-Content output.json -Value "delve in notes.md"', tool="PowerShell"))
+
+    def test_powershell_whatif_writes_nothing(self):
+        self.assertIsNone(self._decision(
+            "Set-Content -Path notes.md -Value delve -WhatIf", tool="PowerShell"))
+
+    def test_powershell_assignment_is_resolved(self):
+        for command in ('$out="notes.md"; Set-Content -Path $out -Value "delve"',
+                        '$out = "notes.md"; Set-Content -Path $out -Value "delve"'):
+            with self.subTest(command=command):
+                self.assertEqual(self._decision(command, tool="PowerShell"), "deny")
+
+    def test_assignment_inside_a_heredoc_body_is_not_one(self):
+        """Round 1 (Agy): a body line `P=foo` overrode the real `P=`."""
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        self.assertIsNone(self._decision(
+            f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
+            "In the script, P=foo sets the parameter.\nWe delve.\nEOF"))
+
+    def test_blockquote_in_a_scratch_prompt_is_not_a_write(self):
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        self.assertIsNone(self._decision(
+            f"cat > \"{scratch}/prompt.txt\" <<'EOF'\n"
+            "> AGENTS.md lists delve as a banned word.\nEOF"))
+
+    def test_commit_message_quoting_a_redirection_reaches_the_git_gate(self):
+        self.assertEqual(self._decision(
+            'git commit -m "Close the bypass where echo delve > notes.md passed"'),
+            "ask")
+
+    def test_read_only_sed_with_attached_script_passes(self):
+        self.assertIsNone(self._decision("sed -n -e'/pivotal/p' notes.md"))
+
+    def test_default_expansion_resolves_a_scratch_path(self):
+        self.assertIsNone(self._decision(
+            "cat > \"${TMPDIR:-/tmp}/agent-io/prompt.txt\" <<'EOF'\ndelve\nEOF",
+            env={"TMPDIR": tempfile.gettempdir()}))
+        self.assertEqual(self._decision(
+            'cat > "${GUARD_TEST_UNSET_DIR:-notes.md}" <<EOF\ndelve\nEOF'), "deny")
+
+    def test_command_substitution_leaves_the_path_unknown(self):
+        for command in (
+            "P=`mktemp -d`; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\ndelve\nEOF",
+            "P=$(mktemp -d); cat > \"$P/agent-io/prompt.txt\" <<'EOF'\ndelve\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self._decision(command))
+
+    def test_powershell_environment_variable_is_resolved(self):
+        self.assertEqual(self._decision(
+            'Set-Content -Path "$env:GUARD_TEST_DIR/notes.md" -Value "We delve."',
+            tool="PowerShell", env={"GUARD_TEST_DIR": "/repo"}), "deny")
+
+    # Round 2 (Codex): a variable is read as it stood when its command ran.
+
+    def test_later_reassignment_does_not_reach_back(self):
+        self.assertIsNone(self._decision(
+            'OUT=build.log; echo delve > "$OUT"; OUT=notes.md'))
+        self.assertEqual(self._decision(
+            'OUT=notes.md; echo delve > "$OUT"; OUT=build.log'), "deny")
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe")
+        self.assertIsNone(self._decision(
+            f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
+            "delve\nEOF\nP=/repo"))
+
+    def test_command_local_and_child_assignments_do_not_persist(self):
+        self.assertIsNone(self._decision('OUT=notes.md true; echo delve > "$OUT"'))
+        self.assertIsNone(self._decision(
+            "bash -c 'OUT=notes.md'; echo delve > \"$OUT\""))
+
+    # Round 3 (Codex): the child shell sees its command-local assignment.
+
+    def test_command_local_assignment_reaches_the_child(self):
+        self.assertIsNone(self._decision(
+            "OUT=notes.md; OUT=build.log bash -c 'echo delve > \"$OUT\"'"))
+        self.assertEqual(self._decision(
+            "OUT=notes.md; OUT=build.log bash -c 'true'; echo delve > \"$OUT\""),
+            "deny")
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        self.assertIsNone(self._decision(
+            f"P=/repo; P={scratch} bash -c 'echo delve > \"$P/prompt.txt\"'"))
+        self.assertEqual(self._decision(
+            "OUT=build.log; OUT=notes.md bash -c 'echo delve > \"$OUT\"'"),
+            "deny")
+
+    # Round 2 (Codex): a PowerShell here-string is one quoted span.
+
+    def test_powershell_here_string_is_data(self):
+        scratch = os.path.join(tempfile.gettempdir(), "ir-probe", "agent-io")
+        for command in (
+            "@'\nReview the user's command:\necho delve > notes.md\n'@ | "
+            f"Set-Content {scratch}/prompt.txt",
+            "@'\nReview the user's command:\necho delve > notes.md\n'@",
+            '@"\nfixture = "x"; echo delve > notes.md\n"@ | Set-Content fixture.py',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self._decision(command, tool="PowerShell"))
+        for quote in ("'", '"'):
+            with self.subTest(quote=quote):
+                self.assertEqual(self._decision(
+                    f"@{quote}\nThe user's delve.\n{quote}@ | Set-Content notes.md",
+                    tool="PowerShell"), "deny")
+
+    def test_powershell_redirection_and_out_file_are_denied(self):
+        self.assertEqual(self._decision('"delve" > notes.md', tool="PowerShell"), "deny")
+        self.assertEqual(
+            self._decision('"delve" | Out-File notes.md', tool="PowerShell"), "deny")
+
+
 # Deliberately over both RULE-12 thresholds: thirty words, which the
 # per-sentence rule of agent-style before 0.8.0 flags, and eighty, which the
 # profile of 0.8.0 and later flags for a single sentence. Counted, not
@@ -2168,9 +2445,9 @@ class AgentIoScopeTests(unittest.TestCase):
             "both guards should reach scope through the shared predicate",
         )
         self.assertEqual(
-            source.count("agent_io_requires_scratch=True"), 1,
-            "exactly one caller should take the narrower trust, and it is "
-            "the guard that denies",
+            source.count("agent_io_requires_scratch=True"), 2,
+            "only the callers that deny should take the narrower trust: the "
+            "Write gate and the shell-write gate",
         )
 
 
