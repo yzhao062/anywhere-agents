@@ -2545,17 +2545,13 @@ def classify_command(cmd, shell, depth=0):
 # codex`. Three differences shape the Codex path. Its shell tool arrives as
 # `Bash` (a PowerShell command on Windows) and its file edits as `apply_patch`
 # with the raw patch text. It has no `ask`: the decision is rejected as
-# invalid and the call runs, so an approval gate denies instead and names the
-# route the user owns, a `!` command typed at the Codex prompt, which no hook
-# sees. The banner gate stays with Claude Code, whose acknowledgement file
-# Codex never writes, and so does the compound-cd gate, which exists for a
-# Claude Code permission prompt Codex does not show.
+# invalid and the call runs. A deny in its place would hold after the user
+# approves in the conversation, and the Codex app has no `!` route around it,
+# so the approval rows pass and that approval governs them. The banner gate
+# stays with Claude Code, whose acknowledgement file Codex never writes, and
+# so does the compound-cd gate, which exists for a Claude Code permission
+# prompt Codex does not show.
 _PATCH_FILE = re.compile(r"\*\*\* (Add|Update|Delete) File: (.+)")
-_CODEX_ASK = (
-    " Codex hooks cannot ask for approval, so the call is denied. Show the "
-    "user the command; once they approve, they run it themselves by typing "
-    "`!` and the command at the Codex prompt."
-)
 
 
 def _patch_files(patch):
@@ -2733,10 +2729,6 @@ def main_codex(data):
             )
         if not deny and nested_git_init_enabled():
             deny = nested_git_init_deny_message(cmd, cwd)
-        if not deny:
-            decision, reason = classify_command(cmd, shell)
-            if decision == "ask":
-                deny = reason + _CODEX_ASK
     if deny:
         deny = deny.replace(
             "in ~/.claude/settings.json env", "in the environment Codex starts in",

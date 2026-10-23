@@ -87,7 +87,7 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 | Publish | `Bash`, `PowerShell` | `npm publish`, `npm unpublish`, `twine upload`, `python -m twine upload` | **ask** |
 | File or device destruction | `Bash`, `PowerShell` | Bash `rm -rf`/`-fr`/`-r -f`, `dd`, `mkfs*`, `shred`; PowerShell `Remove-Item` and its aliases with `-Recurse`/`-r`/`/s` | **ask** |
 
-The four `ask` rows are one classifier that reads the leading token of each sub-command, also inside built-in wrappers such as `bash -c` and `ssh`, and treats `python -c` and private wrappers as opaque. It is not bypassable by any env var: those operations have no agent-side reroute, and human approval is the contract. A gate that has an obvious reroute is a `deny` with the reroute inline, because an unattended loop can take it in one turn where an `ask` would stall. Under Codex these rows deny, and the user types `!<command>`.
+The four `ask` rows are one classifier that reads the leading token of each sub-command, also inside built-in wrappers such as `bash -c` and `ssh`, and treats `python -c` and private wrappers as opaque. It is not bypassable by any env var: those operations have no agent-side reroute, and human approval is the contract. A gate that has an obvious reroute is a `deny` with the reroute inline, because an unattended loop can take it in one turn where an `ask` would stall. Under Codex they pass, as its hooks cannot ask, and chat approval governs.
 
 Escape hatches, set in the `env` block of `~/.claude/settings.json` (disable values `off` / `0` / `disabled` / `false` / `no`):
 

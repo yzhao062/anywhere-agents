@@ -1184,7 +1184,8 @@ class CodexHookTests(unittest.TestCase):
 
     Codex sends its shell tool as `Bash` and its file edits as `apply_patch`
     with the raw patch, and it rejects an `ask` as invalid output and runs the
-    call, so the approval gates deny there.
+    call, so the approval gates pass there and the user's approval in the
+    conversation governs.
     """
 
     @staticmethod
@@ -1278,10 +1279,12 @@ class CodexHookTests(unittest.TestCase):
         self.assertIn("with apply_patch", reason)
         self.assertNotIn("Edit tool", reason)
         self.assertIsNone(self._decision("Bash", "echo delve > build.log"))
-        resp = self._run("Bash", "git push origin main")
-        self.assertEqual(resp["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("`!`", resp["hookSpecificOutput"]["permissionDecisionReason"])
-        self.assertIsNone(self._decision("Bash", "git status"))
+        # A Codex hook cannot ask, and a deny would outlast the user's
+        # approval in the conversation, so the approval rows pass.
+        for cmd in ("git push origin main", "git commit -m wip",
+                    "gh pr create", "rm -rf build"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self._decision("Bash", cmd))
 
     def test_claude_only_gates_and_other_tools_pass(self):
         self.assertIsNone(self._decision("Bash", "cd /tmp && ls"))
