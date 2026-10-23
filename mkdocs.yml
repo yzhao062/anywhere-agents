@@ -13,6 +13,8 @@ exclude_docs: |
 
 theme:
   name: material
+  logo: assets/brand/mark-white.svg
+  favicon: assets/brand/favicon.svg
   palette:
     - scheme: default
       primary: custom

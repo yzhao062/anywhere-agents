@@ -2,6 +2,13 @@
 
 <div align="center">
 
+<!-- logo-family -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/logo-dark.svg">
+  <img src="docs/assets/brand/logo.svg" alt="anywhere-agents" width="440">
+</picture>
+
+
 **[English](README.md) · 中文**
 
 # anywhere-agents
