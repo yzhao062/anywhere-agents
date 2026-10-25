@@ -12,7 +12,8 @@ Treat the command arguments as part of the user's current task.
 `auto`, `cli`, and `auto-terminal` opt into the Auto-terminal channel.
 `manual`, `back to manual`, and `use terminal-relay` force Terminal-relay.
 With Auto-terminal as the user default, `/vet agy` selects Antigravity directly;
-`gemini` and `antigravity` remain aliases. No reviewer token selects Codex.
+`gemini` and `antigravity` remain aliases. With no reviewer token, the default
+is Codex unless `IMPLEMENT_REVIEW_DEFAULT_REVIEWER` names others, such as `both`.
 `/vet both` runs the two of Claude, Codex, and Agy that are not coordinating this session, for the same round.
 That is Codex and Agy under Claude Code, Claude and Agy under Codex, and Codex and Claude under Agy.
 The two run in parallel when memory allows and one after the other otherwise.

@@ -11,7 +11,8 @@ Treat the command arguments as part of the user's current task.
 `auto`, `cli`, and `auto-terminal` opt into the Auto-terminal channel.
 `manual`, `back to manual`, and `use terminal-relay` force Terminal-relay.
 With Auto-terminal as the user default, `/implement-review agy` selects
-Antigravity directly; `gemini` and `antigravity` remain aliases. No reviewer
-token selects Codex.
+Antigravity directly; `gemini` and `antigravity` remain aliases. With no
+reviewer token, the default is Codex unless `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`
+names others, such as `both`.
 
 Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.
