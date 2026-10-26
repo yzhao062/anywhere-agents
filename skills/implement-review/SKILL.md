@@ -65,7 +65,7 @@ Anti-patterns the reviewer must NOT pursue:
 
 The Phase 1c prompt template `Scope-challenge focus:` line below carries this contract into every plan-review send.
 
-### Illustrative examples (not exhaustive; the category is less important than the pattern)
+### Illustrative examples
 
 - System / code: hook or infra design, cross-cutting refactor, state-file schema, cross-platform behavior, release runbook revisions.
 - Research output: paper outline with specific aims, contribution claims before methods is written, figure-placement vs argument flow, reviewer response strategy, experiment design across multiple methods, ablation plan.
@@ -74,10 +74,6 @@ The Phase 1c prompt template `Scope-challenge focus:` line below carries this co
 - Administrative / teaching: course syllabus structure, lab policy document, committee process design.
 
 The point is not which category -- it is whether the shape of the work precedes and constrains the execution.
-
-### Empirical note
-
-In the agent-config 0.1.9 release cycle, two plan-review rounds caught a High-severity design flaw before implementation. The later execution-review rounds were limited to documentation and test polish, avoiding a likely post-ship hotfix.
 
 ## Codex Channels
 
@@ -586,7 +582,7 @@ Reviewers are instructed to write their review to a `Review-<AgentName>.md` file
 
 Multi-reviewer consolidation: if two or more current-round review sources are available (current-round `Review-*.md` files and/or reviewer feedback the user relays directly), classify each new finding as:
 
-- **Convergent** -- two or more reviewers raise substantially the same point. High confidence; treat as "will fix" unless wrong on the merits. If reviewers agree on the underlying problem but differ on severity, scope, or recommended remedy, classify as **Convergent with differences**: preserve each reviewer's severity and recommended fix in the consolidation report, and use the highest severity until the user or implementer resolves the difference.
+- **Convergent** -- two or more reviewers raise substantially the same point. High confidence in correctness; apply the Will fix bar. If reviewers agree on the underlying problem but differ on severity, scope, or recommended remedy, classify as **Convergent with differences**: preserve each reviewer's severity and recommended fix in the consolidation report, and use the highest severity until the user or implementer resolves the difference.
 - **Single-source** -- only one reviewer raises the point. Label the source (e.g., "from Review-Codex.md") when presenting.
 - **Divergent** -- reviewers take opposite positions on the same finding. Flag the disagreement explicitly; present both sides; ask the user to decide.
 
@@ -598,7 +594,7 @@ Before trusting any file, verify that its `<!-- Round N -->` comment matches the
 
 Read and consolidate only files that are both **current-round** and **expected**. Report every ignored file by filename, grouped by reason (stale-round, empty, unreadable, unexpected), before presenting findings, so the user sees which reviewers produced usable output this round.
 
-If a file is current-round but unexpected, flag it to the user before inclusion or exclusion: it may be a leftover from another task, or an additional reviewer the user invoked without announcing. Treat the file mtime against the recorded Phase 1c emission time as a secondary signal only, subject to clock skew, filesystem timestamp granularity, and editor-touch noise: mtime clearly older than emission weakly suggests a prior-task artifact; mtime at or after emission is consistent with a current-round file. Require at least one corroborating signal before including (e.g., file/diff scope matching current staged files, verification notes referencing current commands or files, the reviewer being named in the conversation). Do not silently include or exclude.
+If a file is current-round but unexpected, flag it to the user before inclusion or exclusion: it may be a leftover from another task, or an additional reviewer the user invoked without announcing. Treat the file mtime against the recorded Phase 1c emission time as a noisy secondary signal only: mtime clearly older than emission weakly suggests a prior-task artifact; mtime at or after emission is consistent with a current-round file. Require at least one corroborating signal before including (e.g., file/diff scope matching current staged files, verification notes referencing current commands or files, the reviewer being named in the conversation). Do not silently include or exclude.
 
 If the expected reviewer set is unknown, treat mtime as weak evidence only: use it to rank candidates, not to auto-classify. Ask the user to confirm which current-round files belong to this review before consolidating.
 
@@ -611,7 +607,8 @@ If only one current-round source remains after retry and direct-paste handling w
 - When feedback arrives (from any `Review-*.md` file or relayed by the user), acknowledge each point.
 - If a reviewer separated findings into "New" and "Previously raised" sections, verify the classifications. If a reviewer did not separate them (older prompts or non-compliance), do the separation yourself based on the round history.
 - Categorize each **new** point as:
-  - **Will fix** -- clear, actionable, and correct.
+  - **Will fix** -- clear, actionable, correct, and worth a revision, such as a main-path bug, a wrong fact or unsupported claim, a step a reader cannot follow, or a risk to user data.
+  - **Decline** -- correct but not worth a revision, typically a corner case that needs two failures at once, a hand-edited internal file, or an unusual environment; never a risk to user data. Give a one-line reason, and once the user confirms, record it as `Deferred`.
   - **Needs discussion** -- ambiguous or potentially wrong; ask the user before acting.
   - **Disagree** -- explain why and let the user decide.
 - For **previously raised** points, check the status the reviewer assigned:
@@ -619,7 +616,7 @@ If only one current-round source remains after retry and direct-paste handling w
   - **Still open** -- the fix did not land or was incomplete. Treat as "will fix" unless the user overrides.
   - **Reopened** -- the reviewer re-raises a point that was marked Resolved. Flag to the user: this needs a decision, not silent re-litigation.
   - **Deferred** -- the user chose not to address this. The reviewer acknowledges it as unchanged. No action unless the user reconsiders.
-- **Verify factual claims (Phase 2.5)** for High-priority findings, and for Medium findings produced via the Auto-terminal embedded-diff retry channel, that make checkable factual assertions (citation existence, code behavior, link reachability, count or size, compile error). Verification outcomes (`Verified` / `Refuted` / `Inconclusive`) override or augment the categorization above: a Refuted finding is not applied, regardless of its original `Will fix` / `Needs discussion` category.
+- **Verify factual claims (Phase 2.5)** for High-priority findings, and for Medium findings produced via the Auto-terminal embedded-diff retry channel, that make checkable factual assertions (citation existence, code behavior, link reachability, count or size, compile error). Verification settles correctness only: a Refuted finding is not applied whatever its category, and a Verified one still has to meet the Will fix bar.
 - Present the categorized list (including verification outcomes from Phase 2.5) and confirm with the user before making changes.
 - **Apply in place.** Fix approved findings by rewriting, moving, or cutting the named passage; add material only for an identified gap. For a paper, proposal, or plan, record its size each round in the same unit. After two consecutive rounds of growth with no new result or step, consolidate before the next dispatch. Cut unneeded defenses and move process history that supports no retained claim to the records.
 - For follow-up questions within the same review round, prepare a short prompt the user can paste into the reviewer.
@@ -660,7 +657,7 @@ If no listed method applies, ask the user before either accepting the claim or p
 
 Record one of three outcomes for each verified claim:
 
-- **Verified** — the reviewer's claim is correct. Proceed with the fix as a normal `Will fix` item.
+- **Verified** — the reviewer's claim is correct; the Will fix bar decides whether to revise.
 - **Refuted** — the reviewer's claim is wrong, or the issue does not reproduce. **Do not apply the fix.** Push back via a follow-up reviewer prompt that cites the verification evidence (command run, output, URL fetched, file path inspected). The user may override this by asking to apply anyway, but the default is to push back.
 - **Inconclusive** — verification could not run (no internet, no test runner, claim under-specified) or returned ambiguous results. Surface the ambiguity to the user and let them decide.
 
@@ -710,7 +707,7 @@ Do not stage, commit, or move `Review-*.md` files unless the user explicitly ask
 
 The loop ends when:
 - The user says the review is done or approved.
-- No reviewer raises actionable issues.
+- No new or still-open finding meets the Will fix bar. A reviewer that still blocks on a `Deferred` item does not hold the loop open; name those items in the summary.
 - The user decides to stop iterating.
 
 At conclusion, present a short summary: total rounds, key changes made, and any unresolved points from the last review.
