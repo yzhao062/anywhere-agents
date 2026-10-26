@@ -15,6 +15,8 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 - **A user-scoped reviewer default for `/vet`.** `IMPLEMENT_REVIEW_DEFAULT_REVIEWER` supplies the reviewer tokens when an invocation names none, the way `IMPLEMENT_REVIEW_DEFAULT_CHANNEL` supplies the channel. Set to `both`, a bare `/vet` runs the two of Claude, Codex, and Agy that are not coordinating. An explicit reviewer token still wins, and without the variable the default stays Codex. Claude Code reads both variables from the `env` block of `~/.claude/settings.json`, and Codex from `[shell_environment_policy] set` in `~/.codex/config.toml`.
 
+- **`/vet` triage weighs whether a fix is worth it.** A correct but low-value finding is declined with a one-line reason and recorded as `Deferred` once the user confirms. Agreement between reviewers and a passed factual check no longer make a finding Will fix by themselves, and the loop ends when no new or still-open finding meets the bar.
+
 ### Fixed
 
 - **A quoted Windows path survives the shell-write gate.** Inside double quotes the gate dropped every backslash, so `cat > "C:\Users\me\AppData\Local\Temp\x\agent-io\prompt.txt"` was read as a relative path and a scratch prompt was denied. A backslash there now escapes only `$`, a backtick, `"`, or `\`, as in bash. CI runs the Python 3.9 floor on `ubuntu-24.04`, because `ubuntu-latest` (26.04) has no 3.9 build, and the PDF recovery test accepts PyMuPDF 2.0, which no longer prints MuPDF messages by default.
