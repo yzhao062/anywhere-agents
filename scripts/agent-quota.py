@@ -9,7 +9,9 @@ Phase 9.
 
 Data sources:
   - Claude: ~/.claude/rate-limits-cache.json, written by statusline.py on
-    each Claude Code statusLine render (override via CLAUDE_RL_CACHE).
+    each Claude Code statusLine render (override via CLAUDE_RL_CACHE). A
+    window missing from the cache is left out of the row: a verified Ultra
+    account has no 5h limit, so its row shows only 7d.
   - Codex:  ~/.codex/sessions/**/rollout-*.jsonl, field
     payload.rate_limits. Each window carries window_minutes, so the label
     is derived from it (300 -> 5h, 10080 -> 7d): Codex dropped the fixed 5h
@@ -41,6 +43,7 @@ import sys
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
+CLAUDE_WINDOWS = (("5h", "five_hour"), ("7d", "seven_day"))
 CODEX_PCT_FIELD = "used_percent"
 # The account plan meter. Rollouts written before per-model buckets shipped
 # carry no limit_id at all, so an absent id counts as the main meter.
@@ -579,9 +582,13 @@ def claude_row():
     model = d.get("model") or "?"
     if model.endswith(" context)") and " (" in model:
         model = model.rsplit(" (", 1)[0]
-    five = _fmt(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
-    week = _fmt(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
-    return f"Claude   {model:<12}  5h {five:<20}  7d {week:<20}  [{_age(d.get('ts'))}]"
+    segs = [
+        f"{label} {_fmt(rl[key], CLAUDE_PCT_FIELD):<20}"
+        for label, key in CLAUDE_WINDOWS
+        if rl.get(key)
+    ]
+    body = "  ".join(segs) if segs else "(no windows)"
+    return f"Claude   {model:<12}  {body}  [{_age(d.get('ts'))}]"
 
 
 def codex_row():

@@ -1024,5 +1024,81 @@ class TestAgyQuota(unittest.TestCase):
         self.assertIn(" | agy ", line)
 
 
+class TestClaudeWindows(unittest.TestCase):
+    """A verified Ultra account has no 5h limit, so `five_hour` is missing from
+    the statusLine stdin and null in the usage response. Rendering a dash for
+    it read as a broken meter, so an absent window is left out of both
+    readouts, and a window that returns shows again."""
+
+    WEEK = {"used_percentage": 7}
+    FIVE = {"used_percentage": 18}
+
+    def _row(self, rate_limits):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = pathlib.Path(tmp) / "rate-limits-cache.json"
+            cache.write_text(
+                json.dumps({"model": "Opus 5.5", "rate_limits": rate_limits,
+                            "ts": time.time()}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(agent_quota, "CLAUDE_RL_CACHE", str(cache)):
+                return agent_quota.claude_row()
+
+    def _segments(self, rate_limits):
+        data = {"model": {"display_name": "Opus 5.5"}, "rate_limits": rate_limits}
+        return (statusline.claude_segment(data, compact=True),
+                statusline.claude_segment(data))
+
+    def test_absent_five_hour_is_left_out(self):
+        for rate_limits in ({"seven_day": self.WEEK},
+                            {"five_hour": None, "seven_day": self.WEEK},
+                            {"five_hour": {}, "seven_day": self.WEEK}):
+            compact, full = self._segments(rate_limits)
+            row = self._row(rate_limits)
+            self.assertEqual(compact, "cc 7d93%")
+            self.assertEqual(full, "🤖 Opus 5.5 · 7d 93%")
+            self.assertIn("7d 93% left", row)
+            self.assertNotIn("5h", row)
+            self.assertNotIn("—", row)
+
+    def test_absent_seven_day_is_left_out(self):
+        rate_limits = {"five_hour": self.FIVE}
+        compact, full = self._segments(rate_limits)
+        row = self._row(rate_limits)
+        self.assertEqual(compact, "cc 5h82%")
+        self.assertEqual(full, "🤖 Opus 5.5 · 5h 82%")
+        self.assertIn("5h 82% left", row)
+        self.assertNotIn("7d", row)
+
+    def test_zero_usage_keeps_its_meter(self):
+        """A window at 0% used is present, so it must not be mistaken for an
+        absent one."""
+        rate_limits = {"five_hour": {"used_percentage": 0},
+                       "seven_day": {"used_percentage": 0}}
+        compact, full = self._segments(rate_limits)
+        row = self._row(rate_limits)
+        self.assertEqual(compact, "cc 5h100% 7d100%")
+        self.assertEqual(full, "🤖 Opus 5.5 · 5h 100% · 7d 100%")
+        self.assertIn("5h 100% left", row)
+        self.assertIn("7d 100% left", row)
+
+    def test_both_windows_keep_their_order_and_row_layout(self):
+        rate_limits = {"five_hour": self.FIVE, "seven_day": self.WEEK}
+        compact, full = self._segments(rate_limits)
+        self.assertEqual(compact, "cc 5h82% 7d93%")
+        self.assertEqual(full, "🤖 Opus 5.5 · 5h 82% · 7d 93%")
+        self.assertIn(f"5h {'82% left':<20}  7d {'93% left':<20}  [",
+                      self._row(rate_limits))
+
+    def test_no_window_still_renders_a_placeholder(self):
+        """Before the first API response and in an API-key session, no window
+        exists at all; the segment stays visible rather than collapsing."""
+        for rate_limits in ({}, None, {"five_hour": None, "seven_day": None}):
+            compact, full = self._segments(rate_limits)
+            self.assertEqual(compact, "cc —")
+            self.assertEqual(full, "🤖 Opus 5.5 · —")
+            self.assertIn("(no windows)", self._row(rate_limits))
+
+
 if __name__ == "__main__":
     unittest.main()

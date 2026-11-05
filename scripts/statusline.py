@@ -3,7 +3,11 @@
 
 Claude data: v2.1.80+ injects `rate_limits` into statusLine stdin JSON for
 Pro/Max subscribers. Field is absent for API-key sessions and before first
-API response of a session.
+API response of a session. Each window can also be absent on its own: a
+verified Ultra account has no 5h limit, and Claude Code drops a window once
+its `resets_at` passes. An absent window is left out of the line, so a plan
+without a 5h limit reads `cc 7d93%`, and a 5h window that returns shows again
+without a change here.
 
 Codex data: read from the rollout JSONLs under ~/.codex/sessions/. Codex
 writes `payload.rate_limits` on every `token_count` event. Each window
@@ -49,6 +53,7 @@ import sys
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
+CLAUDE_WINDOWS = (("5h", "five_hour"), ("7d", "seven_day"))
 CODEX_PCT_FIELD = "used_percent"
 # The account plan meter. Rollouts written before per-model buckets shipped
 # carry no limit_id at all, so an absent id counts as the main meter.
@@ -244,13 +249,17 @@ def persist_claude(data):
 def claude_segment(data, compact=False):
     model = (data.get("model") or {}).get("display_name") or "?"
     rl = data.get("rate_limits") or {}
+    formatter = fmt_window_compact if compact else fmt_window
+    windows = [
+        (label, formatter(rl[key], CLAUDE_PCT_FIELD))
+        for label, key in CLAUDE_WINDOWS
+        if rl.get(key)
+    ]
     if compact:
-        five = fmt_window_compact(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
-        week = fmt_window_compact(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
-        return f"cc 5h{five} 7d{week}"
-    five = fmt_window(rl.get("five_hour") or {}, CLAUDE_PCT_FIELD)
-    week = fmt_window(rl.get("seven_day") or {}, CLAUDE_PCT_FIELD)
-    return f"🤖 {model} · 5h {five} · 7d {week}"
+        shown = " ".join(f"{label}{value}" for label, value in windows)
+        return f"cc {shown or '—'}"
+    shown = " · ".join(f"{label} {value}" for label, value in windows)
+    return f"🤖 {model} · {shown or '—'}"
 
 
 def _path_age(path):
