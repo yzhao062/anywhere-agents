@@ -25,17 +25,27 @@
 #                                  signal; child processes inherit it.
 #   CODEX_SESSION_ID               Same as CODEX_THREAD_ID, for the session ID.
 #   ANYWHERE_AGENTS_PYTHON         Explicit Python interpreter override
+#   CODEX_DISPATCH_MODEL           One-run override of the reviewer model.
+#   CODEX_DISPATCH_REASONING       One-run override of the reviewer effort.
+#   AGENT_MODELS_FILE              Alternate registry file (tests, one-off runs).
 #   TMPDIR                         Temp dir for state-dir (default: /tmp)
+#
+# Model and effort: the registry (user/agent-models.json, read through
+# scripts/agent_models.py) names both; see the isolation note below for the
+# order of sources. <state-dir>/review-model records what was requested, the
+# source of each, and what the codex header reports after the run.
 #
 # Stdout:
 #   First (and only) machine-readable line: STATE-DIR <abs-path>
 #
 # Stderr:
-#   Dispatch diagnostics + last 80 lines of codex-exec combined stdout+stderr
+#   Dispatch diagnostics + last 80 lines of codex-exec combined stdout+stderr.
+#   MODEL-MISMATCH when the run did not use the requested model or effort.
 #
 # Exit code:
 #   Propagates codex exec's exit code unchanged.
 #   Returns 2 on usage errors (missing/invalid args) or self-review refusal.
+#   Returns 70 when no source names the reviewer model and effort.
 
 set -u
 
@@ -429,22 +439,30 @@ CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
 # CODEX_HOME. It also drops the configured model, leaving codex's built-in
 # recommended one (server-chosen, so it can change under us), and reasoning
 # effort drops to "none". Re-pass -c model and -c model_reasoning_effort to
-# keep reviews on the chosen model and effort. The model comes from, in order:
-# CODEX_DISPATCH_MODEL (e.g. for an account without the usual model); the
-# top-level `model` in $CODEX_HOME/config.toml (default ~/.codex), read back
-# because --ignore-user-config drops it; then CODEX_FALLBACK_MODEL, which a
-# contract test keeps equal to the model AGENTS.md names for Codex. Following
-# config.toml means a model switch there reaches reviews without an edit here.
-# A config value is taken only when quoted and made of [A-Za-z0-9._:/-], so a
-# stray config line cannot reach the -c argument or the .ps1's generated cmd
-# helper; CODEX_DISPATCH_MODEL is the operator's own value and passes as given.
+# keep reviews on the chosen model and effort.
+# The registry (user/agent-models.json, read through scripts/agent_models.py)
+# names both, and no literal lives here: one would outlive a registry change.
+# The model comes from, in order: CODEX_DISPATCH_MODEL (e.g. for an account
+# without the usual model); the registry; the top-level `model` in
+# $CODEX_HOME/config.toml (default ~/.codex), read back because
+# --ignore-user-config drops it; then failure. The effort follows the same
+# order with CODEX_DISPATCH_REASONING, the registry, and the top-level
+# `model_reasoning_effort`. config.toml is the third source because bootstrap
+# writes the registry's values into it. A config value is taken only when
+# quoted and made of [A-Za-z0-9._:/-], so a stray config line cannot reach the
+# -c argument or the .ps1's generated cmd helper; CODEX_DISPATCH_MODEL and
+# CODEX_DISPATCH_REASONING are the operator's own values and pass as given.
 # A config model is skipped when a top-level model_provider other than openai
 # is set: isolation drops that provider, and its model names (ollama's
 # name:tag, a gateway's vendor/model) would reach the default provider. The
 # parser runs under LC_ALL=C so every awk strips a UTF-8 BOM byte-wise.
-# <state-dir>/review-model records the model and which source won.
-# CODEX_DISPATCH_REASONING (default xhigh) overrides the effort. What is NOT
-# re-passed: service_tier and any custom model_provider / base_url.
+# <state-dir>/review-model records the model, the effort, and the source of
+# each; after the run it also holds the model and effort the codex header
+# reports (`agent_models.py actual`), and MODEL-MISMATCH reaches stderr when
+# they differ from the request. With isolation off nothing is passed, codex
+# reads its own config, and the record holds only the actual values, checked
+# against the registry when it answers.
+# What is NOT re-passed: service_tier and any custom model_provider / base_url.
 # service_tier is left to codex's default on purpose -- hardcoding the maintainer's "fast" tier would make every round
 # fail for a consumer whose account lacks it. A review that genuinely
 # needs a custom provider or a specific tier should set
@@ -456,23 +474,74 @@ CODEX_DISPATCH_SANDBOX="${CODEX_DISPATCH_SANDBOX:-danger-full-access}"
 # the .ps1 copy of this note is kept short on purpose -- a longer comment
 # beside its cmdBody construction trips a Windows-AV heuristic (Bitdefender
 # AMSI parse block), so the full rationale lives here, not there.
-CODEX_FALLBACK_MODEL="gpt-6.1-sol"
-CODEX_DISPATCH_REASONING="${CODEX_DISPATCH_REASONING:-xhigh}"
+# Walk up from this script to the resolver. A source repo and
+# .agent-config/repo hold it at <A>/scripts/; a consumer runs the copy that
+# bootstrap deploys under <project>/.claude/skills/, so there the resolver is
+# <project>/.agent-config/repo/scripts/. The registry must sit beside it.
+find_agent_models() {
+    _am_dir=$(cd -- "$1" 2>/dev/null && pwd -P) || return 1
+    while :; do
+        if [ -f "$_am_dir/scripts/agent_models.py" ] && [ -f "$_am_dir/user/agent-models.json" ]; then
+            printf '%s\n' "$_am_dir/scripts/agent_models.py"
+            return 0
+        fi
+        if [ -f "$_am_dir/.agent-config/repo/scripts/agent_models.py" ] \
+            && [ -f "$_am_dir/.agent-config/repo/user/agent-models.json" ]; then
+            printf '%s\n' "$_am_dir/.agent-config/repo/scripts/agent_models.py"
+            return 0
+        fi
+        _am_parent=$(dirname -- "$_am_dir")
+        [ "$_am_parent" = "$_am_dir" ] && return 1
+        _am_dir=$_am_parent
+    done
+}
+AGENT_MODELS_PY=$(find_agent_models "$SCRIPT_DIR" || true)
+REGISTRY_MODEL=""
+REGISTRY_EFFORT=""
+REGISTRY_WHY="scripts/agent_models.py or a working Python interpreter was not found"
+if [ -n "$PYTHON_BIN" ] && [ -n "$AGENT_MODELS_PY" ] && [ -f "$AGENT_MODELS_PY" ]; then
+    REGISTRY_WHY="the resolver did not answer"
+    if REGISTRY_ROW=$("$PYTHON_BIN" "$AGENT_MODELS_PY" resolve --family codex --role reviewer 2> "$STATE_DIR/registry-error"); then
+        read -r REGISTRY_MODEL REGISTRY_EFFORT <<< "$REGISTRY_ROW"
+    fi
+    if [ -s "$STATE_DIR/registry-error" ]; then
+        REGISTRY_WHY=$(tr '\n' ' ' < "$STATE_DIR/registry-error")
+    else
+        rm -f -- "$STATE_DIR/registry-error"
+    fi
+fi
+case "$REGISTRY_MODEL" in ''|*[!A-Za-z0-9._:/-]*) REGISTRY_MODEL="" ;; esac
+case "$REGISTRY_EFFORT" in ''|*[!A-Za-z0-9._:/-]*) REGISTRY_EFFORT="" ;; esac
 CODEX_ISOLATE_ARGS=()
+CODEX_EXPECT_ARGS=()
 if [ "$(printf '%s' "${CODEX_DISPATCH_ISOLATE_MCP:-}" | tr '[:upper:]' '[:lower:]')" != "off" ]; then
     CODEX_REVIEW_MODEL=""
     CODEX_REVIEW_SOURCE=""
+    CODEX_REVIEW_EFFORT=""
+    CODEX_EFFORT_SOURCE=""
     if [ -n "${CODEX_DISPATCH_MODEL:-}" ]; then
         CODEX_REVIEW_MODEL="$CODEX_DISPATCH_MODEL"
         CODEX_REVIEW_SOURCE="env"
-    else
+    elif [ -n "$REGISTRY_MODEL" ]; then
+        CODEX_REVIEW_MODEL="$REGISTRY_MODEL"
+        CODEX_REVIEW_SOURCE="registry"
+    fi
+    if [ -n "${CODEX_DISPATCH_REASONING:-}" ]; then
+        CODEX_REVIEW_EFFORT="$CODEX_DISPATCH_REASONING"
+        CODEX_EFFORT_SOURCE="env"
+    elif [ -n "$REGISTRY_EFFORT" ]; then
+        CODEX_REVIEW_EFFORT="$REGISTRY_EFFORT"
+        CODEX_EFFORT_SOURCE="registry"
+    fi
+    if [ -z "$CODEX_REVIEW_MODEL" ] || [ -z "$CODEX_REVIEW_EFFORT" ]; then
         CODEX_HOME_DIR="${CODEX_HOME:-${HOME:-}/.codex}"
         CODEX_CONFIG_FILE="$CODEX_HOME_DIR/config.toml"
+        CODEX_CONFIG_ROWS=""
         if [ -f "$CODEX_CONFIG_FILE" ] && [ -r "$CODEX_CONFIG_FILE" ]; then
-            CODEX_REVIEW_MODEL=$(LC_ALL=C awk '
+            CODEX_CONFIG_ROWS=$(LC_ALL=C awk '
 NR == 1 { sub(/^\357\273\277/, "") }
 /^[[:space:]]*\[/ { exit }
-/^[[:space:]]*(model|model_provider)[[:space:]]*=[[:space:]]*["\047]/ {
+/^[[:space:]]*(model|model_provider|model_reasoning_effort)[[:space:]]*=[[:space:]]*["\047]/ {
     key = $0
     sub(/^[[:space:]]*/, "", key)
     sub(/[[:space:]]*=.*/, "", key)
@@ -485,24 +554,48 @@ NR == 1 { sub(/^\357\273\277/, "") }
         val = substr(line, 1, idx - 1)
         if (key == "model_provider") {
             provider = val
+        } else if (key == "model_reasoning_effort") {
+            if (effort == "" && val ~ /^[A-Za-z0-9._:\/-]+$/) effort = val
         } else if (model == "" && val ~ /^[A-Za-z0-9._:\/-]+$/) {
             model = val
         }
     }
 }
-END { if (provider == "" || provider == "openai") print model }
+END {
+    if (provider != "" && provider != "openai") model = ""
+    print model
+    print effort
+}
 ' "$CODEX_CONFIG_FILE" 2>/dev/null || true)
-            if [ -n "$CODEX_REVIEW_MODEL" ]; then
-                CODEX_REVIEW_SOURCE="config"
-            fi
         fi
-        if [ -z "$CODEX_REVIEW_MODEL" ]; then
-            CODEX_REVIEW_MODEL="$CODEX_FALLBACK_MODEL"
-            CODEX_REVIEW_SOURCE="fallback"
+        CONFIG_MODEL=$(printf '%s\n' "$CODEX_CONFIG_ROWS" | sed -n 1p)
+        CONFIG_EFFORT=$(printf '%s\n' "$CODEX_CONFIG_ROWS" | sed -n 2p)
+        if [ -z "$CODEX_REVIEW_MODEL" ] && [ -n "$CONFIG_MODEL" ]; then
+            CODEX_REVIEW_MODEL="$CONFIG_MODEL"
+            CODEX_REVIEW_SOURCE="config"
+        fi
+        if [ -z "$CODEX_REVIEW_EFFORT" ] && [ -n "$CONFIG_EFFORT" ]; then
+            CODEX_REVIEW_EFFORT="$CONFIG_EFFORT"
+            CODEX_EFFORT_SOURCE="config"
         fi
     fi
-    printf 'model=%s source=%s\n' "$CODEX_REVIEW_MODEL" "$CODEX_REVIEW_SOURCE" > "$STATE_DIR/review-model"
-    CODEX_ISOLATE_ARGS=(--ignore-user-config -c "model=$CODEX_REVIEW_MODEL" -c "model_reasoning_effort=$CODEX_DISPATCH_REASONING")
+    if [ -z "$CODEX_REVIEW_MODEL" ] || [ -z "$CODEX_REVIEW_EFFORT" ]; then
+        printf '%s\n' \
+            "dispatch-codex: cannot determine the reviewer model and effort. The registry (user/agent-models.json, resolved by scripts/agent_models.py) did not answer (${REGISTRY_WHY}), and the top-level model and model_reasoning_effort of ${CODEX_CONFIG_FILE} do not supply the rest." \
+            "Fix the registry or the Python setup (see the agent-models skill), or set CODEX_DISPATCH_MODEL and CODEX_DISPATCH_REASONING for this run. Refusing to spend a review round." \
+            > "$STATE_DIR/tail"
+        cat "$STATE_DIR/tail" >&2
+        exit 70
+    fi
+    printf 'model=%s source=%s effort=%s effort_source=%s\n' \
+        "$CODEX_REVIEW_MODEL" "$CODEX_REVIEW_SOURCE" "$CODEX_REVIEW_EFFORT" "$CODEX_EFFORT_SOURCE" > "$STATE_DIR/review-model"
+    CODEX_ISOLATE_ARGS=(--ignore-user-config -c "model=$CODEX_REVIEW_MODEL" -c "model_reasoning_effort=$CODEX_REVIEW_EFFORT")
+    CODEX_EXPECT_ARGS=(--expect-model "$CODEX_REVIEW_MODEL" --expect-effort "$CODEX_REVIEW_EFFORT")
+else
+    printf 'model=- source=user-config effort=- effort_source=user-config\n' > "$STATE_DIR/review-model"
+    if [ -n "$REGISTRY_MODEL" ] && [ -n "$REGISTRY_EFFORT" ]; then
+        CODEX_EXPECT_ARGS=(--expect-model "$REGISTRY_MODEL" --expect-effort "$REGISTRY_EFFORT")
+    fi
 fi
 # The parent session already refreshed the consumer repo at startup. Repeating
 # that setup inside every review child adds latency and can mutate the deployed
@@ -590,6 +683,21 @@ done
 
 # Pipe last 80 lines of tail to stderr for caller visibility
 tail -n 80 "$STATE_DIR/tail" >&2 2>/dev/null || true
+
+# Effective, not configured: the header codex prints (`model:` and `reasoning
+# effort:`) is in the combined tail. Append what it says to the record; a
+# mismatch also prints MODEL-MISMATCH on stderr (from the resolver), and a
+# header that cannot be read prints MODEL-UNVERIFIED.
+ACTUAL_LINE=""
+if [ -n "$PYTHON_BIN" ] && [ -n "$AGENT_MODELS_PY" ] && [ -f "$AGENT_MODELS_PY" ]; then
+    ACTUAL_LINE=$("$PYTHON_BIN" "$AGENT_MODELS_PY" actual --family codex --stderr-file "$STATE_DIR/tail" \
+        ${CODEX_EXPECT_ARGS[@]+"${CODEX_EXPECT_ARGS[@]}"}) || ACTUAL_LINE=""
+fi
+if [ -z "$ACTUAL_LINE" ]; then
+    ACTUAL_LINE="actual=unknown status=unknown"
+    echo "dispatch-codex: MODEL-UNVERIFIED the run could not be read back (no Python interpreter or resolver)" >&2
+fi
+printf '%s\n' "$ACTUAL_LINE" >> "$STATE_DIR/review-model"
 
 # Do NOT force-kill stall-watch. It checks our PID and captured process-start
 # identity, then exits silently on its next interval after we die. Stopping it

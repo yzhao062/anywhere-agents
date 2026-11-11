@@ -1,6 +1,6 @@
 # Skills
 
-`anywhere-agents` ships six skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically for routing-table matches; `prun` is invoked by explicit parallel fan-out intent.
+`anywhere-agents` ships seven skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically for routing-table matches; `prun` is invoked by explicit parallel fan-out intent.
 
 <div class="grid cards" markdown>
 
@@ -40,7 +40,7 @@
 
     ---
 
-    Parallel delegation fan-out where a Claude session coordinates Agy workers. No Claude subagents run units, and Codex is reserved for `/vet`; fan-out width follows the task instead of a fixed small cap.
+    Parallel delegation fan-out where a Claude session coordinates Agy workers. No Claude subagents run units, and a unit runs on Codex only when you name Codex for it; fan-out width follows the task instead of a fixed small cap.
 
     [:octicons-arrow-right-24: Deep docs](prun.md)
 
@@ -51,6 +51,14 @@
     Paper, proposal, and README figures delivered as native editable PowerPoint objects with publication exports. Completing a build needs desktop PowerPoint on Windows or macOS.
 
     [:octicons-arrow-right-24: Deep docs](editable-figure.md)
+
+-   :material-tune-vertical:{ .lg .middle } &nbsp; __`agent-models`__
+
+    ---
+
+    Show, check, and change the model and effort every agent role runs on, through one registry that dispatchers and bootstrap read. It reads back what each CLI actually ran on.
+
+    [:octicons-arrow-right-24: Deep docs](agent-models.md)
 
 </div>
 
@@ -74,4 +82,4 @@ In a fork of `anywhere-agents`:
 3. Register the skill in `skills/my-router/references/routing-table.md` with triggering keywords, file types, and directory hints.
 4. Add regression tests where appropriate under `tests/`.
 
-See the six shipped skills for reference structure.
+See the seven shipped skills for reference structure.

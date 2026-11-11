@@ -31,19 +31,27 @@
 #                                    no-model auth check for the official Claude
 #                                    CLI and skips opaque wrappers.
 #   CLAUDE_PREFLIGHT_TIMEOUT_SECONDS  Preflight timeout (default: 60).
+#   ANYWHERE_AGENTS_PYTHON           Python interpreter for the registry lookup.
+#   AGENT_MODELS_FILE                Alternate registry file (tests, one-off runs).
 #   TMPDIR / TEMP / TMP              Temp dir for state-dir (Windows uses TEMP by default).
+#
+# Model and effort: the registry (user/agent-models.json, read through
+# scripts/agent_models.py) names both. <state-dir>/review-model records what
+# was requested and, after the run, what the Claude transcript says it used.
 #
 # Stdout:
 #   First (and only) machine-readable line: STATE-DIR <abs-path>
 #
 # Stderr:
-#   Dispatch diagnostics + last 80 lines of claude combined stdout+stderr
+#   Dispatch diagnostics + last 80 lines of claude combined stdout+stderr.
+#   MODEL-MISMATCH when the run did not use the registry's model or effort.
 #
 # Exit code:
 #   Propagates claude's exit code unchanged.
 #   Returns 2 on usage errors (missing/invalid args) or self-review refusal.
-#   Returns 70 when preflight/postflight rejects an unusable review, 124 when
-#   preflight times out, and 127 when Claude is unavailable.
+#   Returns 70 when preflight/postflight rejects an unusable review or the
+#   registry cannot name the reviewer model, 124 when preflight times out,
+#   and 127 when Claude is unavailable.
 
 $ErrorActionPreference = 'Stop'
 
@@ -247,6 +255,160 @@ $validationDir = $repo
 $stagedSnapshotDir = Join-Path $stateDir 'staged-snapshot'
 $useBare = ($env:CLAUDE_DISPATCH_BARE -eq '1')
 
+# Reviewer model and effort. The registry names both through
+# scripts/agent_models.py, found by walking up from this script; see
+# dispatch-claude.sh. No literal here, and no answer stops the dispatch.
+function Find-AgentModels {
+    param([string]$Start)
+    try { $dir = (Resolve-Path -LiteralPath $Start -ErrorAction Stop).Path } catch { return $null }
+    while ($dir) {
+        foreach ($root in @($dir, (Join-Path $dir '.agent-config/repo'))) {
+            $candidate = Join-Path $root 'scripts/agent_models.py'
+            $registry = Join-Path $root 'user/agent-models.json'
+            if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and (Test-Path -LiteralPath $registry -PathType Leaf)) {
+                return $candidate
+            }
+        }
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    return $null
+}
+$agentModelsPy = Find-AgentModels -Start $sourceScriptDir
+if (-not $agentModelsPy) { $agentModelsPy = Join-Path $sourceScriptDir 'agent_models.py.not-found' }
+
+# Python for the lookup: the override, a conda or Miniforge interpreter found
+# from the environment, then py -3, python3, and python. A Microsoft Store
+# alias is skipped, and every survivor must run code.
+function Find-RegistryPython {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $found = @()
+        $roots = @()
+        if ($env:ANYWHERE_AGENTS_PYTHON) {
+            # Authoritative, as in dispatch-codex: a broken value stops the dispatch.
+            if (Test-Path -LiteralPath $env:ANYWHERE_AGENTS_PYTHON -PathType Leaf) {
+                & $env:ANYWHERE_AGENTS_PYTHON -c 'import sys; sys.exit(0)' > $null 2>&1
+                if ($LASTEXITCODE -eq 0) { return @{ Exe = $env:ANYWHERE_AGENTS_PYTHON; Args = @() } }
+            }
+            return $null
+        }
+        if ($env:CONDA_PREFIX) {
+            $found += @{ Exe = (Join-Path $env:CONDA_PREFIX 'python.exe'); Args = @() }
+            $found += @{ Exe = (Join-Path $env:CONDA_PREFIX 'bin/python'); Args = @() }
+            $prefixParent = Split-Path $env:CONDA_PREFIX -Parent
+            if ($prefixParent -and (Split-Path $prefixParent -Leaf) -eq 'envs') {
+                $roots += (Split-Path $prefixParent -Parent)
+            } else {
+                $roots += $env:CONDA_PREFIX
+            }
+        }
+        if ($env:CONDA_ROOT) { $roots += $env:CONDA_ROOT }
+        foreach ($managerName in @('conda', 'mamba')) {
+            $manager = Get-Command $managerName -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($manager -and $manager.Source) {
+                $roots += (Split-Path (Split-Path ([string]$manager.Source) -Parent) -Parent)
+            }
+        }
+        foreach ($homeDir in @($HOME, $env:USERPROFILE)) {
+            if (-not $homeDir -or -not (Test-Path -LiteralPath $homeDir -PathType Container)) { continue }
+            foreach ($child in @(Get-ChildItem -LiteralPath $homeDir -Directory -Force -ErrorAction SilentlyContinue)) {
+                if (Test-Path -LiteralPath (Join-Path $child.FullName 'conda-meta') -PathType Container) {
+                    $roots += $child.FullName
+                }
+            }
+        }
+        foreach ($root in @($roots | Where-Object { $_ } | Select-Object -Unique)) {
+            $found += @{ Exe = (Join-Path $root 'python.exe'); Args = @() }
+            $found += @{ Exe = (Join-Path $root 'bin/python'); Args = @() }
+            $envsDir = Join-Path $root 'envs'
+            if (Test-Path -LiteralPath $envsDir -PathType Container) {
+                foreach ($environment in @(Get-ChildItem -LiteralPath $envsDir -Directory -ErrorAction SilentlyContinue)) {
+                    $found += @{ Exe = (Join-Path $environment.FullName 'python.exe'); Args = @() }
+                    $found += @{ Exe = (Join-Path $environment.FullName 'bin/python'); Args = @() }
+                }
+            }
+        }
+        $found += @{ Exe = 'py'; Args = @('-3') }
+        $found += @{ Exe = 'python3'; Args = @() }
+        $found += @{ Exe = 'python'; Args = @() }
+        foreach ($candidate in $found) {
+            $exe = [string]$candidate.Exe
+            if (-not $exe) { continue }
+            # Every PATH entry, not the first: a Microsoft Store alias often sits
+            # ahead of the real interpreter, and it is skipped, not run.
+            foreach ($info in @(Get-Command $exe -CommandType Application -All -ErrorAction SilentlyContinue)) {
+                $resolved = [string]$info.Source
+                if (-not $resolved -or $resolved -like '*\WindowsApps\*') { continue }
+                $probeArgs = @($candidate.Args) + @('-c', 'import sys; sys.exit(0)')
+                & $resolved @probeArgs > $null 2>&1
+                if ($LASTEXITCODE -eq 0) { return @{ Exe = $resolved; Args = @($candidate.Args) } }
+            }
+        }
+        return $null
+    } catch {
+        return $null
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+}
+
+# Run agent_models.py and return its exit code, stdout, and stderr as text.
+function Invoke-AgentModels {
+    param([string[]]$AgentArgs)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $result = @{ Exit = 1; Out = ''; Err = '' }
+    try {
+        $invokeArgs = @($script:registryPython.Args) + @($agentModelsPy) + @($AgentArgs)
+        $lines = @(& ([string]$script:registryPython.Exe) @invokeArgs 2>&1)
+        $result.Exit = $LASTEXITCODE
+        $outLines = @($lines | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+        $errLines = @($lines | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
+        $result.Out = ($outLines -join "`n").Trim()
+        $result.Err = ($errLines -join "`n").Trim()
+    } catch {
+        $result.Err = $_.Exception.Message
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    return $result
+}
+
+$registryPython = $null
+if (Test-Path -LiteralPath $agentModelsPy -PathType Leaf) {
+    $registryPython = Find-RegistryPython
+}
+$registryWhy = 'scripts/agent_models.py or a Python interpreter was not found'
+$reviewModel = ''
+$reviewEffort = ''
+if ($registryPython) {
+    $registryWhy = 'the resolver did not answer'
+    $answer = Invoke-AgentModels -AgentArgs @('resolve', '--family', 'claude', '--role', 'reviewer')
+    if ($answer.Exit -eq 0 -and $answer.Out -match '^([A-Za-z0-9._:/-]+) ([A-Za-z0-9._:/-]+)$') {
+        $reviewModel = $Matches[1]
+        $reviewEffort = $Matches[2]
+    } elseif ($answer.Err) {
+        $registryWhy = $answer.Err -replace '\s+', ' '
+    }
+}
+if (-not $reviewModel -or -not $reviewEffort) {
+    $registryMessage = @(
+        "dispatch-claude: cannot read the reviewer model and effort from the registry (user/agent-models.json, resolved by scripts/agent_models.py): $registryWhy",
+        'Fix the registry or the Python setup (see the agent-models skill). Refusing to spend a review round.'
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($tailPath, "$registryMessage`r`n")
+    [Console]::Error.WriteLine($registryMessage)
+    exit 70
+}
+$reviewModelPath = Join-Path $stateDir 'review-model'
+[System.IO.File]::WriteAllText($reviewModelPath, "model=$reviewModel source=registry effort=$reviewEffort`n", $utf8NoBom)
+# A fresh session id lets the run be read back afterwards: the Claude
+# transcript for that id records the model and effort the run really used.
+$sessionId = [Guid]::NewGuid().ToString()
+
 # Refuse to spend a review round when the official CLI cannot authenticate.
 # `claude auth status` does not invoke a model. API-key, gateway, and hosted-
 # provider modes use an availability check because their credentials are not
@@ -408,7 +570,8 @@ $ErrorActionPreference = 'Continue'
 # bare mode as API-key/apiKeyHelper auth only: OAuth and keychain auth are
 # disabled when --bare is set. Defaulting to --bare would break the typical
 # subscription user.
-# --effort max requests max review effort; see dispatch-claude.sh for why.
+# --model, --effort, and --session-id carry the registry choice and the id the
+# actual-model check reads; see dispatch-claude.sh.
 $permissionFlag = '--per' + 'mission-' + 'mode'
 $toolFlag = '--too' + 'ls'
 $permMode = 'by' + 'pass' + 'Per' + 'missions'
@@ -419,7 +582,9 @@ $claudeArgs = @(
     $toolFlag, $toolList,
     '--add-dir', $validationDir,
     '--setting-sources', 'project,local',
-    '--effort', 'max',
+    '--model', $reviewModel,
+    '--effort', $reviewEffort,
+    '--session-id', $sessionId,
     '--strict-mcp-config', '--mcp-config', $emptyMcpConfigPath,
     '--output-format', 'text'
 )
@@ -457,6 +622,7 @@ try {
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardInputEncoding = $utf8NoBom
     $psi.EnvironmentVariables['GIT_PAGER'] = 'cat'
+    $psi.EnvironmentVariables['CLAUDE_CODE_EFFORT_LEVEL'] = $reviewEffort
     foreach ($arg in $claudeArgs) {
         [void]$psi.ArgumentList.Add($arg)
     }
@@ -510,6 +676,18 @@ if (-not (Test-Path -LiteralPath $tailPath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $tailStderrPath -PathType Leaf)) {
     Set-Content -LiteralPath $tailStderrPath -Value '' -NoNewline -ErrorAction SilentlyContinue
 }
+
+# Effective, not configured: read what the run itself reports and append it to
+# the record. A mismatch prints MODEL-MISMATCH on stderr (from the resolver).
+$actualLine = ''
+$actual = Invoke-AgentModels -AgentArgs @('actual', '--family', 'claude', '--session-id', $sessionId, '--expect-model', $reviewModel, '--expect-effort', $reviewEffort)
+if ($actual.Out -match '^actual=') { $actualLine = $actual.Out }
+if ($actual.Err) { [Console]::Error.WriteLine($actual.Err) }
+if (-not $actualLine) {
+    $actualLine = 'actual=unknown status=unknown'
+    [Console]::Error.WriteLine("dispatch-claude: MODEL-UNVERIFIED the run could not be read back; requested $reviewModel $reviewEffort")
+}
+[System.IO.File]::AppendAllText($reviewModelPath, "$actualLine`n", $utf8NoBom)
 
 # Claude text mode has no structured terminal-result frame. Keep publication
 # behind process success, then validate a same-directory candidate and replace

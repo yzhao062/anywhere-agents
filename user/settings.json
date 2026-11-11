@@ -82,5 +82,7 @@
   "statusLine": {
     "type": "command",
     "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/statusline.py\""
-  }
+  },
+  "model": "opus",
+  "effortLevel": "xhigh"
 }

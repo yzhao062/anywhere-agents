@@ -16,17 +16,56 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import agent_models  # noqa: E402  the resolver the dispatcher reads the registry through
+
 DISPATCH = ROOT / "skills" / "implement-review" / "scripts" / "dispatch-gemini.py"
 HEALTH = ROOT / "skills" / "implement-review" / "scripts" / "health-check.py"
 PYTHON = Path(sys.executable).resolve()
 GIT = shutil.which("git")
 
+# A tmp registry keeps these tests independent of the live values: they check
+# that the dispatcher follows whatever the registry says, not what it says today.
+# The stems below are fixtures shaped like an Agy listing, not the live choice.
+FIXTURE_STEM = "gemini-4-argon"
+FIXTURE_FALLBACK_STEM = "gemini-3.8-flash"
+FIXTURE_EFFORT = "high"
+FIXTURE_SLUG = f"{FIXTURE_STEM}-{FIXTURE_EFFORT}"
+FIXTURE_FALLBACK_SLUG = f"{FIXTURE_FALLBACK_STEM}-{FIXTURE_EFFORT}"
 
-def load_dispatch_module():
+
+def write_registry(
+    directory: Path,
+    stem: str = FIXTURE_STEM,
+    effort: str = FIXTURE_EFFORT,
+    fallback: str | None = FIXTURE_FALLBACK_STEM,
+    name: str = "agent-models.json",
+) -> Path:
+    agy = {"model": stem, "effort": effort}
+    if fallback:
+        agy["fallback_model"] = fallback
+    payload = {
+        "schema": 1,
+        "families": {
+            "claude": {"model": "fixture-claude", "effort": "medium"},
+            "codex": {"model": "fixture-codex", "effort": "low"},
+            "agy": agy,
+        },
+        "roles": {},
+    }
+    path = directory / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def load_dispatch_module(registry: Path | None = None):
+    """Load the dispatcher; its registry constants read AGENT_MODELS_FILE at import."""
     spec = importlib.util.spec_from_file_location("dispatch_gemini", DISPATCH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    patch = {"AGENT_MODELS_FILE": str(registry)} if registry else {}
+    with mock.patch.dict(os.environ, patch):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -61,6 +100,23 @@ if sys.argv[1:] == ["models"]:
 event = json.loads(sys.stdin.readline())
 prompt = event["message"]["content"]
 (log / "prompt.txt").write_text(prompt, encoding="utf-8")
+# Agy writes the label of the model it propagates to its backend into the file
+# --log-file names, after an earlier line that is pre-auth noise and not the
+# effective model. MOCK_AGY_ACTUAL_LABEL names another model to simulate a run
+# that did not use the request; MOCK_AGY_NO_LOG leaves the file unwritten.
+if "--log-file" in argv and not os.environ.get("MOCK_AGY_NO_LOG"):
+    label = os.environ.get("MOCK_AGY_ACTUAL_LABEL")
+    if label is None:
+        parts = argv[argv.index("--model") + 1].split("-")
+        tier = parts.pop() if parts[-1] in ("low", "medium", "high") else None
+        label = " ".join(part.capitalize() for part in parts)
+        if tier:
+            label += f" ({tier.capitalize()})"
+    Path(argv[argv.index("--log-file") + 1]).write_text(
+        "W Model ID unlisted-noise not in local config, defaulting to CCPA\n"
+        f'I Propagating selected model override to backend: label="{label}"\n',
+        encoding="utf-8",
+    )
 round_match = re.search(r"<!-- Round (\d+) -->", prompt)
 round_num = round_match.group(1) if round_match else "1"
 padding = "Independent review evidence. " * 24
@@ -147,10 +203,60 @@ class DispatchGeminiUnitTests(unittest.TestCase):
     def test_script_exists(self) -> None:
         self.assertTrue(DISPATCH.is_file())
 
-    def test_defaults_pin_independent_gemini_model(self) -> None:
-        self.assertEqual(self.module.DEFAULT_MODEL, "gemini-4-argon-high")
-        self.assertEqual(self.module.FALLBACK_MODEL, "gemini-3.8-flash-high")
-        self.assertEqual(self.module.DEFAULT_EFFORT, "high")
+    def test_defaults_come_from_the_registry(self) -> None:
+        """The slug, the fallback slug, and the effort are the registry's Agy
+        reviewer row, so a registry change reaches the dispatcher with no edit
+        to it. Nothing in the dispatcher names a value."""
+        with tempfile.TemporaryDirectory() as temp:
+            registry = write_registry(Path(temp))
+            module = load_dispatch_module(registry)
+            self.assertEqual(module.DEFAULT_MODEL, FIXTURE_SLUG)
+            self.assertEqual(module.FALLBACK_MODEL, FIXTURE_FALLBACK_SLUG)
+            self.assertEqual(module.DEFAULT_EFFORT, FIXTURE_EFFORT)
+            changed = write_registry(
+                Path(temp), stem="fixture-9-alpha", effort="medium",
+                fallback="fixture-8-beta", name="changed.json",
+            )
+            module = load_dispatch_module(changed)
+            self.assertEqual(module.DEFAULT_MODEL, "fixture-9-alpha-medium")
+            self.assertEqual(module.FALLBACK_MODEL, "fixture-8-beta-medium")
+            self.assertEqual(module.DEFAULT_EFFORT, "medium")
+            without_fallback = write_registry(Path(temp), fallback=None, name="bare.json")
+            self.assertIsNone(load_dispatch_module(without_fallback).FALLBACK_MODEL)
+
+    def test_defaults_match_the_live_registry_without_an_override(self) -> None:
+        # No AGENT_MODELS_FILE: the dispatcher reads the registry in this repo.
+        module = load_dispatch_module()
+        row = agent_models.resolve("agy", "reviewer")
+        self.assertEqual(module.DEFAULT_MODEL, row["slug"])
+        self.assertEqual(module.DEFAULT_EFFORT, row["effort"])
+
+    def test_no_registry_means_no_default_and_a_message_that_names_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            module = load_dispatch_module(Path(temp) / "no-such-registry.json")
+        self.assertIsNone(module.DEFAULT_MODEL)
+        self.assertIsNone(module.DEFAULT_EFFORT)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ANTIGRAVITY_DISPATCH_MODEL", None)
+            os.environ.pop("ANTIGRAVITY_DISPATCH_EFFORT", None)
+            with self.assertRaises(module.RegistryUnavailable) as caught:
+                module.requested_model()
+        self.assertIn("registry", str(caught.exception))
+        self.assertIn("agent-models", str(caught.exception))
+        # Both overrides together need no registry; one alone still does.
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_DISPATCH_MODEL": "named-model-high",
+                                          "ANTIGRAVITY_DISPATCH_EFFORT": "high"}):
+            self.assertEqual(module.requested_model(), ("named-model-high", "high", False))
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_DISPATCH_MODEL": "named-model-high"}):
+            os.environ.pop("ANTIGRAVITY_DISPATCH_EFFORT", None)
+            with self.assertRaises(module.RegistryUnavailable):
+                module.requested_model()
+
+    def test_no_model_or_effort_literal_in_the_dispatcher(self) -> None:
+        """The drift scan finds none: every default comes from the registry."""
+        text = DISPATCH.read_text(encoding="utf-8")
+        hits = [line for _, _, line in agent_models.scan_text(text)]
+        self.assertEqual(hits, [], "dispatch-gemini.py names a model or effort literal")
 
     def test_normalize_trims_preface_before_round_marker(self) -> None:
         value = self.module.normalize_review(
@@ -758,6 +864,7 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         )
         self.log = self.root / "log"
         self.mock = self._write_mock()
+        self.registry = write_registry(self.root)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -784,6 +891,9 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         env["ANTIGRAVITY_BIN"] = str(self.mock)
         env["MOCK_AGY_LOG"] = str(self.log)
         env["ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS"] = "10"
+        env["AGENT_MODELS_FILE"] = str(self.registry)
+        env.pop("MOCK_AGY_ACTUAL_LABEL", None)
+        env.pop("MOCK_AGY_NO_LOG", None)
         env.pop("IMPLEMENT_REVIEW_ORCHESTRATOR", None)
         # An inherited status would silently rewrite what the status-free
         # cases below are covering, so only a test that asks for one gets it.
@@ -1187,12 +1297,154 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         self.assertNotIn("gemini-4.1-argon-high", args)
         self.assertNotIn("MODEL-RESOLVE", result.stderr)
 
+    def _state_dir(self, result) -> Path:
+        return Path(result.stdout.strip().split(" ", 1)[1])
+
+    def _record(self, result) -> list[str]:
+        return (self._state_dir(result) / "review-model").read_text(encoding="utf-8").splitlines()
+
+    def test_the_registry_row_reaches_the_command_line(self) -> None:
+        """A different registry gives a different command: the stem floats to
+        the newest listed version, and the registry's effort is passed."""
+        changed = write_registry(
+            self.root, stem="fixture-9-alpha", effort="medium",
+            fallback="fixture-8-beta", name="changed.json",
+        )
+        result = self._run({
+            "AGENT_MODELS_FILE": str(changed),
+            "MOCK_AGY_MODELS": "fixture-9-alpha-medium\nfixture-9.1-alpha-medium\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(args[args.index("--model") + 1], "fixture-9.1-alpha-medium")
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
+        self.assertEqual(
+            self._record(result)[0],
+            "model=fixture-9.1-alpha-medium source=registry effort=medium effort_source=registry",
+        )
+
+    def test_the_registry_fallback_stem_covers_an_unlisted_family(self) -> None:
+        changed = write_registry(
+            self.root, stem="fixture-9-alpha", fallback="fixture-8-beta", name="changed.json",
+        )
+        result = self._run({
+            "AGENT_MODELS_FILE": str(changed),
+            "MOCK_AGY_MODELS": "fixture-8-beta-high\nfixture-8.1-beta-high\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(args[args.index("--model") + 1], "fixture-8.1-beta-high")
+        self.assertIn("MODEL-FALLBACK from=fixture-9-alpha-high", result.stderr)
+
+    def test_a_registry_without_a_fallback_fails_when_the_family_is_unlisted(self) -> None:
+        bare = write_registry(self.root, stem="fixture-9-alpha", fallback=None, name="bare.json")
+        result = self._run({
+            "AGENT_MODELS_FILE": str(bare),
+            "MOCK_AGY_MODELS": "fixture-8-beta-high\n",
+        })
+        self.assertEqual(result.returncode, 70)
+        self.assertIn("is not available", result.stderr)
+        self.assertNotIn("MODEL-FALLBACK", result.stderr)
+        self.assertFalse((self.log / "prompt.txt").exists())
+
+    def test_the_run_is_logged_and_read_back_into_the_record(self) -> None:
+        """`--log-file` names a file in the state directory, and the model
+        label Agy writes there lands in the record next to the request. The
+        earlier pre-auth line in the log is not the effective model."""
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        state_dir = self._state_dir(result)
+        self.assertEqual(Path(args[args.index("--log-file") + 1]), state_dir / "agy.log")
+        self.assertEqual(
+            self._record(result),
+            [f"model={FIXTURE_SLUG} source=registry effort={FIXTURE_EFFORT} effort_source=registry",
+             f"actual={FIXTURE_SLUG} {FIXTURE_EFFORT} status=ok"],
+        )
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertNotIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_a_floated_version_still_reads_back_as_the_same_family(self) -> None:
+        listing = f"{FIXTURE_SLUG}\ngemini-4.1-argon-high\n{FIXTURE_FALLBACK_SLUG}\n"
+        result = self._run({"MOCK_AGY_MODELS": listing})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._record(result)[1], "actual=gemini-4.1-argon-high high status=ok"
+        )
+
+    def test_a_run_on_another_model_or_tier_is_flagged(self) -> None:
+        """Configured is not effective: when Agy's log names another model or
+        tier, the record and stderr say so and the review still publishes."""
+        for label in ("Gemini 3.8 Flash (High)", "Gemini 4 Argon (Low)"):
+            with self.subTest(label=label):
+                result = self._run({"MOCK_AGY_ACTUAL_LABEL": label})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("MODEL-MISMATCH", result.stderr)
+                self.assertIn("status=mismatch", self._record(result)[1])
+
+    def test_a_run_that_cannot_be_read_back_is_unverified(self) -> None:
+        result = self._run({"MOCK_AGY_NO_LOG": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._record(result)[1], "actual=unknown status=unknown")
+        self.assertIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_a_named_model_is_recorded_with_its_source(self) -> None:
+        result = self._run({
+            "ANTIGRAVITY_DISPATCH_MODEL": "gemini-3.1-pro-high",
+            "ANTIGRAVITY_DISPATCH_EFFORT": "high",
+            "MOCK_AGY_MODELS": "gemini-3.1-pro-high",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._record(result),
+            ["model=gemini-3.1-pro-high source=env effort=high effort_source=env",
+             "actual=gemini-3.1-pro-high high status=ok"],
+        )
+
+    def test_a_registry_that_does_not_answer_stops_the_dispatch(self) -> None:
+        """No literal to fall back on: the dispatcher names the registry and
+        refuses before it creates any state or calls the CLI."""
+        result = self._run({"AGENT_MODELS_FILE": str(self.root / "no-such-registry.json")})
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn("registry", result.stderr)
+        self.assertIn("agent-models", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse((self.log / "args.json").exists())
+        self.assertFalse((self.repo / "Review-Antigravity.md").exists())
+
+    def test_two_overrides_need_no_registry(self) -> None:
+        result = self._run({
+            "AGENT_MODELS_FILE": str(self.root / "no-such-registry.json"),
+            "ANTIGRAVITY_DISPATCH_MODEL": "gemini-3.1-pro-high",
+            "ANTIGRAVITY_DISPATCH_EFFORT": "high",
+            "MOCK_AGY_MODELS": "gemini-3.1-pro-high",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_print_model_stops_without_a_registry_answer(self) -> None:
+        result = self._print_model({"AGENT_MODELS_FILE": str(self.root / "no-such-registry.json")})
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("registry", result.stderr)
+
+    def test_print_model_follows_the_registry(self) -> None:
+        changed = write_registry(
+            self.root, stem="fixture-9-alpha", effort="medium", name="changed.json",
+        )
+        result = self._print_model({
+            "AGENT_MODELS_FILE": str(changed),
+            "MOCK_AGY_MODELS": "fixture-9-alpha-medium\nfixture-9.1-alpha-medium\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "fixture-9.1-alpha-medium medium\n")
+
     def _print_model(self, extra_env: dict[str, str] | None = None):
         # Run outside the repository: printing the model needs no staged diff.
         env = os.environ.copy()
         env["ANTIGRAVITY_BIN"] = str(self.mock)
         env["MOCK_AGY_LOG"] = str(self.log)
         env["ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS"] = "10"
+        env["AGENT_MODELS_FILE"] = str(self.registry)
         for name in ("ANTIGRAVITY_DISPATCH_MODEL", "ANTIGRAVITY_DISPATCH_EFFORT", "ANTIGRAVITY_PREFLIGHT"):
             env.pop(name, None)
         if extra_env:

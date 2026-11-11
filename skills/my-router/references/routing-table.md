@@ -8,12 +8,13 @@
 | `my-router` | any task (this skill) | Detects context and dispatches to the right skill |
 | `ci-mockup-figure` | "mockup", "HTML figure", "dashboard mockup", "timeline figure", "Gantt", "TikZ figure", "arrow routing" | Build HTML mockups of systems, dashboards, and timelines, then capture as space-efficient PNG/PDF figures; use TikZ or skia-canvas for abstract diagrams needing arrow routing |
 | `readme-polish` | "polish README", "modernize README", "README audit", "README rewrite", "README badges", "README hero image" | Audit a GitHub README and rewrite using modern 2025-2026 patterns (centered header, badges, hero image, GitHub alert callouts, emoji feature bullets, collapsibles, Mermaid diagrams) |
-| `prun` | explicit parallel delegation / fan-out intent; not auto-routed by file type | Fan out independent task units to Agy workers while the session coordinates; no Claude subagents, and Codex is reserved for `/vet`; workers spend the Google AI pool and never commit or push |
+| `prun` | explicit parallel delegation / fan-out intent; not auto-routed by file type | Fan out independent task units to Agy workers by default, or to a Codex worker when the user names Codex for a unit, while the session coordinates; no Claude subagents; Agy workers spend the Google AI pool, and no worker commits or pushes |
+| `agent-models` | "which model does", "switch the model", "change the effort", "model registry", "is the setting taking effect"; a script that launches a model | Show, check, and change the model and effort of every agent role through the one registry, `user/agent-models.json`; dispatchers resolve values at run time, and the skill reads back what each CLI actually ran on |
 | `editable-figure` | "editable figure", "PowerPoint figure", "PPTX figure", "editable diagram". Completing a build needs desktop PowerPoint validation; without it, explain the limitation and offer `ci-mockup-figure` rather than substituting it | Analyze the source, study references for the document type, and design a paper, proposal, or README figure delivered as native editable PowerPoint objects with publication or web exports |
 
 Paper and proposal explanatory figure requests, especially overviews such as "overview figure", "Figure 1", "总览图", and "图 1", also load the `editable-figure` gallery for design preferences while retaining the requested output format. A data-analysis plot keeps its plotting workflow.
 
-The shipped routing table covers the six skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
+The shipped routing table covers the seven skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
 
 ## Extension Template
 
@@ -27,6 +28,7 @@ Copy this section and extend it with your own skills. In a fork, edit the tables
 | "editable figure", "editable diagram", "PowerPoint figure", "PPTX figure" | `editable-figure` | shipped |
 | "mockup", "HTML figure", "HTML mockup", "interactive figure", "dashboard mockup", "Gantt", "screenshotable figure", "capture mode", "skia-canvas", "TikZ figure", "arrow routing" | `ci-mockup-figure` | shipped |
 | "polish README", "modernize README", "README audit", "README rewrite", "README badges", "README hero image", "GitHub README patterns" | `readme-polish` | shipped |
+| "which model does", "what model runs", "switch the model", "change the model", "change the effort", "effort level", "model registry", "is the setting taking effect", "MODEL-MISMATCH" | `agent-models` | shipped |
 | `<your-keywords>` | `<your-skill-name>` | `skills/` (local) or shared |
 
 ### File-type routing

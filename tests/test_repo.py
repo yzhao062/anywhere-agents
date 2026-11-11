@@ -42,6 +42,7 @@ SHIPPED_SKILLS = {
     "prun",
     "readme-polish",
     "editable-figure",
+    "agent-models",
 }
 
 
@@ -508,19 +509,27 @@ class RepoValidationTests(unittest.TestCase):
             read_text(ROOT / "user" / "settings.json")
         )
         self.assertEqual(
-            user_settings.get("env", {}).get("CLAUDE_CODE_EFFORT_LEVEL"),
-            "xhigh",
-        )
-        self.assertEqual(
             user_settings.get("env", {}).get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
             "65",
         )
-        self.assertEqual(
-            user_settings.get("env", {}).get("CLAUDE_CODE_SUBAGENT_MODEL"),
-            "sonnet",
-        )
         claude_settings = json.loads(read_text(CLAUDE_SETTINGS))
         self.assertNotIn("effortLevel", claude_settings)
+
+    def test_user_settings_model_and_effort_match_the_registry(self) -> None:
+        """The model, effortLevel, and the effort and subagent-model env
+        entries of user/settings.json are rendered from user/agent-models.json.
+        A hand edit of either file that skips `agent_models.py render` fails
+        here instead of reaching every consumer's ~/.claude/settings.json."""
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_MODELS_FILE"}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "agent_models.py"), "render", "--check"],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            "user/settings.json is stale; run scripts/agent_models.py render: "
+            + result.stderr,
+        )
 
     def test_skill_core_files_are_tracked(self) -> None:
         tracked = self.tracked_files()

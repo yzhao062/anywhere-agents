@@ -233,6 +233,26 @@ class AaInternalStrictBlockTests(unittest.TestCase):
                 finally:
                     mirrored.write_bytes(original)
 
+    def test_aa_internal_strict_covers_the_agent_models_skill(self) -> None:
+        """agent-models ships through the pack like the other shared skills, so
+        its tree and its pointer in the wheel mirror are release-gated too."""
+        composer = self.MIRROR_FILE.parent.parent
+        for rel in (
+            "skills/agent-models/SKILL.md",
+            ".claude/commands/agent-models.md",
+        ):
+            with self.subTest(file=rel):
+                mirrored = composer / rel
+                self.assertTrue(mirrored.is_file(), f"{rel} missing from the wheel mirror")
+                original = mirrored.read_bytes()
+                try:
+                    mirrored.write_bytes(original + b"\n<!-- drift -->\n")
+                    result = self._run_script()
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("agent-models", result.stdout + result.stderr)
+                finally:
+                    mirrored.write_bytes(original)
+
 
 if __name__ == "__main__":
     unittest.main()

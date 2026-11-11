@@ -1000,6 +1000,27 @@ if [ -f .agent-config/repo/scripts/guard.py ]; then
     _ledger_target '~/.codex/hooks.json'
   fi
 fi
+# Write the registry's interactive Codex and Agy model and effort into those
+# tools' own config files (user/agent-models.json is the source; Claude's
+# values arrive through the settings merge below). The helper skips a tool
+# that is not installed, leaves other keys alone, and reads AGENT_MODELS_SYNC
+# itself; it is also skipped here so an opted-out run records no target. Its
+# exit status never fails the run: a model preference is not worth a refusal
+# to refresh the rules.
+case "$(printf '%s' "${AGENT_MODELS_SYNC:-}" | tr '[:upper:]' '[:lower:]')" in
+  off|0|false|no|disabled) _agent_models_sync=off ;;
+  *) _agent_models_sync=on ;;
+esac
+if [ -n "$_py" ] && [ "$_agent_models_sync" = on ] \
+  && [ -f .agent-config/repo/scripts/agent_models.py ]; then
+  "$_py" .agent-config/repo/scripts/agent_models.py sync --quiet || true
+  if [ -d "${CODEX_HOME:-$HOME/.codex}" ]; then
+    _ledger_target '~/.codex/config.toml'
+  fi
+  if [ -d "$HOME/.gemini/antigravity-cli" ]; then
+    _ledger_target '~/.gemini/antigravity-cli/settings.json'
+  fi
+fi
 if [ -f .agent-config/repo/scripts/session_bootstrap.py ]; then
   if ! _atomic_deploy_helper .agent-config/repo/scripts/session_bootstrap.py "$HOME/.claude/hooks/session_bootstrap.py"; then
     printf '%s\n' 'error: could not atomically deploy ~/.claude/hooks/session_bootstrap.py' >&2

@@ -1,6 +1,6 @@
 ---
 name: prun
-description: Parallel delegation fan-out on Agy. The coordinating session decomposes and integrates while task units run in parallel as Agy processes (Gemini through the Antigravity CLI), never on the coordinator and never on Claude-side workers such as Sonnet subagents. Each unit runs unattended in a scratch dir or throwaway clone and gets follow-up turns while slower units finish. Codex is not a prun executor either. Unit count follows the dependency graph rather than a small fixed cap. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
+description: Parallel delegation fan-out on Agy. The coordinating session decomposes and integrates while task units run in parallel as Agy processes (Gemini through the Antigravity CLI), never on the coordinator and never on Claude-side workers such as Sonnet subagents. Each unit runs unattended in a scratch dir or throwaway clone and gets follow-up turns while slower units finish. A unit runs on Codex only when the user names Codex for it. Unit count follows the dependency graph rather than a small fixed cap. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
 ---
 
 # prun (parallel run)
@@ -8,36 +8,32 @@ description: Parallel delegation fan-out on Agy. The coordinating session decomp
 ## Overview
 
 `prun` fans a task out into independent units that run in parallel while the current session only
-coordinates. **Every worker is an Agy process** running Gemini through the Antigravity CLI, on the
-Google AI plan authenticated in `agy`. The coordinator decomposes the task, dispatches the units,
+coordinates. **Every unit runs on Agy by default**: an Agy process running Gemini through the
+Antigravity CLI, on the Google AI plan authenticated in `agy`. A unit runs on Codex only when the
+user names Codex for it (see Executors). The coordinator decomposes the task, dispatches the units,
 gathers their results, reviews their diffs, and integrates. It never runs a unit itself.
 
 **No Claude-side workers.** A Sonnet subagent, a Workflow agent, or any other Agent-tool worker draws
-on the same Claude account as the coordinating session, so a fan-out of them spends that account's
-quota at the rate of the fan-out. That is the pool the coordinating session itself needs, and it
-drained fast once `prun` routed units to Sonnet. **Codex is not a prun executor** either; its
-higher-cost quota is reserved for the default `/vet` gatekeeper role. Exact plan buckets can change,
-so inspect current Agy quota before a large batch.
+on the same Claude account as the coordinating session, so a fan-out of them spends the pool the
+session itself needs, and it drained fast once `prun` routed units to Sonnet. Exact plan buckets can
+change, so inspect current Agy quota before a large batch.
 
 ## Relationship to the native Workflow tool
 
 The native Workflow tool fans a task out across **Claude** subagents under a deterministic script,
 with structured output, judge panels, and resume. A Workflow run counts against the Anthropic plan's
-usage and rate limits, and its agents use the session model unless the script routes a stage to a
-different Claude model.
+usage and rate limits.
 
 `prun` is the fan-out that stays off that account. Its units run on Agy and use the Google AI plan;
-the coordinating session spends only the small Anthropic amount it needs to decompose, dispatch,
-read results, and integrate. `prun` therefore never starts a Workflow or a Claude subagent, not as a
-unit, a fallback, or a second panel. When the user explicitly asks for a Claude panel, that is a
-Workflow run the user asked for, and it happens outside `prun`. A cross-vendor read on staged work
-is what `/vet` is for.
+the session spends only the small Anthropic amount it needs to decompose, dispatch, read results,
+and integrate. `prun` never starts a Workflow or a Claude subagent, not as a unit, a fallback, or a
+second panel. A Claude panel the user explicitly asks for is a Workflow run outside `prun`. A
+cross-vendor read on staged work is what `/vet` is for.
 
 When the Agy Gemini group cannot accommodate the next batch, queue or defer units instead of moving
-them onto the Claude account. Read the meter with `agent-quota`, including snapshot age and reset
-times, and do not silently shrink a genuinely parallel task to an arbitrary two or three workers.
-The dispatcher's own quota route, described under dispatch-task usage, already stops a unit from
-launching into an empty group.
+them onto the Claude account or Codex. Read the meter with `agent-quota`, including snapshot age and
+reset times, and do not silently shrink a genuinely parallel task to an arbitrary two or three
+workers. The dispatcher's own quota route already stops a unit from launching into an empty group.
 
 ## When to use
 
@@ -52,66 +48,66 @@ or a unit's result cannot be checked without redoing it.
 
 | Executor | Quota | Notes |
 |---|---|---|
-| Agy (`agy`) | Google AI plan authenticated in Antigravity | **The only worker.** Runs the newest Gemini Flash High the account lists, at `high` effort; fast, separately funded, and dispatched with full unattended tool permission inside a scratch dir or throwaway clone. |
+| Agy (`agy`) | Google AI plan authenticated in Antigravity | **The default worker.** Runs the registry's `prun-worker` model and effort for Agy; fast, separately funded, and dispatched with full unattended tool permission inside a scratch dir or throwaway clone. |
+| Codex (`codex`) | Codex plan, the pool `/vet` reviewers use | **Only when the user names Codex** for a unit or a batch. Runs the registry's `prun-worker` model and effort for Codex through `dispatch-task.sh` (`.ps1` on Windows). |
 | Claude session (this session) | Current Claude account; check Settings > Usage for the applicable limits or credits | Coordinator and integrator only, on whatever model is selected. Never a unit. |
 
 Rules:
 
-- **Every unit runs on Agy.** Research, verification, extraction, cross-checks, and code-writing
-  units in a throwaway clone all go through `dispatch-task-agy`. The dispatcher gives a unit the
+- **Every unit runs on Agy by default.** Research, verification, extraction, cross-checks, and
+  code-writing units in a throwaway clone all go through `dispatch-task-agy`. The dispatcher gives a unit the
   same unattended capability as the `/vet` Agy reviewer, so it can verify numbers, run experiments,
-  and fetch the web. Agy defaults to the newest `gemini-*-flash-high` the account lists
-  (`gemini-3.8-flash-high` as of 2026-09) at the CLI's maximum `high` effort. Workers stay on
-  Flash although the `/vet` reviewer runs Gemini 4 Argon. On 2026-10-13 an Argon High run cost
-  about four times a Flash High run of the same task on Agy's five-hour meter. A unit that needs
-  Argon sets `ANTIGRAVITY_DISPATCH_MODEL=gemini-4-argon-high` for its own dispatch.
+  and fetch the web. The registry (`user/agent-models.json`, see the `agent-models` skill) decides
+  the worker model and effort: its `prun-worker` row, Agy column. That row names a cheaper model
+  than the `/vet` reviewer runs, on purpose: on 2026-10-13 a run on the reviewer's model cost about
+  four times a run on the worker model of the same task on Agy's five-hour meter. A unit that needs
+  another model names it in `ANTIGRAVITY_DISPATCH_MODEL`. An unreadable registry exits 2 and names
+  the registry; the dispatcher never guesses a model.
 - **Never a Claude-side worker.** Do not spawn an Agent-tool subagent (Sonnet or any other model)
   or a Workflow agent for a unit, including as a fallback when the Agy pool is short. Those workers
   spend the coordinating session's own Claude account. When Agy cannot take a batch, queue it or
   tell the user.
-- **Codex is excluded from prun.** Its quota is intentionally reserved for the `/vet` reviewer
-  role. Do not route a prun unit to `codex exec`, even if a legacy dispatcher remains on disk for
-  compatibility with old state directories.
+- **Codex only when the user names it.** A unit goes to Codex only when the user's request names
+  Codex for that unit or for a batch ("a small /prun with codex for the hard problems"). The
+  coordinator never picks Codex on its own, and never as a fallback when Agy is short: queue the
+  units or tell the user. A Codex unit runs through `dispatch-task.sh` (`.ps1` on Windows), never a
+  hand-typed `codex exec`, and its model and effort come from the registry's `prun-worker` row for
+  Codex, not from the command line or the interactive Codex config.
 - **Session-internal tools stay outside the fan-out.** An Agy process cannot use the coordinator's
   MCP, email connectors, or Artifact tool. Gather what a unit needs from those tools in the
   coordinating session before dispatch, and put it in the unit prompt; leave a small action that
   needs them to the coordinator as one inline step. A task whose substantive work needs those tools
   throughout is not a `prun` task.
-- **Keep the Agy pool busy with follow-up turns.** Units return at different times. When one returns
-  while others are still running, dispatch a follow-up unit rather than idling, provided the
-  follow-up discharges real work: an acceptance criterion the result left open, a claim it made
-  without evidence, a source it cited but did not fetch, a check it proposed but did not run, or
-  the next independent unit in the queue. A slower sibling is not by itself a reason to invent
-  work. `--continue-from <state-dir>` resumes the same conversation, so the follow-up keeps the
-  earlier context; a fresh prompt with a fresh result path is the alternative. Record each
-  follow-up in the ledger like any other unit.
+- **Keep the pool busy with follow-up turns.** When a unit returns while others still run, dispatch
+  a follow-up rather than idling, provided it discharges real work: an acceptance criterion the
+  result left open, a claim made without evidence, a source cited but not fetched, a check proposed
+  but not run, or the next independent unit in the queue. A slower sibling alone is no reason to
+  invent work. `--continue-from <state-dir>` resumes the same conversation so the follow-up keeps
+  its context; a fresh prompt with a fresh result path is the alternative. Record each follow-up in
+  the ledger like any other unit.
 - **The Claude session stays the coordinator, never a unit.** Independent substantive work belongs
-  in Agy workers.
+  in workers.
 
-**Why Agy alone.** Its pool is separate from the Claude plan, it is fast, and it adds an independent
-model family without spending the higher-cost Codex pool used by `/vet`. The earlier split put
-Sonnet beside Agy on the grounds that the two draw on separate pools. They do, but Sonnet's pool is
-the coordinator's own Claude account, so every Sonnet worker spent the quota the coordinating
-session runs on, and a wide fan-out consumed it quickly. The coordinator still reviews every result
-and every diff. Check current quota before a large batch, but do not convert changing meter
-readings into an arbitrary low worker cap.
+**Why Agy by default.** Its pool is separate from the Claude plan and from the Codex pool `/vet`
+reviewers use, and it is fast. An earlier split put Sonnet beside Agy, but Sonnet's pool is the
+coordinator's own Claude account, so a wide fan-out consumed the quota the session runs on. The
+coordinator reviews every result and every diff. Do not convert changing meter readings into an
+arbitrary low worker cap.
 
 ## Concurrency
 
 The orchestrator decides the unit count autonomously. Partition the task by **dependency
 structure** (split only along genuinely independent boundaries) and **balanced workload**
-(roughly equal-sized units, each worth a full worker run). High autonomy is the intent: do not
-target a fixed number, and do not cap artificially. A dozen-plus in parallel is fine when the
-task genuinely decomposes that way.
+(roughly equal-sized units, each worth a full worker run). Do not target a fixed number or cap
+artificially: a dozen-plus in parallel is fine when the task genuinely decomposes that way.
 
 Two soft bounds, not hard rules: local CPU/RAM (enough concurrent workers eventually contend and
-the excess queues) and the headroom of the Agy pool. `agent-quota` reads the current snapshot of
-both Agy groups. The usual real ceiling is
-**integration bandwidth**, since the orchestrator must read and reconcile every result, so
-prefer fewer well-scoped units over many tiny ones. Over-splitting into trivial units wastes
-worker startup and tends to produce thin results. Dispatch in batches that fit the runtime's
-concurrent-worker limit and the available quota, and leave the rest queued; a runtime's in-flight
-limit is separate from how many units a run may have in total.
+the excess queues) and the headroom of the Agy pool, which `agent-quota` reads for both groups. The
+usual real ceiling is **integration bandwidth**, since the orchestrator must read and reconcile
+every result, so prefer fewer well-scoped units over many tiny ones: over-splitting wastes worker
+startup and tends to produce thin results. Dispatch in batches that fit the runtime's
+concurrent-worker limit and the available quota, and leave the rest queued; that in-flight limit is
+separate from how many units a run may have in total.
 
 ## What a unit may do, and the one rule
 
@@ -141,15 +137,14 @@ kept, because the CLI's own session plumbing lives there. The names withheld fro
 listed in `<state-dir>/env-withheld`; values are never written anywhere. A unit that genuinely
 needs one variable through gets it with `PRUN_KEEP_ENV=NAME1,NAME2`.
 
-This exists because the dispatcher previously passed `os.environ.copy()` straight through. A
-worker only has to list its environment once, in an `env` command or a traceback, for a live
-key to enter a third-party model's context. On 2026-09-20 a scan found two live credentials in
-90 files across 18 Agy conversations over three days. A worker never calls a model, so it never
-needed them.
+The dispatcher once passed `os.environ.copy()` straight through, and a worker need only list its
+environment once, in an `env` command or a traceback, for a live key to enter a third-party model's
+context: on 2026-09-20 a scan found two live credentials in 18 Agy conversations. The Codex
+dispatcher does not scrub, because Codex may authenticate from its environment.
 
 Beyond that: the user writes the prompts, the clone has no path to the real remotes, and the
-Claude session plus the user are the integration gate. Scrubbing removes the credential class
-of accident; it is not a sandbox, and a worker can still read any file the user can.
+session plus the user are the integration gate. Scrubbing removes the credential class of
+accident; it is not a sandbox, and a worker can still read any file the user can.
 
 ## Flow
 
@@ -157,11 +152,11 @@ of accident; it is not a sandbox, and a worker can still read any file the user 
 2. **Decompose**: write one prompt per unit. State the task; for a code-writing unit, that the
    working dir is a throwaway clone to edit freely but **not** commit or push; that the unit writes
    a result summary to its result file (a fresh path, in one write).
-3. **Assign**: every unit goes to Agy. Gather anything a unit needs from session-internal tools
-   first and write it into that unit's prompt. Pick read-only (scratch) or code-writing (clone)
-   mode, and record the mode in the ledger.
+3. **Assign**: every unit goes to Agy, except a unit the user named for Codex. Gather anything a unit
+   needs from session-internal tools first and write it into that unit's prompt. Pick read-only
+   (scratch) or code-writing (clone) mode, and record the mode in the ledger.
 4. **Dispatch in parallel**: run `<python> scripts/dispatch-task-agy.py` in the background for each
-   unit. With no `--mode` it runs `accept-edits` with `--dangerously-skip-permissions` in a scratch
+   unit (`scripts/dispatch-task.sh` for a Codex unit). With no `--mode` it runs `accept-edits` with `--dangerously-skip-permissions` in a scratch
    directory it creates. A caller-supplied workspace, meaning `PRUN_SCRATCH_CWD` (a throwaway clone
    for a code-writing unit) or `--add-dir` (a clone or snapshot the unit should see), requires an
    explicit `--mode accept-edits` or `--mode plan`, so the write-capable mode is a named choice for
@@ -173,9 +168,8 @@ of accident; it is not a sandbox, and a worker can still read any file the user 
    unit **failed** (`FALLBACK` result or dead dispatch), printing a per-unit digest. On a stall,
    surface it to the user with a likely cause (capacity or concurrency pressure; suggest lowering the
    worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on
-   the still-running units until all are done. `monitor` only observes. The Agy dispatcher relies on
-   the CLI's bounded `--print-timeout`; it does not scan for or terminate unrelated agent processes.
-   (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
+   the still-running units until all are done. `monitor` only observes, and the Agy dispatcher relies
+   on the CLI's bounded `--print-timeout`. (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
 6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
    recover the worker's output from its `<state-dir>/tail` (dispatch-task-agy also salvages the
@@ -196,54 +190,50 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
 - Emits exactly one stdout line `STATE-DIR <abs-path>`; Agy stream events and stderr land in the
   state directory, the conversation id from Agy's `init` event is recorded to
   `<state-dir>/conversation-id`, and the final response is published atomically to the result path.
-- Defaults to the newest `gemini-*-flash-high` at `high` effort. The constants
-  `DEFAULT_MODEL` (`gemini-3.8-flash-high`) and `SECOND_MODEL`
-  (`claude-sonnet-5-5-high`) are family templates: Gemini Flash and Claude
-  Sonnet. During preflight, the `agy models` listing supplies the newest
-  version in each family, so a new Flash or Sonnet release runs without an
-  edit. Effort tiers may change too: Agy 1.2.16 retired `claude-sonnet-4-6` for
-  slugs that carry the tier, and the old template would still have reached
-  `claude-sonnet-5-5-high`. The tier is chosen first (the template's own,
-  then `high`), and the newest version within it second. An older high
-  therefore beats a newer medium. An unset `ANTIGRAVITY_DISPATCH_EFFORT`
-  follows the chosen slug's tier, because Agy rejects a conflicting
-  `--effort`. The switch shows as a `MODEL-RESOLVE from=... to=...` line
-  on stderr and in `<state-dir>/quota-note`, and `<state-dir>/model` names the
-  model that ran. Quota routing picks the group first, and floating never
-  moves a unit to the other group. One exception keeps a batch alive after a
-  larger rename. When Agy lists nothing in the Sonnet family, a unit routed
-  there runs on the Gemini default, recorded as `MODEL-FALLBACK ...
-  reason=template-unlisted`. The Gemini group's quota is checked again first,
-  so a fallback into an empty group exits `75` without launching.
-  A model named in `ANTIGRAVITY_DISPATCH_MODEL` runs verbatim, and
-  `ANTIGRAVITY_PREFLIGHT=off` skips the listing, so the templates run as
-  written. `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. The dispatcher
-  passes `--effort` for the Gemini models only. Agy rejected the flag for the
-  older Claude models. Since 1.2.16 it rejects any effort that conflicts with
-  the tier in a Claude slug, so the flag is omitted for the second group.
-- Agy Ultra exposes a second quota group for Claude and GPT-OSS models
-  (Claude Opus 5.5 and Sonnet 5.5 at low, medium, and high, and
-  `gpt-oss-120b-medium`, as of 2026-10), metered apart from the Gemini group. **A unit that names no
-  model goes to whichever group has the freer meter**, with the newest Claude
-  Sonnet as the second group's model. A unit is
-  shallow work that either group handles, so the meter decides rather than the
-  model family. The worker is the Agy CLI either way, so a Claude model here
-  spends Agy quota and never the Claude account the coordinator runs on. This is
-  a routing policy the user set on 2026-09-15, after a 198-unit batch spent 77
-  points of the Gemini five-hour meter in an hour while the second group sat
-  untouched. An agent still does not reach for that group on its own outside
-  this rule: one that did spent 646 generations of it in a day.
-  `ANTIGRAVITY_DISPATCH_MODEL` disables headroom balancing for the run. The
-  exhaustion rules below still apply to the model it names, including the
-  fallback from an exhausted Claude and GPT group to Gemini.
+- Defaults to the registry's `prun-worker` row for Agy: stem plus effort tier gives the slug, and
+  `second_model` gives the second group's slug. `DEFAULT_MODEL`, `DEFAULT_EFFORT`, and
+  `SECOND_MODEL` come from `scripts/agent_models.py` at start, so a registry change needs no script
+  edit. They are family templates: preflight takes the newest version in each family from the
+  `agy models` listing, the tier first (the template's own, then `high`) and the version second, so
+  an older high beats a newer medium. An unset `ANTIGRAVITY_DISPATCH_EFFORT` follows the chosen
+  slug's tier, because Agy rejects a conflicting `--effort`. The switch shows as a `MODEL-RESOLVE
+  from=... to=...` line on stderr and in `<state-dir>/quota-note`, and `<state-dir>/model` names the
+  model sent to Agy. Quota routing picks the group first, and floating never moves a unit to the
+  other group, with one exception: when Agy lists nothing in the second model's family, a unit
+  routed there runs on the worker default, recorded as `MODEL-FALLBACK ...
+  reason=template-unlisted`. The Gemini group's quota is checked again first, so a fallback into an
+  empty group exits `75` without launching. A model named in `ANTIGRAVITY_DISPATCH_MODEL` runs
+  verbatim, and `ANTIGRAVITY_PREFLIGHT=off` skips the listing, so the templates run as written.
+  `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. The dispatcher passes `--effort` for the
+  Gemini models only: Agy rejected the flag for the older Claude models, and since 1.2.16 it
+  rejects any effort that conflicts with the tier in a Claude slug, so the second group runs
+  without it.
+- **The dispatcher checks which model Agy really ran.** Every unit passes
+  `--log-file <state-dir>/agy.log`, and after the run the resolver's Agy reader takes the model
+  label Agy propagated to its backend from it (the earlier `not in local config` line is noise).
+  `<state-dir>/model-actual` records
+  `requested=<slug> <effort> actual=<slug> <tier> status=ok|mismatch|unknown`. Family and tier must
+  agree; a newer version is fine, and a second-group slug is held to the tier it names, since it
+  takes no `--effort`. A mismatch prints `MODEL-MISMATCH` on stderr, and a missing label prints
+  `MODEL-UNVERIFIED`. Neither changes the exit code or the result, and no model call is spent.
+- Agy Ultra exposes a second quota group for Claude and GPT-OSS models, metered apart from the
+  Gemini group. **A unit that names no model goes to whichever group has the freer meter**, with
+  the registry's `second_model` (floated to its newest version) as the second group's model; a row
+  without one leaves the group out of the routing. The worker is the Agy CLI either way, so a
+  Claude model here spends Agy quota and never the coordinator's Claude account. The user set this
+  on 2026-09-15 after a 198-unit batch spent 77 points of the Gemini five-hour meter in an hour
+  while the second group sat untouched. An agent does not reach for that group on its own outside
+  this rule. `ANTIGRAVITY_DISPATCH_MODEL` disables headroom balancing for the run; the exhaustion rules below
+  still apply to the model it names, including the fallback from an exhausted Claude and GPT group
+  to Gemini.
 - **The dispatcher checks group quota before launching.** The two groups are
   metered separately, and one dispatch names one model, so a batch aimed at an
   empty group fails once per unit: on 2026-09-11 four units of a seven-unit
   fan-out died in a row, each carrying `Individual quota reached ... Resets in
   34m`. Before launching, the dispatcher reads the snapshot `agent-quota`
   maintains and decides:
-  - No model was named: each unit starts from the Gemini default. When both
-    groups are reported, it moves to the Sonnet model if the second group's
+  - No model was named: each unit starts from the worker default. When both
+    groups are reported, it moves to the second group's model if the second group's
     lowest remaining fraction is at least 15 points higher, or if Gemini is
     empty and the second group has quota left. A move on headroom also needs
     both metered windows of the destination present in the snapshot, since a
@@ -254,12 +244,10 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
     `MODEL-BALANCE from=... to=... reason=freer-meter own=... other=...` goes to
     stderr and to `<state-dir>/quota-note`.
   - A named model in the Claude and GPT group, with that group empty and Gemini
-    not: dispatch the Gemini default instead, and record the swap. The line
+    not: dispatch the worker default instead, and record the swap. The line
     `MODEL-FALLBACK from=... to=... reason=claude-and-gpt-quota-exhausted
     resets=...` goes to stderr and to `<state-dir>/quota-note`.
-    `<state-dir>/model` always names the model that actually ran, so the
-    ledger's executor column is not the model the caller asked for when the two
-    differ.
+    `<state-dir>/model` names the model sent to Agy, not the one the caller asked for.
   - A named Gemini model whose group is empty: exit `75` without launching, and
     say so. A model someone chose is not escalated into the metered group on its
     own; the message names `ANTIGRAVITY_DISPATCH_MODEL` for the operator who
@@ -271,58 +259,49 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   A run that fails at the backend forces a snapshot refresh before exiting,
   past the readout's own five-minute TTL, because the meter it just hit is
   newer evidence than the snapshot. Later units then route on what it recorded.
-  This is not a guarantee: a refresh that cannot run, a meter that is
-  unavailable, and units already in flight can still produce repeated quota
-  errors.
+  A refresh that cannot run, an unavailable meter, and units already in flight can still
+  produce repeated quota errors.
 - `--mode` defaults to `accept-edits` with `--dangerously-skip-permissions`, the same unattended
   capability the implement-review Gemini reviewer already runs with, so a unit can verify numbers,
   run experiments, and fetch the web without a permission prompt. The default applies only to the
   scratch directory the dispatcher creates. When the caller supplies a workspace through
   `PRUN_SCRATCH_CWD` or `--add-dir`, the dispatcher refuses to launch until `--mode` is given,
-  because the write-capable mode could otherwise reach a directory it did not create. Safety stays
-  structural either way: point those at a throwaway clone with no remote or a read-only snapshot,
-  never the real tree. `--mode plan` is the strictly read-only opt-in; it keeps request-review
+  because the write-capable mode could otherwise reach a directory it did not create. `--mode plan` is the strictly read-only opt-in; it keeps request-review
   permissions and never gets the skip flag. In headless use a tool request that needs an approval
   nobody can give (`run_command`, `read_url`, browser tools) is denied, and the process can still
   exit 0 with a normal-looking result that reports it could not verify. A normal result file
-  therefore does not prove those checks ran; read its `Verification` and `Open items` fields. If
-  the worker has not written a non-empty result file, a missing, empty, or shorter-than-20-byte
-  final response produces `FALLBACK`, and so does a final `result` event whose `status` is not
-  `SUCCESS`. A standing `permissions.allow` rule in Agy's own `settings.json`
+  therefore does not prove those checks ran; read its `Verification` and `Open items` fields. A
+  standing `permissions.allow` rule in Agy's own `settings.json`
   (`~/.gemini/antigravity-cli/settings.json`, entries such as `read_url(*)` or `command(*)`) is the
   alternative for a plan-mode unit.
 - `--add-dir PATH` (repeatable) adds a directory outside the unit's working directory to its
   workspace without copying a repository into the scratch area, in either mode; it requires an
   explicit `--mode`. Point it at a clone or a read-only snapshot, never the real tree, since
-  `accept-edits` can write there. The dispatcher resolves each path to absolute and refuses to
-  launch if it is empty or not an existing directory.
-- `--continue-from STATE_DIR` resumes the conversation recorded at `<STATE_DIR>/conversation-id`
-  for a follow-up dispatch that should keep the earlier turn's context instead of re-embedding
-  the prior result in a new prompt. It still needs its own fresh `--result-file`; an empty
-  `STATE_DIR` argument, or one whose conversation id file is missing or empty, is a pre-launch
-  error.
+  `accept-edits` can write there. Each path is resolved to absolute and must be an existing directory.
+- `--continue-from STATE_DIR` resumes the conversation recorded at `<STATE_DIR>/conversation-id`,
+  so a follow-up keeps the earlier turn's context instead of re-embedding the prior result. It
+  still needs its own fresh `--result-file`; an empty `STATE_DIR`, or one whose conversation id file
+  is missing or empty, is a pre-launch error.
 - Requires a fresh result path and refuses to overwrite an existing result. The final response is
   published to that path, unless the worker already wrote a non-empty result file there itself: then
   the worker's file is kept and the final response lands beside it as `<result>.response.<ext>`, so
   a one-line closing reply never replaces a full result. If no non-empty worker result exists, a
-  failed preflight, launch, worker run, or timeout, or an unusable final response, produces an
-  atomic `FALLBACK` result with captured tails.
+  failed preflight, launch, worker run, or timeout, or an unusable final response (missing, empty,
+  or under 20 bytes), produces an atomic `FALLBACK` result with captured tails.
 - Both signals decide the outcome. A non-zero process exit fails the unit, and after an exit of 0
   the final `result` event's `status` is consulted, because Agy exits 0 when it stops on a quota
-  limit and that `ERROR` event still carries the opening narration in `response`. Publishing that
-  response would hand the coordinator work that never happened. Any status other than `SUCCESS`
-  fails the unit and carries the event's `error` text into the `FALLBACK` result. The one exception
-  is a status that is missing or blank, which counts as success so that an older Agy keeps working.
+  limit and that `ERROR` event still carries the opening narration in `response`; publishing it
+  would hand the coordinator work that never happened. Any status other than `SUCCESS` fails the
+  unit and carries the event's `error` text into the `FALLBACK` result. A missing or blank status
+  counts as success, so an older Agy keeps working.
 - A failed run whose worker had already written its own result keeps that file, because the worker
   may have finished before the backend stopped. The partial response lands beside it as
   `<result>.response.<ext>`, and the dispatcher exits non-zero with the backend error on stderr.
   Both monitors classify a stable worker-written result as `done` without reading the backend
-  status. Before integrating such a unit, wait for the dispatcher to finish and check its exit
-  code. When that code is unavailable, read the `result` event's `status` and `error` in
-  `<state-dir>/tail` and the captured dispatch diagnostics. The sibling response is supporting
-  context: a successful run writes one too, and it records no status.
+  status, so before integrating such a unit, wait for the dispatcher to finish and check its exit
+  code, or read the `result` event's `status` and `error` in `<state-dir>/tail`.
 - `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` defaults to 2700 and is passed to Agy's bounded
-  `--print-timeout`. The dispatcher never enumerates or terminates another agent process.
+  `--print-timeout`.
 - The dispatcher omits Agy's `--sandbox` flag by default. On Windows that sandbox starts an
   elevated admin broker and raises a UAC prompt for every unit that runs a command; a declined
   prompt fails the command. `PRUN_AGY_SANDBOX` controls whether the flag is added; it does not
@@ -332,7 +311,30 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
   launch. Scratch directories and throwaway clones reduce accidental changes to the working
   repository. They do not enforce filesystem or network isolation; the worker must follow the
   prompt's ban on commit, push, and destructive git.
-- The Codex worker scripts that `prun` used before 2026-09-13 are archived in `legacy/prun-codex-worker/` in the source repositories and are no longer shipped. They remain available if pricing makes a Codex worker the cheaper pool again. The `report-state` and `snapshot-tail` launchers recover old unit state through `prun_state.py` without them.
+
+## dispatch-task usage (Codex, only when the user names it)
+
+```
+scripts/dispatch-task.sh --prompt-file <prompt> --result-file <fresh abs result> --unit-id <id>
+```
+
+`dispatch-task.ps1` is the Windows twin, with `reap-watch.ps1` as its watchdog. The arguments, the
+`STATE-DIR` line, the state directory, and the `FALLBACK` backstop match the Agy dispatcher, so
+`monitor` and `gather` work on both. There is no quota routing; a Codex unit spends the Codex plan.
+
+- **Model and effort come from the registry.** The `prun-worker` row for the Codex family names both
+  (`agent_models.py resolve --family codex --role prun-worker`), and the dispatcher passes both with
+  `-c`. `CODEX_DISPATCH_MODEL` and `CODEX_DISPATCH_REASONING` override one run. With neither an
+  override nor a registry answer it exits `70` and names the registry; it never guesses.
+- **Which model really ran.** `<state-dir>/model-actual` has the Agy record's format, read from the
+  header `codex exec` prints (`actual=-` when there is none). `MODEL-MISMATCH` and `MODEL-UNVERIFIED`
+  go to stderr; the exit code stays the worker's.
+- `codex exec` runs from the scratch dir (`PRUN_SCRATCH_CWD` for a clone) with `--sandbox
+  danger-full-access` (`CODEX_DISPATCH_SANDBOX`), the prompt on stdin, and `--ignore-user-config` so
+  a user MCP server cannot start inside the worker (`CODEX_DISPATCH_ISOLATE_MCP=off` drops it and
+  passes no model or effort).
+- No output growth for `PRUN_STALL_THRESHOLD` seconds (default 600), or a run past
+  `CODEX_DISPATCH_TIMEOUT` (default off), reaps the worker: exit `124` and a `FALLBACK` result.
 
 ## gather usage
 
@@ -440,9 +442,7 @@ read as an empty corpus. Any entry in either place sets exit `1`.
 result path resolved to a file that is missing or empty. `unresolved` covers units whose result was
 never classified while their tail still holds bytes. Each counter names what was observed rather
 than what may be done about it, because neither a missing target nor an empty one proves that no
-other copy exists or that a live producer will not fill it. Both appear because the second group is
-easy to lose: across a live corpus of 220 units the first counter read 24.3 MiB while another
-0.4 MiB sat in a unit nothing had classified.
+other copy exists or that a live producer will not fill it.
 
 
 Under `--json`, those counters arrive in a `summary` object:
@@ -501,11 +501,10 @@ than falling back to an operation that could overwrite.
 | `capture_outcome` | `complete_bounded_read` when the two counts agree, `short_read` otherwise |
 | `note` | records that equal counts do not prove the source held still |
 
-The read is bounded by `source_size_at_open`, and it is best-effort. Equal counts do not establish
-that the source held still, because bytes can arrive from different generations of a growing file
-and still total the same number. Read `complete_bounded_read` as "the reader returned `source_size_at_open` bytes before EOF", never
-as "the source was unchanged" or "this is a consistent point-in-time copy". A truncate-and-regrow
-sequence can also total exactly that many bytes.
+The read is bounded by `source_size_at_open` and best-effort: equal counts do not show that the
+source held still, because bytes from different generations of a growing file, or from a
+truncate-and-regrow, can total the same number. Read `complete_bounded_read` as "the reader returned
+`source_size_at_open` bytes before EOF", never as a consistent point-in-time copy.
 
 JSON output adds `published`, the final path, and `warning`, which is `null` on a clean run. A
 warning appears when the archive is linked into place but the temporary file could not be removed.
@@ -542,11 +541,12 @@ Verification: <what was run/checked/searched, or "none">
 
 Keep a simple run ledger (a file in a scratch area) recording each unit: id, executor, mode, prompt
 file, clone-dir, result file, status (dispatched / done / failed), start/end, and the unit's
-state-dir. Take the executor column from `<state-dir>/model`, which names the model that actually
-ran, so a quota fallback shows in the ledger. Use the ledger to report progress and to relaunch
+state-dir. Take the executor column from `<state-dir>/model` (the model sent to the worker, after
+any Agy quota fallback) and the `status=` word from `<state-dir>/model-actual`; report a `mismatch` or
+`unknown` unit as unconfirmed. Use the ledger to report progress and to relaunch
 only units whose result is missing or fails validation.
 
-**Where a unit's own files go**: four kinds of file belong under an `agent-io` directory inside the scratch area. They are the per-unit prompt, the result file, the shared-context file every worker reads, and the run ledger. The directory name tells the writing-style hook to skip them, because none of that text is the coordinator's prose to rewrite. A unit prompt is an instruction to a worker, and a result file holds what the worker sent back. Anything the fan-out produces for a human reader stays outside `agent-io`.
+**Where a unit's own files go**: the per-unit prompt, the result file, the shared-context file every worker reads, and the run ledger belong under an `agent-io` directory inside the scratch area. The name tells the writing-style hook to skip them, because none of that text is the coordinator's prose to rewrite. Anything the fan-out produces for a human reader stays outside `agent-io`.
 
 ## Web access
 
@@ -554,14 +554,9 @@ only units whose result is missing or fails validation.
 rather than the cloud fetcher's egress IP, often a residential IP. That can reach some pages a cloud
 fetcher gets `403` on, though a hardened site can still block on bot score, fingerprint, or rate. It
 also surfaces pages a cloud fetch would miss. The dispatcher's default mode grants the web and the
-shell unattended, so a worker can fetch through `read_url` or a local-shell curl. It does not ask
-for Agy's own `--sandbox`: on Windows that sandbox starts an elevated admin broker
-(`agy --exebox-admin-broker`), which raises a UAC prompt for every unit that runs a command, and
-a declined prompt fails the command. Set `PRUN_AGY_SANDBOX=1` to add the flag where the broker
-is acceptable. Only `--mode plan` withholds the web and the shell: it runs Agy in `request-review` mode, and a
-headless run denies the permission prompt. The process can still exit 0 with a result that says the
-fetch did not happen, so read a plan-mode result's `Verification` and `Open items` fields before
-trusting it.
+shell unattended, so a worker can fetch through `read_url` or a local-shell curl. Only `--mode plan`
+withholds them (see `--mode` and `PRUN_AGY_SANDBOX` above); read a plan-mode result's
+`Verification` and `Open items` fields before trusting it.
 
 Web units, all on Agy:
 

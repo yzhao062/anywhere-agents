@@ -24,17 +24,26 @@
 #                                  signal; child processes inherit it.
 #   CODEX_SESSION_ID               Same as CODEX_THREAD_ID, for the session ID.
 #   ANYWHERE_AGENTS_PYTHON         Explicit Python interpreter override
+#   CODEX_DISPATCH_MODEL           One-run override of the reviewer model.
+#   CODEX_DISPATCH_REASONING       One-run override of the reviewer effort.
+#   AGENT_MODELS_FILE              Alternate registry file (tests, one-off runs).
 #   TMPDIR / TEMP / TMP            Temp dir for state-dir (Windows uses TEMP by default)
+#
+# Model and effort: the registry (user/agent-models.json, read through
+# scripts/agent_models.py) names both; see dispatch-codex.sh for the order of
+# sources and <state-dir>/review-model for what is recorded.
 #
 # Stdout:
 #   First (and only) machine-readable line: STATE-DIR <abs-path>
 #
 # Stderr:
-#   Dispatch diagnostics + last 80 lines of codex-exec combined stdout+stderr
+#   Dispatch diagnostics + last 80 lines of codex-exec combined stdout+stderr.
+#   MODEL-MISMATCH when the run did not use the requested model or effort.
 #
 # Exit code:
 #   Propagates codex exec's exit code unchanged.
 #   Returns 2 on usage errors (missing/invalid args) or self-review refusal.
+#   Returns 70 when no source names the reviewer model and effort.
 
 $ErrorActionPreference = 'Stop'
 
@@ -210,37 +219,84 @@ function Resolve-ProbedPython {
     return $resolvedPath
 }
 
-$codexFallbackModel = 'gpt-6.1-sol'
-
-# The review model, in the order dispatch-codex.sh documents: the env
-# override, the top-level model in config.toml, then the fallback. A config
-# model is skipped under a non-OpenAI model_provider, which isolation drops.
-function Resolve-CodexReviewModel {
-    if ($env:CODEX_DISPATCH_MODEL) { return @($env:CODEX_DISPATCH_MODEL, 'env') }
+# The reviewer model and effort, in the order dispatch-codex.sh documents: the
+# env overrides, the registry, then the top-level model and
+# model_reasoning_effort of config.toml. A config model is skipped under a
+# non-OpenAI model_provider, which isolation drops. A value no source names
+# stays empty; the caller stops the dispatch.
+function Resolve-CodexReview {
+    $review = @{ Model = ''; ModelSource = ''; Effort = ''; EffortSource = '' }
+    if ($env:CODEX_DISPATCH_MODEL) {
+        $review.Model = $env:CODEX_DISPATCH_MODEL
+        $review.ModelSource = 'env'
+    } elseif ($registryModel) {
+        $review.Model = $registryModel
+        $review.ModelSource = 'registry'
+    }
+    if ($env:CODEX_DISPATCH_REASONING) {
+        $review.Effort = $env:CODEX_DISPATCH_REASONING
+        $review.EffortSource = 'env'
+    } elseif ($registryEffort) {
+        $review.Effort = $registryEffort
+        $review.EffortSource = 'registry'
+    }
+    if ($review.Model -and $review.Effort) { return $review }
     $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
     $configFile = Join-Path $codexHome 'config.toml'
     $configModel = ''
+    $configEffort = ''
     $provider = ''
     if (Test-Path -LiteralPath $configFile -PathType Leaf) {
         try {
             foreach ($line in Get-Content -LiteralPath $configFile -ErrorAction Stop) {
                 if ($line -match '^\s*\[') { break }
-                if ($line -cmatch '^\s*(?<key>model_provider|model)\s*=\s*(["''])(?<val>.*?)\1') {
+                if ($line -cmatch '^\s*(?<key>model_provider|model_reasoning_effort|model)\s*=\s*(["''])(?<val>.*?)\1') {
                     $key = $Matches['key']
                     $value = $Matches['val']
                     if ($key -eq 'model_provider') {
                         $provider = $value
+                    } elseif ($key -eq 'model_reasoning_effort') {
+                        if (-not $configEffort -and $value -cmatch '^[A-Za-z0-9._:/-]+$') { $configEffort = $value }
                     } elseif (-not $configModel -and $value -cmatch '^[A-Za-z0-9._:/-]+$') {
                         $configModel = $value
                     }
                 }
             }
         } catch {
-            # An unreadable config means no config model; the fallback applies.
+            # An unreadable config supplies nothing.
         }
     }
-    if ($configModel -and (-not $provider -or $provider -eq 'openai')) { return @($configModel, 'config') }
-    return @($codexFallbackModel, 'fallback')
+    if (-not $review.Model -and $configModel -and (-not $provider -or $provider -eq 'openai')) {
+        $review.Model = $configModel
+        $review.ModelSource = 'config'
+    }
+    if (-not $review.Effort -and $configEffort) {
+        $review.Effort = $configEffort
+        $review.EffortSource = 'config'
+    }
+    return $review
+}
+
+# Run agent_models.py with the resolved interpreter; exit code, stdout, and
+# stderr come back as text. Stderr lines are the error stream's records.
+function Invoke-AgentModels {
+    param([string[]]$AgentArgs)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $result = @{ Exit = 1; Out = ''; Err = '' }
+    try {
+        $lines = @(& $pythonBin $agentModelsPy @AgentArgs 2>&1)
+        $result.Exit = $LASTEXITCODE
+        $outLines = @($lines | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+        $errLines = @($lines | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
+        $result.Out = ($outLines -join "`n").Trim()
+        $result.Err = ($errLines -join "`n").Trim()
+    } catch {
+        $result.Err = $_.Exception.Message
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    return $result
 }
 
 function Use-PythonPath {
@@ -479,12 +535,68 @@ if ($pwshBin) {
     [System.IO.File]::WriteAllText((Join-Path $stateDir 'pwsh-interpreter'), "$pwshBin`n")
 }
 
-# Resolve the review model here, well away from the cmdBody construction,
-# and record which source won. Isolation off leaves codex to read its config.
+# Resolve the review model and effort here, well away from the cmdBody
+# construction, and record which source won. The registry is read through
+# scripts/agent_models.py (see dispatch-codex.sh); no literal lives here.
+# Isolation off leaves codex to read its own config.
+function Find-AgentModels {
+    param([string]$Start)
+    try { $dir = (Resolve-Path -LiteralPath $Start -ErrorAction Stop).Path } catch { return $null }
+    while ($dir) {
+        foreach ($root in @($dir, (Join-Path $dir '.agent-config/repo'))) {
+            $candidate = Join-Path $root 'scripts/agent_models.py'
+            $registry = Join-Path $root 'user/agent-models.json'
+            if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and (Test-Path -LiteralPath $registry -PathType Leaf)) {
+                return $candidate
+            }
+        }
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    return $null
+}
+$agentModelsPy = Find-AgentModels -Start $sourceScriptDir
+if (-not $agentModelsPy) { $agentModelsPy = Join-Path $sourceScriptDir 'agent_models.py.not-found' }
+$registryModel = ''
+$registryEffort = ''
+$registryWhy = 'scripts/agent_models.py or a working Python interpreter was not found'
+if ($pythonBin -and (Test-Path -LiteralPath $agentModelsPy -PathType Leaf)) {
+    $registryWhy = 'the resolver did not answer'
+    $answer = Invoke-AgentModels -AgentArgs @('resolve', '--family', 'codex', '--role', 'reviewer')
+    if ($answer.Exit -eq 0 -and $answer.Out -match '^([A-Za-z0-9._:/-]+) ([A-Za-z0-9._:/-]+)$') {
+        $registryModel = $Matches[1]
+        $registryEffort = $Matches[2]
+    } elseif ($answer.Err) {
+        $registryWhy = $answer.Err -replace '\s+', ' '
+    }
+}
 $model = ''
+$reasoning = ''
+$expectArgs = @()
+$reviewModelPath = Join-Path $stateDir 'review-model'
 if ($env:CODEX_DISPATCH_ISOLATE_MCP -ne 'off') {
-    $model, $modelSource = Resolve-CodexReviewModel
-    [System.IO.File]::WriteAllText((Join-Path $stateDir 'review-model'), "model=$model source=$modelSource`n")
+    $review = Resolve-CodexReview
+    $model = $review.Model
+    $reasoning = $review.Effort
+    if (-not $model -or -not $reasoning) {
+        $registryMessage = @(
+            "dispatch-codex: cannot determine the reviewer model and effort. The registry (user/agent-models.json, resolved by scripts/agent_models.py) did not answer ($registryWhy), and the top-level model and model_reasoning_effort of config.toml do not supply the rest.",
+            'Fix the registry or the Python setup (see the agent-models skill), or set CODEX_DISPATCH_MODEL and CODEX_DISPATCH_REASONING for this run. Refusing to spend a review round.'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $stateDir 'tail'), "$registryMessage`r`n")
+        [Console]::Out.WriteLine("STATE-DIR $stateDir")
+        [Console]::Out.Flush()
+        [Console]::Error.WriteLine($registryMessage)
+        exit 70
+    }
+    [System.IO.File]::WriteAllText($reviewModelPath, "model=$model source=$($review.ModelSource) effort=$reasoning effort_source=$($review.EffortSource)`n")
+    $expectArgs = @('--expect-model', $model, '--expect-effort', $reasoning)
+} else {
+    [System.IO.File]::WriteAllText($reviewModelPath, "model=- source=user-config effort=- effort_source=user-config`n")
+    if ($registryModel -and $registryEffort) {
+        $expectArgs = @('--expect-model', $registryModel, '--expect-effort', $registryEffort)
+    }
 }
 
 # Emit STATE-DIR on stdout (first and only machine-readable line)
@@ -611,7 +723,6 @@ $sandboxModeEsc = $sandboxMode -replace '%', '%%'
 # Reviewer isolation (default on; CODEX_DISPATCH_ISOLATE_MCP=off opts out).
 # --ignore-user-config drops user MCP/plugins/hooks; model and reasoning are
 # re-passed. See dispatch-codex.sh for the defaults and what is not kept.
-$reasoning = if ($env:CODEX_DISPATCH_REASONING) { $env:CODEX_DISPATCH_REASONING } else { 'xhigh' }
 $isolateArg = if ($env:CODEX_DISPATCH_ISOLATE_MCP -eq 'off') { '' } else { "--ignore-user-config -c model=$model -c model_reasoning_effort=$reasoning " }
 $pythonInstruction = if ($pythonBin) {
     "A working Python interpreter was execution-probed before dispatch. Use this exact absolute path for every Python command: $pythonBin. Do not invoke bare python, python3, or py."
@@ -733,6 +844,22 @@ if (Test-Path -LiteralPath $tailPath -PathType Leaf) {
         # Best-effort; do not fail dispatch if tail read errors
     }
 }
+
+# Effective, not configured: the header codex printed is in the combined tail.
+# Append what it says to the record; a mismatch prints MODEL-MISMATCH on
+# stderr (from the resolver), and an unreadable run prints MODEL-UNVERIFIED.
+$actualLine = ''
+if ($pythonBin -and (Test-Path -LiteralPath $agentModelsPy -PathType Leaf)) {
+    $actualArgs = @('actual', '--family', 'codex', '--stderr-file', $tailPath) + $expectArgs
+    $actual = Invoke-AgentModels -AgentArgs $actualArgs
+    if ($actual.Out -match '^actual=') { $actualLine = $actual.Out }
+    if ($actual.Err) { [Console]::Error.WriteLine($actual.Err) }
+}
+if (-not $actualLine) {
+    $actualLine = 'actual=unknown status=unknown'
+    [Console]::Error.WriteLine('dispatch-codex: MODEL-UNVERIFIED the run could not be read back (no Python interpreter or resolver)')
+}
+[System.IO.File]::AppendAllText($reviewModelPath, "$actualLine`n")
 
 # Do NOT force-kill stall-watch. It already polls our PID via Get-Process and
 # will exit silently on its next interval after we die. Stopping it on the hot

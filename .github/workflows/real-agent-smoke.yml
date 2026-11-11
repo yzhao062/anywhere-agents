@@ -63,14 +63,44 @@ jobs:
             echo "::error::no shipped skills found under skills/"
             exit 1
           fi
-          # --model sonnet: handshake probes verify config loading + skill
-          # enumeration, not prose quality; Sonnet is ~5x cheaper than Opus
-          # and predictable across Claude Code CLI default-model drift.
+          # The model and effort come from the registry (user/agent-models.json)
+          # through its resolver, never from a literal here. The probes verify
+          # config loading and skill enumeration, not prose quality, so they run
+          # on the registry's worker row, the cheap tier, and not on the
+          # interactive default.
+          if ! SMOKE_MODEL=$(python3 scripts/agent_models.py resolve --family claude --role worker --field model) ||
+             ! SMOKE_EFFORT=$(python3 scripts/agent_models.py resolve --family claude --role worker --field effort); then
+            echo "::error::cannot resolve the Claude worker model from user/agent-models.json (scripts/agent_models.py resolve failed)"
+            exit 1
+          fi
+          # CLAUDE_CODE_EFFORT_LEVEL outranks --effort, so the child gets the effort through it.
+          export CLAUDE_CODE_EFFORT_LEVEL="$SMOKE_EFFORT"
+          echo "requested: $SMOKE_MODEL $SMOKE_EFFORT"
+          # Run one probe and leave its answer in RESP. Passing the model flag
+          # proves only what was asked for, so the transcript Claude Code wrote
+          # for this --session-id is read back for the model and effort that
+          # actually ran, and a mismatch fails the job. Extra arguments go last
+          # because --tools is variadic and would swallow anything after it.
+          claude_probe() {
+            local prompt="$1" sid actual
+            shift
+            sid=$(python3 -c 'import uuid; print(uuid.uuid4())')
+            RESP=$(claude -p "$prompt" --model "$SMOKE_MODEL" --session-id "$sid" "$@")
+            actual=$(python3 scripts/agent_models.py actual --family claude --session-id "$sid" \
+              --expect-model "$SMOKE_MODEL" --expect-effort "$SMOKE_EFFORT")
+            echo "requested: $SMOKE_MODEL $SMOKE_EFFORT; $actual"
+            case "$actual" in
+              *"status=mismatch"*)
+                echo "::error::Claude ran on a different model or effort than the registry asked for: $actual"
+                exit 1 ;;
+              *"status=unknown"*)
+                echo "::warning::could not read back the model Claude ran on; the request is unverified" ;;
+            esac
+          }
           if grep -q 'is the alias for `implement-review`' AGENTS.md; then
             CONFIG_PROMPT='According to CLAUDE.md, /vet is an alias of which skill? Reply with the directory name of that skill only.'
             # --tools "" leaves the model nothing but its loaded instructions.
-            # It is variadic, so it comes after the prompt or it swallows it.
-            RESP=$(claude -p "$CONFIG_PROMPT" --model sonnet --tools "")
+            claude_probe "$CONFIG_PROMPT" --tools ""
             echo "::group::claude config probe response"
             echo "$RESP"
             echo "::endgroup::"
@@ -83,7 +113,7 @@ jobs:
             echo "SKIP: AGENTS.md does not state the vet alias; config probe skipped"
           fi
           ROSTER_PROMPT='List the skills shipped in this repository, meaning the directories under skills/ that contain a SKILL.md. Reply with the directory names only, comma-separated, no other text.'
-          RESP=$(claude -p --model sonnet "$ROSTER_PROMPT")
+          claude_probe "$ROSTER_PROMPT"
           echo "::group::claude roster response"
           echo "$RESP"
           echo "::endgroup::"

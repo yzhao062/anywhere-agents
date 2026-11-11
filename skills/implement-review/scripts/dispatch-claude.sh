@@ -35,19 +35,27 @@
 #                                    no-model auth check for the official Claude
 #                                    CLI and skips opaque wrappers.
 #   CLAUDE_PREFLIGHT_TIMEOUT_SECONDS  Preflight timeout (default: 60).
+#   ANYWHERE_AGENTS_PYTHON           Python interpreter for the registry lookup.
+#   AGENT_MODELS_FILE                Alternate registry file (tests, one-off runs).
 #   TMPDIR                           Temp dir for state-dir (default: /tmp)
+#
+# Model and effort: the registry (user/agent-models.json, read through
+# scripts/agent_models.py) names both. <state-dir>/review-model records what
+# was requested and, after the run, what the Claude transcript says it used.
 #
 # Stdout:
 #   First (and only) machine-readable line: STATE-DIR <abs-path>
 #
 # Stderr:
-#   Dispatch diagnostics + last 80 lines of claude combined stdout+stderr
+#   Dispatch diagnostics + last 80 lines of claude combined stdout+stderr.
+#   MODEL-MISMATCH when the run did not use the registry's model or effort.
 #
 # Exit code:
 #   Propagates claude's exit code unchanged.
 #   Returns 2 on usage errors (missing/invalid args) or self-review refusal.
-#   Returns 70 when preflight/postflight rejects an unusable review, 124 when
-#   preflight times out, and 127 when Claude is unavailable.
+#   Returns 70 when preflight/postflight rejects an unusable review or the
+#   registry cannot name the reviewer model, 124 when preflight times out,
+#   and 127 when Claude is unavailable.
 
 set -u
 
@@ -216,6 +224,93 @@ else
     exit 127
 fi
 
+# Reviewer model and effort. The registry names both; no literal lives here,
+# and a resolver that cannot answer stops the dispatch instead of running on a
+# stale default. Python comes from ANYWHERE_AGENTS_PYTHON, then the _python
+# wrapper beside the resolver (which skips the Windows Store shim), then
+# python3 or python on PATH.
+SCRIPT_DIR="${IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR:-$(dirname -- "$0")}"
+# Walk up from this script to the resolver. A source repo and
+# .agent-config/repo hold it at <A>/scripts/; a consumer runs the copy that
+# bootstrap deploys under <project>/.claude/skills/, so there the resolver is
+# <project>/.agent-config/repo/scripts/. The registry must sit beside it.
+find_agent_models() {
+    _am_dir=$(cd -- "$1" 2>/dev/null && pwd -P) || return 1
+    while :; do
+        if [ -f "$_am_dir/scripts/agent_models.py" ] && [ -f "$_am_dir/user/agent-models.json" ]; then
+            printf '%s\n' "$_am_dir/scripts/agent_models.py"
+            return 0
+        fi
+        if [ -f "$_am_dir/.agent-config/repo/scripts/agent_models.py" ] \
+            && [ -f "$_am_dir/.agent-config/repo/user/agent-models.json" ]; then
+            printf '%s\n' "$_am_dir/.agent-config/repo/scripts/agent_models.py"
+            return 0
+        fi
+        _am_parent=$(dirname -- "$_am_dir")
+        [ "$_am_parent" = "$_am_dir" ] && return 1
+        _am_dir=$_am_parent
+    done
+}
+AGENT_MODELS_PY=$(find_agent_models "$SCRIPT_DIR" || true)
+AM_CMD=()
+if [ -n "$AGENT_MODELS_PY" ] && [ -f "$AGENT_MODELS_PY" ]; then
+    # A named interpreter is authoritative, as in dispatch-codex and _python: a
+    # broken one stops the dispatch instead of falling through to another.
+    if [ -n "${ANYWHERE_AGENTS_PYTHON:-}" ]; then
+        if [ -x "$ANYWHERE_AGENTS_PYTHON" ]; then
+            AM_CMD=("$ANYWHERE_AGENTS_PYTHON" "$AGENT_MODELS_PY")
+        fi
+    elif [ -f "$(dirname -- "$AGENT_MODELS_PY")/_python" ]; then
+        AM_CMD=("${BASH:-bash}" "$(dirname -- "$AGENT_MODELS_PY")/_python" "$AGENT_MODELS_PY")
+    elif command -v python3 >/dev/null 2>&1; then
+        AM_CMD=(python3 "$AGENT_MODELS_PY")
+    elif command -v python >/dev/null 2>&1; then
+        AM_CMD=(python "$AGENT_MODELS_PY")
+    fi
+fi
+
+REVIEW_MODEL=""
+REVIEW_EFFORT=""
+REGISTRY_WHY="scripts/agent_models.py or a Python interpreter was not found"
+if [ "${#AM_CMD[@]}" -gt 0 ]; then
+    REGISTRY_WHY="the resolver did not answer"
+    if REGISTRY_ROW=$(${AM_CMD[@]+"${AM_CMD[@]}"} resolve --family claude --role reviewer 2> "$STATE_DIR/registry-error"); then
+        read -r REVIEW_MODEL REVIEW_EFFORT <<< "$REGISTRY_ROW"
+    fi
+    if [ -s "$STATE_DIR/registry-error" ]; then
+        REGISTRY_WHY=$(tr '\n' ' ' < "$STATE_DIR/registry-error")
+    else
+        rm -f -- "$STATE_DIR/registry-error"
+    fi
+fi
+case "$REVIEW_MODEL" in ''|*[!A-Za-z0-9._:/-]*) REVIEW_MODEL="" ;; esac
+case "$REVIEW_EFFORT" in ''|*[!A-Za-z0-9._:/-]*) REVIEW_EFFORT="" ;; esac
+if [ -z "$REVIEW_MODEL" ] || [ -z "$REVIEW_EFFORT" ]; then
+    printf '%s\n' \
+        "dispatch-claude: cannot read the reviewer model and effort from the registry (user/agent-models.json, resolved by scripts/agent_models.py): ${REGISTRY_WHY}" \
+        "Fix the registry or the Python setup (see the agent-models skill). Refusing to spend a review round." \
+        > "$STATE_DIR/tail"
+    cat "$STATE_DIR/tail" >&2
+    exit 70
+fi
+printf 'model=%s source=registry effort=%s\n' "$REVIEW_MODEL" "$REVIEW_EFFORT" > "$STATE_DIR/review-model"
+
+# A fresh session id lets the run be read back afterwards: the Claude
+# transcript for that id records the model and effort the run really used.
+new_uuid() {
+    local raw
+    if command -v uuidgen >/dev/null 2>&1 && raw=$(uuidgen 2>/dev/null) && [ -n "$raw" ]; then
+        printf '%s\n' "$raw" | tr '[:upper:]' '[:lower:]'
+    elif [ -r /proc/sys/kernel/random/uuid ]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        raw=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        printf '%s-%s-4%s-%x%s-%s\n' "${raw:0:8}" "${raw:8:4}" "${raw:13:3}" \
+            "$(( 0x${raw:16:1} & 3 | 8 ))" "${raw:17:3}" "${raw:20:12}"
+    fi
+}
+SESSION_ID=$(new_uuid)
+
 # Refuse to spend a review round when the official CLI cannot authenticate.
 # `claude auth status` does not invoke a model. API-key, gateway, and hosted-
 # provider modes use an availability check because their credentials are not
@@ -371,12 +466,14 @@ printf '%s\n' '{"mcpServers":{}}' > "$EMPTY_MCP_CONFIG_FILE"
 # succeeds, so experiments can execute without touching the source checkout.
 # No `--sandbox` flag (that is Codex-only).
 #
-# `--effort max` requests max review effort. `--setting-sources project,local`
-# keeps user settings and their env-block effort out of the reviewer. Without
-# the flag or another applicable setting, it runs at the model's default
-# effort, which can sit below max.
-# CLAUDE_CODE_EFFORT_LEVEL in the environment, or an effort cap, can still
-# change the applied level.
+# `--model` and `--effort` carry the registry's choice. `--setting-sources
+# project,local` keeps user settings out of the reviewer. CLAUDE_CODE_EFFORT_LEVEL
+# outranks `--effort` and a Claude parent passes its own value down, so the
+# child environment sets it to the resolved effort. `--session-id` names the
+# transcript that the actual-model check reads after the run. Each flag starts
+# with `--`, which also ends the variadic `--tools` and `--add-dir` lists
+# before it; the prompt arrives on stdin, so nothing positional can be taken
+# into them.
 #
 # `--bare` is OPT-IN via CLAUDE_DISPATCH_BARE=1. Claude Code 2.1.153 documents
 # bare mode as API-key/apiKeyHelper auth only: OAuth and keychain auth are
@@ -393,10 +490,13 @@ CLAUDE_BARE_ARGS=()
 if [ "${CLAUDE_DISPATCH_BARE:-}" = "1" ]; then
     CLAUDE_BARE_ARGS=(--bare)
 fi
+CLAUDE_SESSION_ARGS=()
+if [ -n "$SESSION_ID" ]; then
+    CLAUDE_SESSION_ARGS=(--session-id "$SESSION_ID")
+fi
 
 # Start stall-watch only for the full review. Bash redirects both output streams
 # to files as Claude runs, so tail growth is a live liveness signal.
-SCRIPT_DIR="${IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR:-$(dirname -- "$0")}"
 STALL_WATCH="${SCRIPT_DIR}/stall-watch.sh"
 STALL_WATCH_PID=""
 if [ -x "$STALL_WATCH" ]; then
@@ -407,18 +507,34 @@ unset IMPLEMENT_REVIEW_DISPATCH_REEXEC IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR
 
 (
     cd "$VALIDATION_DIR" || exit 2
-    GIT_PAGER=cat "$CLAUDE_CMD" -p \
+    CLAUDE_CODE_EFFORT_LEVEL="$REVIEW_EFFORT" GIT_PAGER=cat "$CLAUDE_CMD" -p \
         --permission-mode bypassPermissions \
         --tools default \
         --add-dir "$VALIDATION_DIR" \
         --setting-sources project,local \
-        --effort max \
+        --model "$REVIEW_MODEL" \
+        --effort "$REVIEW_EFFORT" \
+        ${CLAUDE_SESSION_ARGS[@]+"${CLAUDE_SESSION_ARGS[@]}"} \
         --strict-mcp-config --mcp-config "$EMPTY_MCP_CONFIG_FILE" \
         ${CLAUDE_BARE_ARGS[@]+"${CLAUDE_BARE_ARGS[@]}"} \
         --output-format text \
         < "$RELAY_PROMPT_FILE" > "$STATE_DIR/tail" 2> "$STATE_DIR/tail.stderr-tmp"
 )
 CLAUDE_EXIT=$?
+
+# Effective, not configured: read what the run itself reports and append it to
+# the record. A mismatch also prints MODEL-MISMATCH on stderr (from the
+# resolver), and a transcript that cannot be found prints MODEL-UNVERIFIED.
+ACTUAL_LINE=""
+if [ "${#AM_CMD[@]}" -gt 0 ] && [ -n "$SESSION_ID" ]; then
+    ACTUAL_LINE=$(${AM_CMD[@]+"${AM_CMD[@]}"} actual --family claude --session-id "$SESSION_ID" \
+        --expect-model "$REVIEW_MODEL" --expect-effort "$REVIEW_EFFORT") || ACTUAL_LINE=""
+fi
+if [ -z "$ACTUAL_LINE" ]; then
+    ACTUAL_LINE="actual=unknown status=unknown"
+    echo "dispatch-claude: MODEL-UNVERIFIED the run could not be read back; requested ${REVIEW_MODEL} ${REVIEW_EFFORT}" >&2
+fi
+printf '%s\n' "$ACTUAL_LINE" >> "$STATE_DIR/review-model"
 
 # Claude text mode has no structured terminal-result frame. Keep publication
 # behind process success, then validate a same-directory candidate and rename it

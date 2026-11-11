@@ -17,6 +17,11 @@ Claude-specific contract (vs Codex / Copilot):
   * flags: `--permission-mode bypassPermissions --tools default
     --add-dir <staged-snapshot> --output-format text`, with `--bare` opt-in
     via `CLAUDE_DISPATCH_BARE=1`;
+  * model and effort come from the registry (a tmp registry through
+    AGENT_MODELS_FILE here), as `--model`, `--effort`, and
+    CLAUDE_CODE_EFFORT_LEVEL in the child environment; `--session-id` lets the
+    dispatcher read back what the run used and record it in
+    `<state-dir>/review-model`;
   * Claude prints the complete review to stdout; dispatch-claude writes that
     stdout to `Review-Claude-Code.md`;
   * NO `--sandbox` flag (Codex-only);
@@ -53,6 +58,9 @@ import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on W
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import agent_models  # noqa: E402  the resolver the dispatchers read the registry through
+
 SCRIPTS_DIR = ROOT / "skills" / "implement-review" / "scripts"
 DISPATCH_SH = SCRIPTS_DIR / "dispatch-claude.sh"
 DISPATCH_PS1 = SCRIPTS_DIR / "dispatch-claude.ps1"
@@ -86,6 +94,10 @@ Behavior driven by env vars (all optional):
   MOCK_CLAUDE_EXIT    integer exit code to return (default 0)
   MOCK_CLAUDE_STDOUT  text written to stdout (default "mock-claude: stdout\n")
   MOCK_CLAUDE_STDERR  text written to stderr (default "mock-claude: stderr\n")
+  MOCK_CLAUDE_ACTUAL_MODEL / MOCK_CLAUDE_ACTUAL_EFFORT
+                      when the model is set, write a session transcript for
+                      the --session-id argument under CLAUDE_CONFIG_DIR, as
+                      Claude Code does, so the actual-model check can read it
 """
 import json
 import os
@@ -96,6 +108,25 @@ os.makedirs(log_dir, exist_ok=True)
 
 with open(os.path.join(log_dir, "args"), "w", encoding="utf-8") as f:
     f.write(json.dumps(sys.argv[1:]))
+
+# The child environment is part of the contract: CLAUDE_CODE_EFFORT_LEVEL
+# outranks --effort, so the dispatcher must set it itself.
+with open(os.path.join(log_dir, "effort-env"), "w", encoding="utf-8") as f:
+    f.write(os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", "<unset>"))
+
+_actual_model = os.environ.get("MOCK_CLAUDE_ACTUAL_MODEL")
+_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+if _actual_model and _config_dir and "--session-id" in sys.argv:
+    _sid = sys.argv[sys.argv.index("--session-id") + 1]
+    _project = os.path.join(_config_dir, "projects", "mock-project")
+    os.makedirs(_project, exist_ok=True)
+    with open(os.path.join(_project, _sid + ".jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "message": {"content": "prompt"}}) + "\n")
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"model": _actual_model},
+            "effort": os.environ.get("MOCK_CLAUDE_ACTUAL_EFFORT", ""),
+        }) + "\n")
 
 with open(os.path.join(log_dir, "cwd"), "w", encoding="utf-8") as f:
     f.write(os.getcwd())
@@ -165,6 +196,38 @@ def _parse_state_dir(stdout: str) -> Path:
     return Path(match.group(1).strip())
 
 
+# A tmp registry keeps these tests independent of the live values: they check
+# that the dispatcher follows whatever the registry says, not what it says today.
+REGISTRY_NAME = "agent-models.json"
+
+
+def _registry_payload(claude=("fixture-claude", "medium"), reviewer=None) -> dict:
+    payload = {
+        "schema": 1,
+        "families": {
+            "claude": {"model": claude[0], "effort": claude[1]},
+            "codex": {"model": "fixture-codex", "effort": "low"},
+            "agy": {"model": "fixture-agy", "effort": "high"},
+        },
+        "roles": {},
+    }
+    if reviewer:
+        payload["roles"]["reviewer"] = {"claude": {"model": reviewer[0], "effort": reviewer[1]}}
+    return payload
+
+
+def _write_registry(directory: Path, **kwargs) -> Path:
+    path = directory / REGISTRY_NAME
+    path.write_text(json.dumps(_registry_payload(**kwargs)), encoding="utf-8")
+    return path
+
+
+def _registry_reviewer(directory: Path) -> tuple[str, str]:
+    """The reviewer model and effort the tmp registry resolves to."""
+    row = agent_models.resolve("claude", "reviewer", agent_models.load(directory / REGISTRY_NAME))
+    return row["model"], row["effort"]
+
+
 class _DispatchContractMixin:
     """Shared assertions; concrete subclasses pick the shell."""
 
@@ -226,6 +289,13 @@ class _DispatchContractMixin:
         # Make any background stall-watch spawned by dispatch die quickly.
         env.setdefault("STALL_POLL_INTERVAL_SECONDS", "1")
         env.setdefault("STALL_THRESHOLD_SECONDS", "999999")
+        # The tmp registry (see _fresh_fixture) and a private Claude config
+        # dir, so a run reads neither the live registry nor real transcripts.
+        # A parent's own effort setting must not hide the dispatcher's.
+        env["AGENT_MODELS_FILE"] = str(cwd / REGISTRY_NAME)
+        env["CLAUDE_CONFIG_DIR"] = str(cwd / "claude-config")
+        env.pop("MOCK_CLAUDE_ACTUAL_MODEL", None)
+        env.pop("MOCK_CLAUDE_ACTUAL_EFFORT", None)
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -251,6 +321,7 @@ class _DispatchContractMixin:
             "REVIEW PROMPT body\nLine 2 content\nLine 3 content\n",
             encoding="utf-8",
         )
+        _write_registry(tmpdir)
         return claude_bin, prompt, log_dir
 
     def _read_args(self, log_dir: Path) -> list[str]:
@@ -575,10 +646,49 @@ class _DispatchContractMixin:
             self.assertGreater(len(args), idx + 1)
             self.assertEqual(args[idx + 1], "project,local")
 
-    def test_claude_invoked_with_max_effort(self) -> None:
-        """User settings are excluded, so without `--effort` or another
-        applicable setting the reviewer runs at the model's own default
-        effort, which can sit below max."""
+    def test_claude_invoked_with_the_registry_model_and_effort(self) -> None:
+        """The registry decides the reviewer: `--model` and `--effort` carry
+        its row, and no value is written in the dispatcher. Two registries
+        give two different command lines."""
+        for claude_row, reviewer_row in (
+            (("fixture-claude", "medium"), None),
+            (("fixture-claude", "medium"), ("fixture-reviewer", "xhigh")),
+        ):
+            with self.subTest(reviewer=reviewer_row):
+                with _temp_dir() as td:
+                    tmpdir = Path(td)
+                    claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+                    _write_registry(tmpdir, claude=claude_row, reviewer=reviewer_row)
+                    want_model, want_effort = reviewer_row or claude_row
+                    result = self._run_dispatch(
+                        tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = self._read_args(log_dir)
+                    pairs = list(zip(args, args[1:]))
+                    self.assertIn(("--model", want_model), pairs, args)
+                    self.assertIn(("--effort", want_effort), pairs, args)
+                    self.assertNotIn(("--effort", "max"), pairs, args)
+
+    def test_effort_env_in_the_child_is_the_registry_effort(self) -> None:
+        """CLAUDE_CODE_EFFORT_LEVEL outranks `--effort` and a Claude parent
+        passes its own value down, so the dispatcher sets it in the child."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            _model, effort = _registry_reviewer(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={"CLAUDE_CODE_EFFORT_LEVEL": "max"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            seen = (log_dir / "effort-env").read_text(encoding="utf-8")
+            self.assertEqual(seen, effort,
+                             "the parent's effort must not reach the reviewer")
+
+    def test_session_id_is_a_uuid_and_the_prompt_survives_the_flag_order(self) -> None:
+        """`--session-id` is how the run is read back. The variadic `--tools`
+        and `--add-dir` must not swallow it or the prompt, which stays on stdin."""
         with _temp_dir() as td:
             tmpdir = Path(td)
             claude, prompt, log_dir = self._fresh_fixture(tmpdir)
@@ -587,8 +697,89 @@ class _DispatchContractMixin:
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             args = self._read_args(log_dir)
-            self.assertIn(("--effort", "max"), list(zip(args, args[1:])),
-                          f"claude must receive --effort max: {args}")
+            self.assertIn("--session-id", args, args)
+            self.assertRegex(
+                args[args.index("--session-id") + 1],
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            )
+            self.assertEqual(args[args.index("--tools") + 1], "default")
+            self.assertIn("REVIEW PROMPT body", self._read_stdin(log_dir))
+
+    def test_review_model_records_the_request_then_the_actual(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            model, effort = _registry_reviewer(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={"MOCK_CLAUDE_ACTUAL_MODEL": model,
+                           "MOCK_CLAUDE_ACTUAL_EFFORT": effort},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = (_parse_state_dir(result.stdout) / "review-model").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(
+                record,
+                [f"model={model} source=registry effort={effort}",
+                 f"actual={model} {effort} status=ok"],
+            )
+            self.assertNotIn("MODEL-MISMATCH", result.stderr)
+            self.assertNotIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_a_run_on_another_model_is_flagged(self) -> None:
+        """Configured is not effective: when the transcript names another
+        model or effort, the record and stderr say so."""
+        for actual_model, actual_effort in (("other-model", None), (None, "low")):
+            with self.subTest(model=actual_model, effort=actual_effort):
+                with _temp_dir() as td:
+                    tmpdir = Path(td)
+                    claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+                    model, effort = _registry_reviewer(tmpdir)
+                    result = self._run_dispatch(
+                        tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+                        extra_env={
+                            "MOCK_CLAUDE_ACTUAL_MODEL": actual_model or model,
+                            "MOCK_CLAUDE_ACTUAL_EFFORT": actual_effort or effort,
+                        },
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("MODEL-MISMATCH", result.stderr)
+                    record = (_parse_state_dir(result.stdout) / "review-model").read_text(
+                        encoding="utf-8"
+                    )
+                    self.assertIn("status=mismatch", record)
+
+    def test_a_run_that_cannot_be_read_back_is_unverified(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = (_parse_state_dir(result.stdout) / "review-model").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("actual=unknown status=unknown", record)
+            self.assertIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_a_registry_that_does_not_answer_stops_the_dispatch(self) -> None:
+        """No literal to fall back on: the dispatcher names the registry and
+        refuses to spend a round."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={"AGENT_MODELS_FILE": str(tmpdir / "no-such-registry.json")},
+            )
+            self.assertEqual(result.returncode, 70, result.stderr)
+            self.assertIn("registry", result.stderr)
+            self.assertIn("agent-models", result.stderr)
+            self.assertFalse((log_dir / "args").exists(),
+                             "claude must not run without a registry answer")
+            self.assertFalse((tmpdir / "Review-Claude-Code.md").exists())
 
     def test_claude_invoked_with_empty_strict_mcp_config(self) -> None:
         """Global Codex MCP must not be auto-started inside the Claude backend."""
@@ -856,6 +1047,8 @@ class DispatchClaudePowerShellTests(_DispatchContractMixin, unittest.TestCase):
             env["MOCK_CLAUDE_LOG"] = str(log_dir)
             env["MOCK_CLAUDE_EXIT"] = "0"
             env["IMPLEMENT_REVIEW_ORCHESTRATOR"] = "codex"
+            env["AGENT_MODELS_FILE"] = str(review_cwd / REGISTRY_NAME)
+            env["CLAUDE_CONFIG_DIR"] = str(review_cwd / "claude-config")
             env.pop("CLAUDECODE", None)
             env["TMPDIR"] = str(base)
             env["TEMP"] = str(base)
@@ -921,6 +1114,19 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             DISPATCH_SH.read_text(encoding="utf-8"),
             DISPATCH_PS1.read_text(encoding="utf-8"),
         ]
+
+    def test_no_model_or_effort_literal_and_the_registry_is_consulted(self) -> None:
+        """Both dispatchers resolve at run time. The drift scan finds no
+        model or effort literal in either, and each reads the registry
+        through scripts/agent_models.py and records the actual run."""
+        for path, text in zip((DISPATCH_SH, DISPATCH_PS1), self._both()):
+            with self.subTest(path=path.name):
+                hits = [line for _, _, line in agent_models.scan_text(text)]
+                self.assertEqual(hits, [], f"{path.name} names a model or effort literal")
+                self.assertIn("agent_models.py", text)
+                self.assertIn("--session-id", text)
+                self.assertIn("CLAUDE_CODE_EFFORT_LEVEL", text)
+                self.assertIn("review-model", text)
 
     def test_snapshot_export_raises_the_windows_path_limit(self) -> None:
         # A state-dir prefix of 114 characters plus a long index path crosses

@@ -23,7 +23,7 @@ Runs the shell bootstrap from the upstream repo in the current directory:
 
 - Fetches `AGENTS.md` and replaces the local copy
 - Sparse-clones the upstream repo into `.agent-config/`
-- Syncs the six shipped skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`) and their Claude Code command pointers. Completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS; its bundled export script is Windows-only.
+- Syncs the seven shipped skills (`implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`, `agent-models`) and their Claude Code command pointers. Completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS; its bundled export script is Windows-only.
 - Deep-merges project-level `.claude/settings.json`
 - Deploys the safety guard hook to `~/.claude/hooks/guard.py` and the Claude Max + Codex quota statusLine to `~/.claude/statusline.py`, and merges user-level permissions
 - Adds `.agent-config/` to `.gitignore`

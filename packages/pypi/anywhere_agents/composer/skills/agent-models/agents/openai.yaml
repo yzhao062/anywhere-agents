@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Models"
+  short_description: "Show, check, or change the model and effort each agent role runs on"
+  default_prompt: "Use $agent-models to show, check, or change the model and effort every agent role runs on (interactive sessions, /vet reviewers, review panels, audits, Claude subagents and Workflow agents, prun workers). One registry, user/agent-models.json, holds the values and scripts/agent_models.py resolves them; nothing else names a concrete model. Look for the skill at skills/agent-models/SKILL.md first, then .claude/skills/agent-models/SKILL.md, then .agent-config/repo/skills/agent-models/SKILL.md. Run the resolver's show and doctor commands before answering which model something runs on, and its verify command before claiming a change took effect."

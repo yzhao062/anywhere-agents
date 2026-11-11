@@ -7,7 +7,10 @@ the seven banner lines), and the acceptance rule that decides between the
 report and the fixed fallback banner. Field collectors that shell out
 (``claude --version``, ``codex --version``) are patched so the suite is
 hermetic; the home directory is redirected so a developer's real
-``~/.claude`` and ``~/.codex`` never enter a measurement.
+``~/.claude`` and ``~/.codex`` never enter a measurement. The model and effort
+the banner compares against come from a temporary registry
+(``AGENT_MODELS_FILE``), so no expectation here depends on the live values in
+``user/agent-models.json``.
 """
 from __future__ import annotations
 
@@ -47,6 +50,29 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+# A registry for the banner tests. The names are invented on purpose: the live
+# registry changes with the maintainer's choices and the tests must not.
+# The Codex model has to look like a GPT model because the banner also checks
+# the Codex model generation against the CLI floor.
+TEST_REGISTRY = {
+    "schema": 1,
+    "families": {
+        "claude": {"model": "claude-test-1", "effort": "high"},
+        "codex": {"model": "gpt-9-test", "effort": "medium"},  # agent-models: allow
+        "agy": {"model": "testy-2-stem", "effort": "high", "fallback_model": "testy-1-fast"},
+    },
+    "roles": {"worker": {"claude": {"model": "claude-test-worker"}}},
+}
+AGY_DISPLAY = "Testy 2 Stem (High)"
+AGY_FALLBACK_DISPLAY = "Testy 1 Fast (High)"
+_KEEP = object()
+
+
+def _other(value: str, pool=("low", "medium", "high", "xhigh")) -> str:
+    """A value from ``pool`` that differs from ``value``."""
+    return next(item for item in pool if item != value)
+
+
 def _ledger(run_id: str = "111-222", completed: bool = True, last_phase: str = "finalize",
             steps=None) -> str:
     return json.dumps({
@@ -76,11 +102,13 @@ class _HermeticCase(unittest.TestCase):
         # network when a test launches the real hook.
         _write(self.home / ".claude" / "hooks" / "version-cache.json",
                json.dumps({"checked_at": time.time(), "claude_latest": "2.1.0", "codex_latest": "0.150.0"}))
-        _write(self.home / ".claude" / "settings.json",
-               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max"}}))
-        _write(self.home / ".codex" / "config.toml",
-               'model = "gpt-6-astra"\nmodel_reasoning_effort = "xhigh"\nservice_tier = "standard"\n'
-               "project_doc_max_bytes = 262144\n\n[features]\nfast_mode = false\n")
+        self.registry_file = self.tmp / "agent-models.json"
+        self.set_registry(TEST_REGISTRY)
+        # Every tool is configured the way the registry says, so a banner that
+        # reads all clear means the comparison ran and found no difference.
+        self.write_claude_settings()
+        self.write_codex()
+        self.write_agy()
         (self.root / ".agent-config").mkdir(parents=True)
         _write(self.root / ".agent-config" / "bootstrap.sh", "# marker\n")
         # The lock records the seeded defaults' identity, which is what a
@@ -92,15 +120,18 @@ class _HermeticCase(unittest.TestCase):
             "aa-core-skills": {"source_url": "bundled:aa", "requested_ref": "bundled",
                                "resolved_commit": "bundled"},
         }}))
-        env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
-        for name in ("DISABLE_AUTOUPDATER", "CLAUDE_CODE_EFFORT_LEVEL", "AGENT_CONFIG_HOST",
-                     "XDG_CONFIG_HOME", "APPDATA", "AGENT_STYLE_HOOK", "AGENT_CONFIG_GATES"):
+        env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+               "AGENT_MODELS_FILE": str(self.registry_file)}
+        cleared = ("DISABLE_AUTOUPDATER", "CLAUDE_CODE_EFFORT_LEVEL", "AGENT_CONFIG_HOST",
+                   "XDG_CONFIG_HOME", "APPDATA", "AGENT_STYLE_HOOK", "AGENT_CONFIG_GATES",
+                   "ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "CODEX_HOME",
+                   "ANTIGRAVITY_SETTINGS_FILE", "CLAUDE_CONFIG_DIR")
+        for name in cleared:
             env[name] = ""
         self._env = mock.patch.dict(os.environ, env)
         self._env.start()
         self.addCleanup(self._env.stop)
-        for name in ("DISABLE_AUTOUPDATER", "CLAUDE_CODE_EFFORT_LEVEL", "AGENT_CONFIG_HOST",
-                     "XDG_CONFIG_HOME", "APPDATA", "AGENT_STYLE_HOOK", "AGENT_CONFIG_GATES"):
+        for name in cleared:
             os.environ.pop(name, None)
         versions = {"claude": "2.1.0", "codex": "0.150.0"}
         self._versions = mock.patch.object(render_banner, "_run_version", side_effect=versions.get)
@@ -111,6 +142,56 @@ class _HermeticCase(unittest.TestCase):
         self._style = mock.patch.object(render_banner, "agent_style_installed", return_value="0.7.0")
         self._style.start()
         self.addCleanup(self._style.stop)
+
+    # The registry rows, as the banner should see them.
+    @property
+    def registry(self) -> dict:
+        return self._registry["families"]
+
+    def set_registry(self, data: dict) -> None:
+        self._registry = data
+        _write(self.registry_file, json.dumps(data))
+
+    def write_claude_settings(self, effort=_KEEP, model=_KEEP, subagent=_KEEP, **env) -> None:
+        """~/.claude/settings.json; a default follows the registry, None leaves the key out."""
+        want = self.registry["claude"]
+        worker = self._registry["roles"]["worker"]["claude"]
+        values = {
+            "effort": want["effort"] if effort is _KEEP else effort,
+            "model": want["model"] if model is _KEEP else model,
+            "subagent": worker["model"] if subagent is _KEEP else subagent,
+        }
+        settings = {"env": dict(env)}
+        if values["effort"] is not None:
+            settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"] = values["effort"]
+        if values["subagent"] is not None:
+            settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = values["subagent"]
+        if values["model"] is not None:
+            settings["model"] = values["model"]
+        _write(self.home / ".claude" / "settings.json", json.dumps(settings))
+
+    def write_codex(self, model=_KEEP, effort=_KEEP, extra: str = "") -> None:
+        """~/.codex/config.toml; a default follows the registry."""
+        want = self.registry["codex"]
+        model = want["model"] if model is _KEEP else model
+        effort = want["effort"] if effort is _KEEP else effort
+        head = (extra if extra else "")
+        if model is not None:
+            head += 'model = "%s"\n' % model
+        if effort is not None:
+            head += 'model_reasoning_effort = "%s"\n' % effort
+        _write(self.home / ".codex" / "config.toml",
+               head + 'service_tier = "standard"\nproject_doc_max_bytes = 262144\n\n'
+               "[features]\nfast_mode = false\n")
+
+    def write_agy(self, model=AGY_DISPLAY) -> None:
+        """The Antigravity settings file; None removes it."""
+        path = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        if model is None:
+            if path.exists():
+                path.unlink()
+            return
+        _write(path, json.dumps({"model": model} if model else {}))
 
 
 class MetadataContractTests(unittest.TestCase):
@@ -218,8 +299,10 @@ class ConsumerRenderTests(_HermeticCase):
         self.assertEqual(report[1:], lines)
         self.assertEqual(lines[0], render_banner.TITLE)
         self.assertTrue(lines[1].endswith("OS: %s" % sys.platform))
-        self.assertIn("Claude Code: 2.1.0 (auto-update: on) · <model> · effort=max", lines[2])
-        self.assertIn("Codex: 0.150.0 · gpt-6-astra · xhigh · standard · fast_mode=false", lines[3])
+        self.assertIn("Claude Code: 2.1.0 (auto-update: on) · <model> · effort=%s" % self.registry["claude"]["effort"],
+                      lines[2])
+        self.assertIn("Codex: 0.150.0 · %s · %s · standard · fast_mode=false"
+                      % (self.registry["codex"]["model"], self.registry["codex"]["effort"]), lines[3])
         self.assertIn("Hooks: PreToolUse guard.py (agent-style 0.7.0), SessionStart session_bootstrap.py", lines[5])
         self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
         meta = render_banner.parse_metadata("\n".join(report))
@@ -299,8 +382,7 @@ class ConsumerRenderTests(_HermeticCase):
     def test_the_advisory_switch_turns_the_check_off(self) -> None:
         _write(self.root / ".agent-config" / "last-run.json", _ledger())
         _write(self.root / "AGENTS.md", "<!-- rule-pack:agent-style:begin version=v0.7.0 sha256=abc -->\n")
-        _write(self.home / ".claude" / "settings.json",
-               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "AGENT_STYLE_HOOK": "off"}}))
+        self.write_claude_settings(AGENT_STYLE_HOOK="off")
         with mock.patch.object(render_banner, "agent_style_installed", return_value=None):
             _, lines = render_banner.render_consumer(str(self.root), None, 0)
         self.assertIn("PreToolUse guard.py (agent-style advisory off)", lines[5])
@@ -316,8 +398,7 @@ class ConsumerRenderTests(_HermeticCase):
             _, lines = render_banner.render_consumer(str(self.root), None, 0)
         self.assertIn("PreToolUse guard.py (agent-style advisory off)", lines[5])
         self.assertTrue(lines[6].endswith("Session check: all clear"), lines[6])
-        _write(self.home / ".claude" / "settings.json",
-               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "AGENT_CONFIG_GATES": "0"}}))
+        self.write_claude_settings(AGENT_CONFIG_GATES="0")
         with mock.patch.object(render_banner, "agent_style_installed", return_value="0.7.0"), \
                 mock.patch.dict(os.environ, {"AGENT_STYLE_HOOK": "on"}):
             _, lines = render_banner.render_consumer(str(self.root), None, 0)
@@ -325,34 +406,25 @@ class ConsumerRenderTests(_HermeticCase):
 
     def test_missing_hooks_and_effort_drift_are_named(self) -> None:
         os.remove(self.home / ".claude" / "hooks" / "guard.py")
-        _write(self.home / ".claude" / "settings.json", json.dumps({"effortLevel": "high"}))
+        drifted = _other(self.registry["claude"]["effort"])
+        # The effortLevel key, not the env entry, carries the drifted value.
+        _write(self.home / ".claude" / "settings.json", json.dumps({
+            "effortLevel": drifted, "model": self.registry["claude"]["model"],
+            "env": {"CLAUDE_CODE_SUBAGENT_MODEL": self._registry["roles"]["worker"]["claude"]["model"]}}))
         _write(self.root / ".agent-config" / "last-run.json", _ledger())
         _, lines = render_banner.render_consumer(str(self.root), None, 0)
         self.assertIn("PreToolUse guard.py missing", lines[5])
         self.assertIn("guard.py missing from ~/.claude/hooks", lines[6])
-        self.assertIn("effort=high", lines[2])
-        self.assertIn("Claude effort is high", lines[6])
-
-    def test_effort_accepts_xhigh_and_max_and_names_xhigh_otherwise(self) -> None:
-        _write(self.root / ".agent-config" / "last-run.json", _ledger())
-        for level in ("xhigh", "max"):
-            _write(self.home / ".claude" / "settings.json",
-                   json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": level}}))
-            _, lines = render_banner.render_consumer(str(self.root), None, 0)
-            self.assertIn("effort=%s" % level, lines[2])
-            self.assertNotIn("Claude effort is", lines[6])
-        _write(self.home / ".claude" / "settings.json",
-               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}))
-        _, lines = render_banner.render_consumer(str(self.root), None, 0)
-        self.assertIn("Claude effort is high; set CLAUDE_CODE_EFFORT_LEVEL=xhigh", lines[6])
+        self.assertIn("effort=%s" % drifted, lines[2])
+        self.assertIn("Claude effort is %s but the registry says %s" % (drifted, self.registry["claude"]["effort"]),
+                      lines[6])
 
     def test_auto_update_off_from_env_block_or_claude_json(self) -> None:
         _write(self.root / ".agent-config" / "last-run.json", _ledger())
-        _write(self.home / ".claude" / "settings.json",
-               json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "DISABLE_AUTOUPDATER": "1"}}))
+        self.write_claude_settings(DISABLE_AUTOUPDATER="1")
         _, lines = render_banner.render_consumer(str(self.root), None, 0)
         self.assertIn("(auto-update: off)", lines[2])
-        _write(self.home / ".claude" / "settings.json", json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": "max"}}))
+        self.write_claude_settings()
         _write(self.home / ".claude.json", json.dumps({"autoUpdates": False}))
         _, lines = render_banner.render_consumer(str(self.root), None, 0)
         self.assertIn("(auto-update: off)", lines[2])
@@ -381,6 +453,235 @@ class ConsumerRenderTests(_HermeticCase):
         self.assertEqual(leftovers, [])
 
 
+class RegistryComparisonTests(_HermeticCase):
+    """The banner compares what each tool is configured to use with the registry.
+
+    The check reads the same inputs the tool reads (the process environment
+    first for Claude Code, then its config file), so a registry that is right
+    while the tool runs on something else shows up as a named difference.
+    """
+
+    def _check(self) -> str:
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        return lines[6]
+
+    def test_a_tool_configured_as_the_registry_says_is_all_clear(self) -> None:
+        self.assertTrue(self._check().endswith("Session check: all clear"))
+
+    def test_claude_effort_drift_names_both_values_and_the_source(self) -> None:
+        want = self.registry["claude"]["effort"]
+        other = _other(want)
+        self.write_claude_settings(effort=other)
+        check = self._check()
+        self.assertIn("Claude effort is %s but the registry says %s (run bootstrap" % (other, want), check)
+        self.assertNotIn("environment", check)
+        # The process environment outranks the settings file. With the file
+        # right, the session itself holds the old value and needs a restart.
+        self.write_claude_settings()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_EFFORT_LEVEL": other}):
+            check = self._check()
+        self.assertIn("Claude effort is %s (from CLAUDE_CODE_EFFORT_LEVEL in the environment) "
+                      "but the registry says %s (restart this session" % (other, want), check)
+        # With the file wrong as well, a restart alone would not help.
+        self.write_claude_settings(effort=other)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_EFFORT_LEVEL": other}):
+            check = self._check()
+        self.assertIn("(from CLAUDE_CODE_EFFORT_LEVEL in the environment) but the registry says %s (run bootstrap"
+                      % want, check)
+
+    def test_claude_config_dir_selects_the_settings_file_that_is_compared(self) -> None:
+        # Claude Code reads its user settings from CLAUDE_CONFIG_DIR when that
+        # is set, so the comparison reads the same file and not ~/.claude.
+        want = self.registry["claude"]["effort"]
+        other = _other(want)
+        elsewhere = self.tmp / "claude-elsewhere"
+        _write(elsewhere / "settings.json", json.dumps({
+            "model": self.registry["claude"]["model"],
+            "env": {"CLAUDE_CODE_EFFORT_LEVEL": other,
+                    "CLAUDE_CODE_SUBAGENT_MODEL": self._registry["roles"]["worker"]["claude"]["model"]},
+        }))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(elsewhere)}):
+            check = self._check()
+        self.assertIn("Claude effort is %s but the registry says %s" % (other, want), check)
+
+    def test_claude_effort_left_at_the_default_is_a_difference(self) -> None:
+        self.write_claude_settings(effort=None)
+        self.assertIn("Claude effort is default but the registry says %s" % self.registry["claude"]["effort"],
+                      self._check())
+
+    def test_claude_model_drift_and_an_unset_model(self) -> None:
+        want = self.registry["claude"]["model"]
+        self.write_claude_settings(model="some-other-model")
+        self.assertIn("Claude model is some-other-model but the registry says %s" % want, self._check())
+        self.write_claude_settings(model=None)
+        self.assertIn("Claude model is not set but the registry says %s" % want, self._check())
+
+    def test_anthropic_model_in_the_environment_outranks_the_settings_file(self) -> None:
+        with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "some-other-model"}):
+            check = self._check()
+        self.assertIn("Claude model is some-other-model (from ANTHROPIC_MODEL in the environment) "
+                      "but the registry says %s (restart this session" % self.registry["claude"]["model"], check)
+
+    def test_a_model_alias_matches_the_full_id_and_a_context_suffix(self) -> None:
+        data = json.loads(json.dumps(TEST_REGISTRY))
+        data["families"]["claude"]["model"] = "sonnet"
+        self.set_registry(data)
+        self.write_claude_settings(model="sonnet[1m]")
+        self.assertTrue(self._check().endswith("all clear"))
+        self.write_claude_settings(model="claude-sonnet-5-5")  # agent-models: allow
+        self.assertTrue(self._check().endswith("all clear"))
+        other_id = "claude-opus-5-5"  # agent-models: allow
+        self.write_claude_settings(model=other_id)
+        self.assertIn("Claude model is %s but the registry says sonnet" % other_id, self._check())
+
+    def test_claude_subagent_model_drift(self) -> None:
+        worker = self._registry["roles"]["worker"]["claude"]["model"]
+        self.write_claude_settings(subagent="some-other-model")
+        self.assertIn("Claude subagent model is some-other-model but the registry says %s" % worker, self._check())
+        self.write_claude_settings(subagent=None)
+        self.assertIn("Claude subagent model is not set but the registry says %s" % worker, self._check())
+
+    def test_claude_not_installed_is_not_compared(self) -> None:
+        self.write_claude_settings(effort=_other(self.registry["claude"]["effort"]), model=None)
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        with mock.patch.object(render_banner, "_run_version", side_effect={"codex": "0.150.0"}.get):
+            _, lines = render_banner.render_consumer(str(self.root), None, 0)
+        self.assertIn("Claude Code: not installed", lines[2])
+        self.assertTrue(lines[6].endswith("all clear"), lines[6])
+
+    def test_codex_model_and_effort_drift(self) -> None:
+        want = self.registry["codex"]
+        self.write_codex(effort=_other(want["effort"]))
+        check = self._check()
+        self.assertIn("Codex reasoning effort is %s but the registry says %s" % (_other(want["effort"]), want["effort"]),
+                      check)
+        self.assertNotIn("Codex model", check)
+        other_id = "gpt-9-other"  # agent-models: allow
+        self.write_codex(model=other_id)
+        self.assertIn("Codex model is %s but the registry says %s" % (other_id, want["model"]), self._check())
+        self.write_codex(model=None, effort=None)
+        check = self._check()
+        self.assertIn("Codex model is not set but the registry says %s" % want["model"], check)
+        self.assertIn("Codex reasoning effort is not set but the registry says %s" % want["effort"], check)
+
+    def test_a_codex_model_provider_other_than_openai_keeps_its_own_model(self) -> None:
+        """agent_models.py sync leaves the model alone there, so the banner must
+        not ask for a change nothing will make; the effort is still compared."""
+        self.write_codex(model="provider-model", effort=_other(self.registry["codex"]["effort"]),
+                         extra='model_provider = "local"\n')
+        check = self._check()
+        self.assertNotIn("Codex model is", check)
+        self.assertIn("Codex reasoning effort is", check)
+
+    def test_codex_home_selects_the_config_file(self) -> None:
+        other_home = self.tmp / "codex-home"
+        _write(other_home / "config.toml", 'model = "%s"\nmodel_reasoning_effort = "%s"\n'
+               % (self.registry["codex"]["model"], _other(self.registry["codex"]["effort"])))
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(other_home)}):
+            self.assertIn("Codex reasoning effort is", self._check())
+
+    def test_agy_model_drift_family_fallback_and_absence(self) -> None:
+        want = self.registry["agy"]
+        slug = "%s-%s" % (want["model"], want["effort"])
+        self.write_agy("Elsewhere 9 Name (High)")
+        self.assertIn("Agy model is Elsewhere 9 Name (High) but the registry says %s" % slug, self._check())
+        # The tier is part of the family: the same model on another effort differs.
+        self.write_agy("Testy 2 Stem (Low)")
+        self.assertIn("Agy model is Testy 2 Stem (Low)", self._check())
+        # A newer version of the same family is what the sync floats to.
+        self.write_agy("Testy 3 Stem (High)")
+        self.assertTrue(self._check().endswith("all clear"))
+        # The fallback family is accepted: sync uses it when the account lacks the first choice.
+        self.write_agy(AGY_FALLBACK_DISPLAY)
+        self.assertTrue(self._check().endswith("all clear"))
+        self.write_agy("")
+        self.assertIn("Agy model is not set but the registry says %s" % slug, self._check())
+        # No settings file means Agy is not in use on this machine.
+        self.write_agy(None)
+        self.assertTrue(self._check().endswith("all clear"))
+
+    def test_antigravity_settings_file_override_is_honored(self) -> None:
+        elsewhere = self.tmp / "agy-settings.json"
+        _write(elsewhere, json.dumps({"model": "Elsewhere 9 Name (High)"}))
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_SETTINGS_FILE": str(elsewhere)}):
+            self.assertIn("Agy model is Elsewhere 9 Name (High)", self._check())
+
+    def test_a_missing_registry_skips_the_comparison_silently(self) -> None:
+        self.write_claude_settings(effort=_other(self.registry["claude"]["effort"]), model=None)
+        self.registry_file.unlink()
+        self.assertTrue(self._check().endswith("all clear"))
+
+    def test_an_unreadable_registry_is_reported_not_skipped(self) -> None:
+        _write(self.registry_file, "{not json")
+        check = self._check()
+        self.assertIn("model registry unusable", check)
+        self.assertNotIn("\n", check)
+
+    def test_a_registry_that_fails_validation_is_reported(self) -> None:
+        data = json.loads(json.dumps(TEST_REGISTRY))
+        data["families"]["claude"]["effort"] = "enormous"
+        self.set_registry(data)
+        self.assertIn("model registry unusable", self._check())
+
+
+class ResolverLocationTests(_HermeticCase):
+    """Where a copy of the renderer finds the resolver and the registry.
+
+    The anywhere-agents wheel ships render_banner.py without agent_models.py
+    and runs it after bootstrap's own render. A copy that finds nothing skips
+    the comparison; the sparse clone bootstrap keeps in the consumer supplies
+    it, so both writers publish the same banner.
+    """
+
+    def _copy_renderer(self) -> Path:
+        scripts = self.tmp / "wheel" / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("render_banner.py", "pack_identity.py"):
+            shutil.copy2(SCRIPTS / name, scripts / name)
+        return scripts / "render_banner.py"
+
+    def _run(self, renderer: Path) -> str:
+        env = dict(os.environ)
+        env.pop("AGENT_MODELS_FILE", None)
+        _write(self.root / ".agent-config" / "last-run.json", _ledger())
+        result = subprocess.run(
+            [sys.executable, str(renderer), "--root", str(self.root), "--stdout"],
+            capture_output=True, encoding="utf-8", errors="replace", env=env, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()[6]
+
+    def test_a_copy_without_the_resolver_skips_the_comparison(self) -> None:
+        self.write_claude_settings(effort=_other(self.registry["claude"]["effort"]), model=None)
+        check = self._run(self._copy_renderer())
+        self.assertNotIn("registry", check)
+        self.assertNotIn("Claude effort is", check)
+
+    def test_the_consumer_sparse_clone_supplies_the_resolver_and_its_registry(self) -> None:
+        repo = self.root / ".agent-config" / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "user").mkdir()
+        shutil.copy2(SCRIPTS / "agent_models.py", repo / "scripts" / "agent_models.py")
+        shutil.copy2(self.registry_file, repo / "user" / "agent-models.json")
+        want = self.registry["claude"]["effort"]
+        self.write_claude_settings(effort=_other(want))
+        check = self._run(self._copy_renderer())
+        self.assertIn("Claude effort is %s but the registry says %s" % (_other(want), want), check)
+
+    def test_the_resolver_beside_the_script_reads_the_default_registry_location(self) -> None:
+        tree = self.tmp / "tree"
+        (tree / "scripts").mkdir(parents=True)
+        (tree / "user").mkdir()
+        for name in ("render_banner.py", "pack_identity.py", "agent_models.py"):
+            shutil.copy2(SCRIPTS / name, tree / "scripts" / name)
+        shutil.copy2(self.registry_file, tree / "user" / "agent-models.json")
+        want = self.registry["claude"]["effort"]
+        self.write_claude_settings(effort=_other(want))
+        check = self._run(tree / "scripts" / "render_banner.py")
+        self.assertIn("but the registry says %s" % want, check)
+
+
 class CheckTests(unittest.TestCase):
     def test_workflow_pins_below_minimum_and_sha_pins(self) -> None:
         tmp = Path(tempfile.mkdtemp(prefix="banner-wf-"))
@@ -403,14 +704,14 @@ class CheckTests(unittest.TestCase):
 
     def test_codex_issues(self) -> None:
         base = {"installed": True, "configured": True, "version": "0.154.0", "latest": "",
-                "model": "gpt-6-astra", "reasoning": "xhigh", "tier": "standard",
+                "model": "gpt-6-astra", "reasoning": "xhigh", "tier": "standard",  # agent-models: allow
                 "fast_mode": False, "project_doc_max_bytes": 262144}
         self.assertEqual(render_banner.codex_issues(base), [])
-        old_model = dict(base, model="gpt-5.5-terra")
+        old_model = dict(base, model="gpt-5.5-terra")  # agent-models: allow
         self.assertIn("older than the GPT-5.6 family", render_banner.codex_issues(old_model)[0])
         old_cli = dict(base, version="0.149.0")
         self.assertIn("below the GPT-6 CLI floor", render_banner.codex_issues(old_cli)[0])
-        old_cli_56 = dict(base, model="gpt-5.6-sol", version="0.143.0")
+        old_cli_56 = dict(base, model="gpt-5.6-sol", version="0.143.0")  # agent-models: allow
         self.assertIn("below the GPT-5.6 CLI floor", render_banner.codex_issues(old_cli_56)[0])
         no_budget = dict(base, project_doc_max_bytes=None)
         self.assertIn("set project_doc_max_bytes = 262144", render_banner.codex_issues(no_budget)[0])
@@ -490,10 +791,10 @@ class CheckTests(unittest.TestCase):
 
     def test_minimal_toml_reader(self) -> None:
         data = render_banner._parse_toml_minimal(
-            '# comment\nmodel = "gpt-6-astra"  # trailing\nproject_doc_max_bytes = 262_144\n'
+            '# comment\nmodel = "model-a"  # trailing\nproject_doc_max_bytes = 262_144\n'
             "approval_policy = 'on-request'\n[features]\nfast_mode = true\n[other]\nx = 1\n"
         )
-        self.assertEqual(data["model"], "gpt-6-astra")
+        self.assertEqual(data["model"], "model-a")
         self.assertEqual(data["project_doc_max_bytes"], 262144)
         self.assertEqual(data["approval_policy"], "on-request")
         self.assertIs(data["features"]["fast_mode"], True)
@@ -503,13 +804,13 @@ class CheckTests(unittest.TestCase):
         """A commented boolean stays a boolean and a commented header still
         opens its table; a `#` inside quotes is part of the string."""
         data = render_banner._parse_toml_minimal(
-            'model = "gpt-6-astra" # the flagship\n'
+            'model = "model-a" # the flagship\n'
             "service_tier = 'stand#ard' # keep the hash\n"
             "[features] # options\n"
             "fast_mode = false # disabled\n"
             "project_doc_max_bytes = 262144 # bytes\n"
         )
-        self.assertEqual(data["model"], "gpt-6-astra")
+        self.assertEqual(data["model"], "model-a")
         self.assertEqual(data["service_tier"], "stand#ard")
         self.assertIs(data["features"]["fast_mode"], False)
         self.assertEqual(data["features"]["project_doc_max_bytes"], 262144)
@@ -522,7 +823,7 @@ class CheckTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="banner-toml-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         path = tmp / "config.toml"
-        _write(path, 'model = "gpt-6-astra"\nmodel = "gpt-5.6-sol"\nproject_doc_max_bytes = 262144\n')
+        _write(path, 'model = "model-a"\nmodel = "model-b"\nproject_doc_max_bytes = 262144\n')
         try:
             import tomllib  # noqa: F401
         except ImportError:
@@ -547,12 +848,12 @@ class CheckTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="banner-toml-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         path = tmp / "config.toml"
-        _write(path, 'model = "gpt-6-astra"\nmodel_reasoning_effort = "xhigh" # floor\n'
+        _write(path, 'model = "model-a"\nmodel_reasoning_effort = "deep" # floor\n'
                      "[features] # table\nfast_mode = false # off\n")
         with mock.patch.dict(sys.modules, {"tomllib": None}):
             data = render_banner.read_toml(str(path))
-        self.assertEqual(data["model"], "gpt-6-astra")
-        self.assertEqual(data["model_reasoning_effort"], "xhigh")
+        self.assertEqual(data["model"], "model-a")
+        self.assertEqual(data["model_reasoning_effort"], "deep")
         self.assertIs(data["features"]["fast_mode"], False)
 
 

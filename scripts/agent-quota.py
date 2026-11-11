@@ -610,7 +610,7 @@ def codex_row():
     if credits.get("has_credits") or _credits_nonzero(bal):
         segs.append(f"credits {_fmt_credits(bal)}" if bal not in (None, "") else "credits")
     # The side-meter tag replaces the configured model name: the row would
-    # otherwise read "gpt-6-astra  5h 100% left" off a Spark bucket.
+    # otherwise show the main model beside the figures of a Spark bucket.
     meter = _codex_meter_label(rl)
     model = f"[{meter}]" if meter else _codex_model()
     body = "   ".join(segs) if segs else "(no windows)"

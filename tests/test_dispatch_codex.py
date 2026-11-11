@@ -34,6 +34,9 @@ import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on W
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import agent_models  # noqa: E402  the resolver the dispatchers read the registry through
+
 SCRIPTS_DIR = ROOT / "skills" / "implement-review" / "scripts"
 DISPATCH_SH = Path(os.environ.get(
     "TEST_DISPATCH_CODEX_SH", SCRIPTS_DIR / "dispatch-codex.sh"
@@ -43,19 +46,38 @@ DISPATCH_PS1 = Path(os.environ.get(
 ))
 GUARD_PS1 = SCRIPTS_DIR / "_codex_guard.ps1"
 
+# A tmp registry keeps these tests independent of the live values: they check
+# that the dispatcher follows whatever the registry says, not what it says today.
+REGISTRY_NAME = "agent-models.json"
+MISSING_REGISTRY_NAME = "no-such-registry.json"
 
-def _policy_codex_model() -> str:
-    """The Codex model named by the `- Codex:` line of AGENTS.md.
 
-    Reviews fall back to it when config.toml names no model, so a model bump
-    edits that line and the fallback in both dispatchers;
-    DispatchMcpIsolationContract fails until the three agree.
-    """
-    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    match = re.search(r"^- Codex: `([^`]+)`", text, re.MULTILINE)
-    if match is None:
-        raise AssertionError("AGENTS.md has no '- Codex: `<model>`' line")
-    return match.group(1)
+def _write_registry(directory: Path, codex=("fixture-codex", "low"), reviewer=None) -> Path:
+    payload = {
+        "schema": 1,
+        "families": {
+            "claude": {"model": "fixture-claude", "effort": "medium"},
+            "codex": {"model": codex[0], "effort": codex[1]},
+            "agy": {"model": "fixture-agy", "effort": "high"},
+        },
+        "roles": {},
+    }
+    if reviewer:
+        payload["roles"]["reviewer"] = {"codex": {"model": reviewer[0], "effort": reviewer[1]}}
+    path = directory / REGISTRY_NAME
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _registry_reviewer(directory: Path) -> tuple[str, str]:
+    """The reviewer model and effort the tmp registry resolves to."""
+    row = agent_models.resolve("codex", "reviewer", agent_models.load(directory / REGISTRY_NAME))
+    return row["model"], row["effort"]
+
+
+def _codex_header(model: str, effort: str) -> str:
+    """The lines `codex exec` prints on stderr before it starts working."""
+    return f"model: {model}\nprovider: openai\nreasoning effort: {effort}\n"
 
 # A wait sized on an idle machine has failed under load three times in two
 # releases, most recently on this file in both repositories on one push,
@@ -245,6 +267,13 @@ class _DispatchContractMixin:
         empty_codex_home = cwd / ".empty-codex-home"
         empty_codex_home.mkdir(exist_ok=True)
         env["CODEX_HOME"] = str(empty_codex_home)
+        # The tmp registry (see _fresh_fixture), read by a known interpreter,
+        # and no per-run override unless the test sets one in extra_env.
+        env["AGENT_MODELS_FILE"] = str(cwd / REGISTRY_NAME)
+        env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+        for name in ("CODEX_DISPATCH_MODEL", "CODEX_DISPATCH_REASONING",
+                     "CODEX_DISPATCH_ISOLATE_MCP"):
+            env.pop(name, None)
         if extra_env:
             for k, v in extra_env.items():
                 if v is None:
@@ -273,6 +302,7 @@ class _DispatchContractMixin:
             "REVIEW PROMPT body\nLine 2 content\nLine 3 content\n",
             encoding="utf-8",
         )
+        _write_registry(tmpdir)
         return codex_bin, prompt, log_dir
 
     # --- contract assertions ---------------------------------------------
@@ -481,475 +511,370 @@ class _DispatchContractMixin:
                 f"CODEX_DISPATCH_SANDBOX override must reach codex: {args}",
             )
 
+    def _isolated_run(
+        self,
+        extra_env: dict | None = None,
+        registry: dict | None = None,
+        registry_down: bool = False,
+        config_text: str | None = None,
+        no_config_dir: bool = False,
+    ):
+        """One dispatch in a fresh fixture, with default isolation unless
+        extra_env turns it off. Returns (result, codex args or None when codex
+        never ran, review-model lines or None when no record was written).
+        registry_down points AGENT_MODELS_FILE at a file that does not exist;
+        config_text becomes $CODEX_HOME/config.toml."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            if registry is not None:
+                _write_registry(tmpdir, **registry)
+            env: dict = {}
+            if registry_down:
+                env["AGENT_MODELS_FILE"] = str(tmpdir / MISSING_REGISTRY_NAME)
+            if config_text is not None:
+                codex_home = tmpdir / "custom-codex-home"
+                codex_home.mkdir()
+                (codex_home / "config.toml").write_bytes(config_text.encode("utf-8"))
+                env["CODEX_HOME"] = str(codex_home)
+            elif no_config_dir:
+                env["CODEX_HOME"] = str(tmpdir / "nonexistent-codex-home")
+            env.update(extra_env or {})
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir, extra_env=env
+            )
+            args_path = log_dir / "args"
+            args = json.loads(args_path.read_text(encoding="utf-8")) if args_path.exists() else None
+            record = None
+            if result.stdout.startswith("STATE-DIR"):
+                record_path = _parse_state_dir(result.stdout) / "review-model"
+                if record_path.exists():
+                    record = record_path.read_text(encoding="utf-8").splitlines()
+            return result, args, record
+
+    def _assert_registry_failure(self, result, args) -> None:
+        """No source named the reviewer: the dispatcher says so, names the
+        registry, and spends no round."""
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn("registry", result.stderr)
+        self.assertIn("agent-models", result.stderr)
+        self.assertIsNone(args, "codex must not run without a model and effort")
+
     def test_codex_invoked_with_mcp_isolation_default(self) -> None:
-        """Default-on isolation passes --ignore-user-config + reasoning re-pass.
+        """Default-on isolation passes --ignore-user-config and re-passes the
+        registry's model and effort.
 
         Regression guard for agent-config#1: a user-level Codex MCP server
         auto-starting under `codex exec` recursed into a nested codex and hung
         the headless reviewer with an empty review. --ignore-user-config is the
         only reliable stop (a narrower `-c mcp_servers={}` is deep-merged by
-        codex and leaves the servers running). Because that flag also drops
-        reasoning effort to "none", the dispatcher re-passes
-        `-c model_reasoning_effort` (default xhigh) so the reviewer is not
-        silently downgraded. The flag also drops the configured model, so the
-        dispatcher re-passes it with `-c model`; with no config model (as here)
-        that is the fallback, the policy model from AGENTS.md. This
-        freezes that all of them reach codex's CLI before the trailing stdin
-        marker.
+        codex and leaves the servers running). That flag also drops the
+        configured model and sets reasoning effort to "none", so the dispatcher
+        re-passes `-c model` and `-c model_reasoning_effort` from the registry,
+        and all of them reach codex's CLI before the trailing stdin marker.
         """
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            # Force the default path regardless of the ambient environment.
-            old = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_r = os.environ.pop("CODEX_DISPATCH_REASONING", None)
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
-                if old_r is not None:
-                    os.environ["CODEX_DISPATCH_REASONING"] = old_r
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn("--ignore-user-config", args,
-                          f"--ignore-user-config must isolate the reviewer: {args}")
-            self.assertIn("-c", args, f"-c flag must be present: {args}")
-            self.assertIn(
-                "model_reasoning_effort=xhigh", args,
-                f"reasoning effort must be re-passed (default xhigh): {args}",
-            )
-            # Bind the config value to its flag: a future arg shuffle could
-            # leave both tokens present but parsed wrong (Codex Round 1 Low).
-            self.assertIn(
-                ("-c", "model_reasoning_effort=xhigh"), list(zip(args, args[1:])),
-                f"reasoning config must immediately follow a -c: {args}",
-            )
-            self.assertIn(
-                ("-c", f"model={_policy_codex_model()}"), list(zip(args, args[1:])),
-                f"the fallback model must be pinned after a -c: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                f"model={_policy_codex_model()} source=fallback\n",
-            )
-            self.assertEqual(args[-1], "-",
-                             f"stdin marker must stay the final positional: {args}")
+        result, args, record = self._isolated_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--ignore-user-config", args,
+                      f"--ignore-user-config must isolate the reviewer: {args}")
+        pairs = list(zip(args, args[1:]))
+        # Bind each value to its flag: a future arg shuffle could leave both
+        # tokens present but parsed wrong.
+        self.assertIn(("-c", "model=fixture-codex"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=low"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=fixture-codex source=registry effort=low effort_source=registry",
+        )
+        self.assertEqual(args[-1], "-",
+                         f"stdin marker must stay the final positional: {args}")
+
+    def test_codex_follows_the_registry_reviewer_row(self) -> None:
+        """The registry decides: a reviewer override changes the command line
+        and the record, with no edit to the dispatcher."""
+        result, args, record = self._isolated_run(
+            registry={"reviewer": ("fixture-reviewer", "high")}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=fixture-reviewer"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=high"), pairs, args)
+        self.assertNotIn(("-c", "model=fixture-codex"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=fixture-reviewer source=registry effort=high effort_source=registry",
+        )
 
     def test_codex_mcp_isolation_can_be_disabled(self) -> None:
         """CODEX_DISPATCH_ISOLATE_MCP=off drops the isolation flags.
 
         Escape hatch for the rare review that genuinely needs the user's full
         config (MCP servers, plugins, hooks). When off, codex args must carry
-        neither --ignore-user-config nor the reasoning re-pass, falling back to
-        the plain `exec --sandbox <mode> -` shape.
+        neither --ignore-user-config nor the model and effort re-pass, falling
+        back to the plain `exec --sandbox <mode> -` shape. The record still
+        exists: it holds no request, and the actual run is checked against the
+        registry.
         """
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            old = os.environ.get("CODEX_DISPATCH_ISOLATE_MCP")
-            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = "off"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old is None:
-                    os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-                else:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertNotIn(
-                "--ignore-user-config", args,
-                f"isolation=off must drop --ignore-user-config: {args}",
-            )
-            # Reject ANY reasoning re-pass in opt-out mode, not just the
-            # default value (Codex Round 2 Low): off is the full-config escape
-            # hatch, so no model_reasoning_effort override should be injected.
-            self.assertFalse(
-                any(str(arg).startswith("model_reasoning_effort=") for arg in args),
-                f"isolation=off must drop any reasoning re-pass: {args}",
-            )
-            # The configured model applies too: no pinned model re-pass.
-            self.assertFalse(
-                any(str(arg).startswith("model=") for arg in args),
-                f"isolation=off must drop the pinned model: {args}",
-            )
-            # Sandbox flag and stdin marker are unaffected by the opt-out.
-            self.assertIn("--sandbox", args, f"--sandbox must remain: {args}")
-            self.assertEqual(args[-1], "-", f"last arg must be '-': {args}")
+        result, args, record = self._isolated_run(
+            extra_env={"CODEX_DISPATCH_ISOLATE_MCP": "off"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(
+            "--ignore-user-config", args,
+            f"isolation=off must drop --ignore-user-config: {args}",
+        )
+        # Reject ANY re-pass in opt-out mode: off is the full-config escape
+        # hatch, so no model or effort override should be injected.
+        self.assertFalse(
+            any(str(arg).startswith("model_reasoning_effort=") for arg in args),
+            f"isolation=off must drop any reasoning re-pass: {args}",
+        )
+        self.assertFalse(
+            any(str(arg).startswith("model=") for arg in args),
+            f"isolation=off must drop the pinned model: {args}",
+        )
+        # Sandbox flag and stdin marker are unaffected by the opt-out.
+        self.assertIn("--sandbox", args, f"--sandbox must remain: {args}")
+        self.assertEqual(args[-1], "-", f"last arg must be '-': {args}")
+        self.assertEqual(
+            record[0], "model=- source=user-config effort=- effort_source=user-config"
+        )
+
+    def test_codex_isolation_off_still_checks_the_run_against_the_registry(self) -> None:
+        """With isolation off codex reads its own config. The header it
+        prints is compared with the registry, so a config that drifted from
+        the registry is flagged instead of silently reviewing."""
+        result, _args, record = self._isolated_run(
+            extra_env={
+                "CODEX_DISPATCH_ISOLATE_MCP": "off",
+                "MOCK_CODEX_STDERR": _codex_header("config-drifted-model", "low"),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MODEL-MISMATCH", result.stderr)
+        self.assertEqual(record[1], "actual=config-drifted-model low status=mismatch")
 
     def test_codex_isolation_reasoning_override(self) -> None:
-        """CODEX_DISPATCH_REASONING overrides the re-passed reasoning effort.
+        """CODEX_DISPATCH_REASONING outranks the registry effort for one run.
 
         --ignore-user-config drops the user's reasoning effort, so the
-        dispatcher re-passes it. The default is xhigh; this env var lets a
-        consumer whose model/account does not support xhigh pick another
-        level. Guards that the override actually reaches codex's CLI.
+        dispatcher re-passes it. This env var lets a consumer whose
+        model/account does not support the registry's level pick another one,
+        or a round raise its depth. The model still follows the registry.
         """
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_r = os.environ.get("CODEX_DISPATCH_REASONING")
-            os.environ["CODEX_DISPATCH_REASONING"] = "high"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_r is None:
-                    os.environ.pop("CODEX_DISPATCH_REASONING", None)
-                else:
-                    os.environ["CODEX_DISPATCH_REASONING"] = old_r
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                "model_reasoning_effort=high", args,
-                f"CODEX_DISPATCH_REASONING override must reach codex: {args}",
-            )
-            self.assertIn(
-                ("-c", "model_reasoning_effort=high"), list(zip(args, args[1:])),
-                f"override reasoning config must immediately follow a -c: {args}",
-            )
-            self.assertNotIn(
-                "model_reasoning_effort=xhigh", args,
-                f"override must replace the xhigh default: {args}",
-            )
+        result, args, record = self._isolated_run(
+            extra_env={"CODEX_DISPATCH_REASONING": "high"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model_reasoning_effort=high"), pairs, args)
+        self.assertNotIn(("-c", "model_reasoning_effort=low"), pairs, args)
+        self.assertIn(("-c", "model=fixture-codex"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=fixture-codex source=registry effort=high effort_source=env",
+        )
 
     def test_codex_isolation_model_override(self) -> None:
-        """CODEX_DISPATCH_MODEL replaces the pinned review model, for an
-        account without that model or a round meant for a different one."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.get("CODEX_DISPATCH_MODEL")
-            os.environ["CODEX_DISPATCH_MODEL"] = "gpt-test-override"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is None:
-                    os.environ.pop("CODEX_DISPATCH_MODEL", None)
-                else:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", "model=gpt-test-override"), list(zip(args, args[1:])),
-                f"CODEX_DISPATCH_MODEL must reach codex after a -c: {args}",
-            )
-            self.assertNotIn(
-                f"model={_policy_codex_model()}", args,
-                f"override must replace the pinned default: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                "model=gpt-test-override source=env\n",
-            )
+        """CODEX_DISPATCH_MODEL outranks the registry model, for an account
+        without that model or a round meant for a different one."""
+        result, args, record = self._isolated_run(
+            extra_env={"CODEX_DISPATCH_MODEL": "gpt-test-override"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=gpt-test-override"), pairs, args)
+        self.assertNotIn(("-c", "model=fixture-codex"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=gpt-test-override source=env effort=low effort_source=registry",
+        )
 
     def test_codex_model_config_toml_top_level(self) -> None:
-        """Top-level model in config.toml is passed when CODEX_DISPATCH_MODEL is unset."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "custom-codex-home"
-            codex_home.mkdir()
-            (codex_home / "config.toml").write_text(
-                'model = "gpt-test-config"\n', encoding="utf-8"
-            )
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", "model=gpt-test-config"), list(zip(args, args[1:])),
-                f"top-level config.toml model must be passed: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                "model=gpt-test-config source=config\n",
-            )
+        """With the registry silent, the top-level model and effort in
+        config.toml are passed."""
+        result, args, record = self._isolated_run(
+            registry_down=True,
+            config_text='model = "gpt-test-config"\nmodel_reasoning_effort = "high"\n',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=gpt-test-config"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=high"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=gpt-test-config source=config effort=high effort_source=config",
+        )
+
+    def test_codex_registry_outranks_config_toml(self) -> None:
+        """config.toml is a fallback, not a competitor: bootstrap writes the
+        registry into it, so when the two differ the registry is the truth."""
+        result, args, record = self._isolated_run(
+            config_text='model = "gpt-test-config"\nmodel_reasoning_effort = "high"\n',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=fixture-codex"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=low"), pairs, args)
+        self.assertNotIn(("-c", "model=gpt-test-config"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=fixture-codex source=registry effort=low effort_source=registry",
+        )
 
     def test_codex_model_env_wins_over_config(self) -> None:
-        """CODEX_DISPATCH_MODEL overrides config.toml model."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "custom-codex-home"
-            codex_home.mkdir()
-            (codex_home / "config.toml").write_text(
-                'model = "gpt-test-config"\n', encoding="utf-8"
-            )
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.get("CODEX_DISPATCH_MODEL")
-            os.environ["CODEX_DISPATCH_MODEL"] = "gpt-env-wins"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is None:
-                    os.environ.pop("CODEX_DISPATCH_MODEL", None)
-                else:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", "model=gpt-env-wins"), list(zip(args, args[1:])),
-                f"env override must reach codex: {args}",
-            )
-            self.assertNotIn("model=gpt-test-config", args)
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                "model=gpt-env-wins source=env\n",
-            )
+        """CODEX_DISPATCH_MODEL overrides the config.toml model and the registry."""
+        result, args, record = self._isolated_run(
+            registry_down=True,
+            config_text='model = "gpt-test-config"\nmodel_reasoning_effort = "high"\n',
+            extra_env={"CODEX_DISPATCH_MODEL": "gpt-env-wins"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=gpt-env-wins"), pairs, args)
+        self.assertNotIn("model=gpt-test-config", args)
+        self.assertEqual(
+            record[0],
+            "model=gpt-env-wins source=env effort=high effort_source=config",
+        )
 
-    def test_codex_model_table_header_ignored_and_falls_back(self) -> None:
-        """A model key inside a TOML table must be ignored, falling back to constant."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "custom-codex-home"
-            codex_home.mkdir()
-            (codex_home / "config.toml").write_text(
+    def test_codex_two_overrides_need_no_registry_and_no_config(self) -> None:
+        result, args, record = self._isolated_run(
+            registry_down=True,
+            no_config_dir=True,
+            extra_env={"CODEX_DISPATCH_MODEL": "gpt-env-model",
+                       "CODEX_DISPATCH_REASONING": "medium"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=gpt-env-model"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=medium"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=gpt-env-model source=env effort=medium effort_source=env",
+        )
+
+    def test_codex_model_table_header_ignored(self) -> None:
+        """A model key inside a TOML table is ignored. With the registry
+        silent nothing else names a model, so the dispatch stops."""
+        result, args, _record = self._isolated_run(
+            registry_down=True,
+            config_text=(
                 'model_reasoning_effort = "low"\n'
                 '[profiles.x]\n'
-                'model = "gpt-in-table"\n',
-                encoding="utf-8",
-            )
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", f"model={_policy_codex_model()}"), list(zip(args, args[1:])),
-                f"must fall back when model is only in table: {args}",
-            )
-            self.assertNotIn("model=gpt-in-table", args)
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                f"model={_policy_codex_model()} source=fallback\n",
-            )
+                'model = "gpt-in-table"\n'
+            ),
+        )
+        self._assert_registry_failure(result, args)
 
     def test_codex_model_single_quoted_with_trailing_comment(self) -> None:
         """Single-quoted value with trailing comment is parsed correctly."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "custom-codex-home"
-            codex_home.mkdir()
-            (codex_home / "config.toml").write_text(
-                "  model = 'gpt-single-model' # comment with 'quote'\n",
-                encoding="utf-8",
-            )
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
-                )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", "model=gpt-single-model"), list(zip(args, args[1:])),
-                f"single-quoted model must be parsed: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                "model=gpt-single-model source=config\n",
-            )
+        result, args, record = self._isolated_run(
+            registry_down=True,
+            config_text=(
+                "  model = 'gpt-single-model' # comment with 'quote'\n"
+                "model_reasoning_effort = 'medium'\n"
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("-c", "model=gpt-single-model"), pairs, args)
+        self.assertIn(("-c", "model_reasoning_effort=medium"), pairs, args)
+        self.assertEqual(
+            record[0],
+            "model=gpt-single-model source=config effort=medium effort_source=config",
+        )
 
-    def test_codex_model_invalid_value_falls_back(self) -> None:
-        """Invalid value (with space, unquoted, empty) falls back to constant."""
-        for invalid_line in ('model = "bad model"', "model = gpt-unquoted", 'model = ""'):
+    def test_codex_config_values_outside_the_safe_set_are_refused(self) -> None:
+        """A stray config line must not reach the -c argument or the .ps1's
+        generated cmd helper: an invalid value (with space, unquoted, empty,
+        shell-looking) is not used, and with the registry silent the
+        dispatch stops."""
+        for invalid_line in ('model = "bad model"', "model = gpt-unquoted", 'model = ""',
+                             'model = "x;y"'):
             with self.subTest(invalid=invalid_line):
-                with _temp_dir() as td:
-                    tmpdir = Path(td)
-                    codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-                    codex_home = tmpdir / "custom-codex-home"
-                    codex_home.mkdir()
-                    (codex_home / "config.toml").write_text(
-                        f"{invalid_line}\n", encoding="utf-8"
-                    )
-                    old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-                    old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-                    try:
-                        result = self._run_dispatch(
-                            tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                            extra_env={"CODEX_HOME": str(codex_home)},
-                        )
-                    finally:
-                        if old_iso is not None:
-                            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                        if old_m is not None:
-                            os.environ["CODEX_DISPATCH_MODEL"] = old_m
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-                    self.assertIn(
-                        ("-c", f"model={_policy_codex_model()}"), list(zip(args, args[1:])),
-                        f"must fall back on invalid model: {args}",
-                    )
-                    state_dir = _parse_state_dir(result.stdout)
-                    self.assertEqual(
-                        (state_dir / "review-model").read_text(encoding="utf-8"),
-                        f"model={_policy_codex_model()} source=fallback\n",
-                    )
+                result, args, _record = self._isolated_run(
+                    registry_down=True,
+                    config_text=f'{invalid_line}\nmodel_reasoning_effort = "low"\n',
+                )
+                self._assert_registry_failure(result, args)
+        with self.subTest(invalid="effort"):
+            result, args, _record = self._isolated_run(
+                registry_down=True,
+                config_text='model = "gpt-test-config"\nmodel_reasoning_effort = "hi gh"\n',
+            )
+            self._assert_registry_failure(result, args)
 
     def test_codex_model_follows_provider_and_bom(self) -> None:
         """A non-OpenAI model_provider skips the config model, since isolation
         drops the provider; an OpenAI one keeps it; a UTF-8 BOM is stripped."""
-        policy = _policy_codex_model()
+        effort = 'model_reasoning_effort = "low"\n'
         cases = [
-            ('model_provider = "ollama"\nmodel = "gpt-oss:20b"\n', policy, "fallback"),
-            ('model = "gpt-oss:20b"\nmodel_provider = "azure"\n', policy, "fallback"),
-            ('model_provider = "openai"\nmodel = "gpt-test-config"\n', "gpt-test-config", "config"),
-            ('model = "gpt-test-config"\n[profiles.x]\nmodel_provider = "ollama"\n', "gpt-test-config", "config"),
-            ('\ufeffmodel = "gpt-test-bom"\n', "gpt-test-bom", "config"),
+            ('model_provider = "ollama"\nmodel = "gpt-oss:20b"\n' + effort, None),
+            ('model = "gpt-oss:20b"\nmodel_provider = "azure"\n' + effort, None),
+            ('model_provider = "openai"\nmodel = "gpt-test-config"\n' + effort, "gpt-test-config"),
+            (effort + 'model = "gpt-test-config"\n[profiles.x]\nmodel_provider = "ollama"\n',
+             "gpt-test-config"),
+            ('﻿model = "gpt-test-bom"\n' + effort, "gpt-test-bom"),
         ]
-        for config_text, want_model, want_source in cases:
+        for config_text, want_model in cases:
             with self.subTest(config=config_text):
-                with _temp_dir() as td:
-                    tmpdir = Path(td)
-                    codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-                    codex_home = tmpdir / "custom-codex-home"
-                    codex_home.mkdir()
-                    (codex_home / "config.toml").write_bytes(config_text.encode("utf-8"))
-                    old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-                    old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-                    try:
-                        result = self._run_dispatch(
-                            tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                            extra_env={"CODEX_HOME": str(codex_home)},
-                        )
-                    finally:
-                        if old_iso is not None:
-                            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                        if old_m is not None:
-                            os.environ["CODEX_DISPATCH_MODEL"] = old_m
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-                    self.assertIn(("-c", f"model={want_model}"), list(zip(args, args[1:])), args)
-                    state_dir = _parse_state_dir(result.stdout)
-                    self.assertEqual(
-                        (state_dir / "review-model").read_text(encoding="utf-8"),
-                        f"model={want_model} source={want_source}\n",
-                    )
-
-    def test_codex_model_no_config_file_falls_back(self) -> None:
-        """Missing config.toml falls back to constant."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "nonexistent-codex-home"
-            old_iso = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
+                result, args, record = self._isolated_run(
+                    registry_down=True, config_text=config_text
                 )
-            finally:
-                if old_iso is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old_iso
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn(
-                ("-c", f"model={_policy_codex_model()}"), list(zip(args, args[1:])),
-                f"must fall back when config is absent: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertEqual(
-                (state_dir / "review-model").read_text(encoding="utf-8"),
-                f"model={_policy_codex_model()} source=fallback\n",
-            )
-
-    def test_codex_isolation_off_drops_model_even_with_config(self) -> None:
-        """CODEX_DISPATCH_ISOLATE_MCP=off passes no -c model even if config has model."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            codex_home = tmpdir / "custom-codex-home"
-            codex_home.mkdir()
-            (codex_home / "config.toml").write_text(
-                'model = "gpt-test-config"\n', encoding="utf-8"
-            )
-            old = os.environ.get("CODEX_DISPATCH_ISOLATE_MCP")
-            old_m = os.environ.pop("CODEX_DISPATCH_MODEL", None)
-            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = "off"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
-                    extra_env={"CODEX_HOME": str(codex_home)},
+                if want_model is None:
+                    self._assert_registry_failure(result, args)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(("-c", f"model={want_model}"), list(zip(args, args[1:])), args)
+                self.assertEqual(
+                    record[0],
+                    f"model={want_model} source=config effort=low effort_source=config",
                 )
-            finally:
-                if old is None:
-                    os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-                else:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
-                if old_m is not None:
-                    os.environ["CODEX_DISPATCH_MODEL"] = old_m
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertNotIn("--ignore-user-config", args)
-            self.assertFalse(
-                any(str(arg).startswith("model=") for arg in args),
-                f"isolation=off must drop model flag even when config has model: {args}",
-            )
-            state_dir = _parse_state_dir(result.stdout)
-            self.assertFalse(
-                (state_dir / "review-model").exists(),
-                "review-model should not be written when isolation is off",
-            )
+
+    def test_codex_no_registry_and_no_config_file_stops(self) -> None:
+        """No literal to fall back on: the dispatcher names the registry and
+        refuses to spend a round."""
+        result, args, record = self._isolated_run(registry_down=True, no_config_dir=True)
+        self._assert_registry_failure(result, args)
+        self.assertIsNone(record, "no request was made, so no record is written")
+
+    def test_codex_effort_missing_everywhere_stops(self) -> None:
+        """A config model alone is not enough: the effort has no source either."""
+        result, args, _record = self._isolated_run(
+            registry_down=True, config_text='model = "gpt-test-config"\n'
+        )
+        self._assert_registry_failure(result, args)
+
+    def test_codex_record_holds_the_actual_run_when_it_matches(self) -> None:
+        result, _args, record = self._isolated_run(
+            extra_env={"MOCK_CODEX_STDERR": _codex_header("fixture-codex", "low")}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record[1], "actual=fixture-codex low status=ok")
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertNotIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_codex_a_run_on_another_model_or_effort_is_flagged(self) -> None:
+        """Configured is not effective: when the header codex prints names
+        another model or effort, the record and stderr say so, and the
+        dispatch still returns codex's own exit code."""
+        for header_model, header_effort in (("other-model", "low"), ("fixture-codex", "xhigh")):
+            with self.subTest(model=header_model, effort=header_effort):
+                result, _args, record = self._isolated_run(
+                    extra_env={"MOCK_CODEX_STDERR": _codex_header(header_model, header_effort)}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("MODEL-MISMATCH", result.stderr)
+                self.assertEqual(
+                    record[1], f"actual={header_model} {header_effort} status=mismatch"
+                )
+
+    def test_codex_a_run_that_cannot_be_read_back_is_unverified(self) -> None:
+        result, _args, record = self._isolated_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record[1], "actual=unknown status=unknown")
+        self.assertIn("MODEL-UNVERIFIED", result.stderr)
 
     def _assert_project_doc_budget(self, args: list) -> None:
         self.assertIn(
@@ -969,43 +894,20 @@ class _DispatchContractMixin:
         the budget itself because --ignore-user-config would drop a value set
         in ~/.codex/config.toml.
         """
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            old = os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old is not None:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertIn("--ignore-user-config", args, f"isolation must be on here: {args}")
-            self._assert_project_doc_budget(args)
+        result, args, _record = self._isolated_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--ignore-user-config", args, f"isolation must be on here: {args}")
+        self._assert_project_doc_budget(args)
 
     def test_codex_project_doc_budget_with_isolation_off(self) -> None:
         """The budget is passed outside the isolation branch, so opting out of
         isolation (CODEX_DISPATCH_ISOLATE_MCP=off) keeps it."""
-        with _temp_dir() as td:
-            tmpdir = Path(td)
-            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
-            old = os.environ.get("CODEX_DISPATCH_ISOLATE_MCP")
-            os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = "off"
-            try:
-                result = self._run_dispatch(
-                    tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir
-                )
-            finally:
-                if old is None:
-                    os.environ.pop("CODEX_DISPATCH_ISOLATE_MCP", None)
-                else:
-                    os.environ["CODEX_DISPATCH_ISOLATE_MCP"] = old
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
-            self.assertNotIn("--ignore-user-config", args, f"isolation must be off here: {args}")
-            self._assert_project_doc_budget(args)
+        result, args, _record = self._isolated_run(
+            extra_env={"CODEX_DISPATCH_ISOLATE_MCP": "off"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--ignore-user-config", args, f"isolation must be off here: {args}")
+        self._assert_project_doc_budget(args)
 
     def test_exit_code_zero_propagation(self) -> None:
         with _temp_dir() as td:
@@ -1074,6 +976,10 @@ class _DispatchContractMixin:
             env.pop("CODEX_SESSION_ID", None)
             env.update({
                 "CODEX_BIN": str(codex),
+                # The copied script sits outside the repository layout, so it
+                # cannot reach the registry; the per-run overrides stand in.
+                "CODEX_DISPATCH_MODEL": "fixture-codex",
+                "CODEX_DISPATCH_REASONING": "low",
                 "MOCK_CODEX_LOG": str(log_dir),
                 "MOCK_CODEX_STARTED": str(started),
                 "MOCK_CODEX_SLEEP": "2",
@@ -1798,10 +1704,11 @@ class DispatchMcpIsolationContract(unittest.TestCase):
     (the only reliable stop; a narrower `-c mcp_servers={}` is deep-merged
     by codex and leaves servers running). That flag also drops the reasoning
     effort to "none" and drops the configured model. The dispatcher therefore
-    re-passes `-c model_reasoning_effort` (default xhigh) and `-c model`
-    (CODEX_DISPATCH_MODEL, else the top-level config.toml model, else the
-    AGENTS.md policy model), so the reviewer is not silently changed.
-    Default on; opt out with CODEX_DISPATCH_ISOLATE_MCP=off.
+    re-passes `-c model_reasoning_effort` and `-c model`, both named by the
+    registry unless CODEX_DISPATCH_REASONING or CODEX_DISPATCH_MODEL overrides
+    them (config.toml is the last source, and no literal backs it up), so the
+    reviewer is not silently changed. Default on; opt out with
+    CODEX_DISPATCH_ISOLATE_MCP=off.
 
     These static checks freeze the wiring so a future refactor that drops
     the override (while the runtime mock tests happen to still pass) fails
@@ -1830,48 +1737,51 @@ class DispatchMcpIsolationContract(unittest.TestCase):
         self.assertIn("model_reasoning_effort", text,
                       "dispatch-codex.ps1 must re-pass reasoning effort")
 
-    def test_default_model_matches_agents_md(self) -> None:
-        """Both dispatchers fall back to the model AGENTS.md names for Codex,
-        so a model bump cannot leave a review without a config model on the
-        previous one."""
-        policy = _policy_codex_model()
-        sh = re.search(r'CODEX_FALLBACK_MODEL="([^"]+)"',
-                       DISPATCH_SH.read_text(encoding="utf-8"))
-        ps1 = re.search(r"\$codexFallbackModel = '([^']+)'",
-                        DISPATCH_PS1.read_text(encoding="utf-8"))
-        self.assertIsNotNone(sh, "dispatch-codex.sh must define CODEX_FALLBACK_MODEL")
-        self.assertIsNotNone(ps1, "dispatch-codex.ps1 must define $codexFallbackModel")
-        self.assertEqual(sh.group(1), policy, "dispatch-codex.sh default differs from AGENTS.md")
-        self.assertEqual(ps1.group(1), policy, "dispatch-codex.ps1 default differs from AGENTS.md")
+    def test_no_model_or_effort_literal_and_no_stale_fallback(self) -> None:
+        """Neither dispatcher names a model or an effort: the drift scan finds
+        no literal, and the old fallback constant and effort default are gone."""
+        for path in (DISPATCH_SH, DISPATCH_PS1):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                hits = [line for _, _, line in agent_models.scan_text(text)]
+                self.assertEqual(hits, [], f"{path.name} names a model or effort literal")
+                self.assertNotIn("CODEX_FALLBACK_MODEL", text)
+                self.assertNotIn("codexFallbackModel", text)
+                self.assertNotIn("'fallback'", text)
+                self.assertNotIn('"fallback"', text)
+
+    def test_both_shells_read_the_registry_and_record_the_actual_run(self) -> None:
+        """Both dispatchers ask the resolver for the codex reviewer row and
+        for what the run reported, in the same order of sources."""
+        for path in (DISPATCH_SH, DISPATCH_PS1):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("agent_models.py", text)
+                self.assertIn("--family", text)
+                self.assertIn("reviewer", text)
+                self.assertIn("--stderr-file", text)
+                self.assertIn("MODEL-UNVERIFIED", text)
+                self.assertIn("effort_source", text)
 
     def test_ps1_model_resolution_matches_contract(self) -> None:
         """Static text contract for dispatch-codex.ps1 model resolution.
 
         pwsh is not installed in every test environment, so this freezes the
         ps1 implementation: it must read CODEX_HOME, config.toml, enforce the
-        ^[A-Za-z0-9._:/-]+$ character set, share the fallback constant with .sh,
-        and write review-model.
+        ^[A-Za-z0-9._:/-]+$ character set, record the same sources as .sh
+        (env, registry, config), and write review-model.
         """
         ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
-
-        sh_fb = re.search(r'CODEX_FALLBACK_MODEL="([^"]+)"', sh_text)
-        ps1_fb = re.search(r"\$codexFallbackModel = '([^']+)'", ps1_text)
-        self.assertIsNotNone(sh_fb, "dispatch-codex.sh must define CODEX_FALLBACK_MODEL")
-        self.assertIsNotNone(ps1_fb, "dispatch-codex.ps1 must define $codexFallbackModel")
-        self.assertEqual(
-            ps1_fb.group(1), sh_fb.group(1),
-            "fallback constants must agree across shells",
-        )
 
         self.assertIn("CODEX_HOME", ps1_text)
         self.assertIn("config.toml", ps1_text)
         self.assertIn("^[A-Za-z0-9._:/-]+$", ps1_text)
         self.assertIn("'env'", ps1_text)
+        self.assertIn("'registry'", ps1_text)
         self.assertIn("'config'", ps1_text)
-        self.assertIn("'fallback'", ps1_text)
-        self.assertIn("'review-model'", ps1_text)
+        self.assertIn("review-model", ps1_text)
         self.assertIn("model_provider", ps1_text)
+        self.assertIn("model_reasoning_effort", ps1_text)
 
     def test_both_shells_raise_the_project_doc_budget(self) -> None:
         """Both dispatchers pass -c project_doc_max_bytes=262144 outside the
@@ -1947,6 +1857,10 @@ class DispatchStallIntegrationTests(unittest.TestCase):
             env["TMPDIR"] = str(tmpdir)
             env["TEMP"] = str(tmpdir)
             env["TMP"] = str(tmpdir)
+            # The per-run overrides stand in for the registry, so these
+            # stall tests need no resolver or interpreter lookup.
+            env["CODEX_DISPATCH_MODEL"] = "fixture-codex"
+            env["CODEX_DISPATCH_REASONING"] = "low"
             # Tiny window so the test runs fast: codex stays silent for 5s,
             # polled every 1s. The threshold is 1 rather than 2 so the
             # warning needs two polls instead of three. A loaded CI runner
@@ -2022,6 +1936,10 @@ class DispatchStallIntegrationTests(unittest.TestCase):
             env["TMPDIR"] = str(tmpdir)
             env["TEMP"] = str(tmpdir)
             env["TMP"] = str(tmpdir)
+            # The per-run overrides stand in for the registry, so these
+            # stall tests need no resolver or interpreter lookup.
+            env["CODEX_DISPATCH_MODEL"] = "fixture-codex"
+            env["CODEX_DISPATCH_REASONING"] = "low"
             # Codex writes stderr every 0.5s for 4s; threshold 2s, poll 1s.
             # A correct stall-watch sees stderr growth and never logs a stall.
             env["MOCK_CODEX_STDERR_SLEEP"] = "4"

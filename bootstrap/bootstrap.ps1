@@ -1291,6 +1291,30 @@ $userClaude = Join-Path $env:USERPROFILE '.claude'
 $hooksDir = Join-Path $userClaude 'hooks'
 Deploy-UserHelper .agent-config/repo/scripts/_python (Join-Path $hooksDir '_python') '~/.claude/hooks/_python'
 Deploy-UserHelper .agent-config/repo/scripts/guard.py (Join-Path $hooksDir 'guard.py') '~/.claude/hooks/guard.py'
+# Write the registry's interactive Codex and Agy model and effort into those
+# tools' own config files (user/agent-models.json is the source; Claude's
+# values arrive through the settings merge below). The helper skips a tool
+# that is not installed, leaves other keys alone, and reads AGENT_MODELS_SYNC
+# itself; it is also skipped here so an opted-out run records no target. Its
+# exit status never fails the run: a model preference is not worth a refusal
+# to refresh the rules.
+$agentModelsHelper = '.agent-config/repo/scripts/agent_models.py'
+$agentModelsSync = "$env:AGENT_MODELS_SYNC".Trim().ToLowerInvariant()
+if ($pyCmd -and (Test-Path -LiteralPath $agentModelsHelper) -and
+    (@('off', '0', 'false', 'no', 'disabled') -notcontains $agentModelsSync)) {
+  try {
+    $global:LASTEXITCODE = $null
+    & $pyCmd.Path $agentModelsHelper sync --quiet
+  } catch {}
+  $global:LASTEXITCODE = $null
+  $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+  if (Test-Path -LiteralPath $codexHome -PathType Container) {
+    try { Add-LedgerTarget '~/.codex/config.toml' } catch {}
+  }
+  if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.gemini/antigravity-cli') -PathType Container) {
+    try { Add-LedgerTarget '~/.gemini/antigravity-cli/settings.json' } catch {}
+  }
+}
 Deploy-UserHelper .agent-config/repo/scripts/session_bootstrap.py (Join-Path $hooksDir 'session_bootstrap.py') '~/.claude/hooks/session_bootstrap.py'
 Deploy-UserHelper .agent-config/repo/scripts/statusline.py (Join-Path $userClaude 'statusline.py') '~/.claude/statusline.py'
 Deploy-UserHelper .agent-config/repo/scripts/agent-quota.py (Join-Path $userClaude 'agent-quota.py') '~/.claude/agent-quota.py'

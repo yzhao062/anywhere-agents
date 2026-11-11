@@ -62,7 +62,7 @@ The auth chain handles private repos automatically: SSH agent → `gh` CLI → `
 
 A **pack** is a small bundle (a rule set, a skill, or a permission policy) that the composer deploys to wherever it needs to land: `AGENTS.md`, `.claude/skills/`, `.claude/commands/`, `~/.claude/hooks/`, or `~/.claude/settings.json`.
 
-`bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`, which currently ships six skills: `ci-mockup-figure`, `editable-figure`, `implement-review`, `my-router`, `prun`, and `readme-polish`; completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS, and its bundled export script is Windows-only) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
+`bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`, which currently ships seven skills: `agent-models`, `ci-mockup-figure`, `editable-figure`, `implement-review`, `my-router`, `prun`, and `readme-polish`; completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS, and its bundled export script is Windows-only) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
 
 Since v0.6.0, the bundled-default policy table is `agent-style` (passive) → `auto` (silent refresh + stderr summary) and `aa-core-skills` (active) → `prompt` (apply-by-default + stderr summary). Third-party packs default to `prompt`. Bare `anywhere-agents` applies prompt-policy drift on mutable refs inline; the run prints one stderr summary line per affected pack (`applied 1 update for <pack> @ <ref>: <old> -> <new>`). Per-run skip is available via `ANYWHERE_AGENTS_UPDATE=skip` (v0.5.0 contract) or the `--no-apply-drift` CLI flag (the flag wins when both are set). Durable fail-closed: pin `update_policy: locked` in `agent-config.yaml`. The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`. Since v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command.
 
@@ -100,7 +100,7 @@ After bootstrap, every Claude Code session shows recent Claude, Codex, and Agy q
 cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100% (6d23h) @now
 ```
 
-`cc` is the Claude pool, from statusLine stdin. `gpt` is Codex, from recent `~/.codex/sessions/**/rollout-*.jsonl` records. `agy` is the `Gemini Models` quota group returned by `agy -p "/usage" --output-format json`. Each percentage is quota remaining; the parenthesized value is time until reset, `(reset)` means the window rolled over and awaits a new reading, and `@2m` means the disk snapshot is two minutes old. The zero-turn Agy query runs from the home directory in a hidden, bounded background helper at most once per five minutes, so a status render never waits on the network or opens a project-scoped Agy workspace. The lock and failure cooldown prevent duplicate refreshes. To keep the status row compact, it shows only the default Gemini pool. The standalone `agent-quota.py` shows both Agy pools, including the separate `Claude/GPT` allowance usable through `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, or `gpt-oss-120b-medium`.
+`cc` is the Claude pool, from statusLine stdin. `gpt` is Codex, from recent `~/.codex/sessions/**/rollout-*.jsonl` records. `agy` is the `Gemini Models` quota group returned by `agy -p "/usage" --output-format json`. Each percentage is quota remaining; the parenthesized value is time until reset, `(reset)` means the window rolled over and awaits a new reading, and `@2m` means the disk snapshot is two minutes old. The zero-turn Agy query runs from the home directory in a hidden, bounded background helper at most once per five minutes, so a status render never waits on the network or opens a project-scoped Agy workspace. The lock and failure cooldown prevent duplicate refreshes. To keep the status row compact, it shows only the default Gemini pool. The standalone `agent-quota.py` shows both Agy pools, including the separate `Claude/GPT` allowance that the Claude and open-weight GPT models in Agy's model list draw on.
 
 ### Pick the Reviewer With `/vet`
 
@@ -109,14 +109,16 @@ Set `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto` in your user-level Claude Code envir
 | Command | Reviewer |
 |---|---|
 | `/vet` | Codex, the no-argument default |
-| `/vet agy` | The newest Gemini Argon High through Antigravity, at `high` effort; Gemini Flash High when the account lists no Argon model |
+| `/vet agy` | The newest model of the registry's Agy reviewer family that the Antigravity account lists, or the registry's fallback family when it lists none |
 | `/vet gemini` or `/vet antigravity` | Aliases for `/vet agy` |
 | `/vet copilot` | GitHub Copilot CLI |
 | `/vet claude` | Headless Claude Code, except inside Claude Code itself where the self-review guard reroutes |
 
 Without the user-level Auto-terminal default, add the channel once: `/vet auto agy`. The Agy backend authenticates through the installed `agy` CLI and the Google AI plan attached to it; it does not require a separate Gemini API key. It reviews an isolated export of the staged Git index with `accept-edits` and unattended tool approval, so it can run real experiments while generated artifacts stay out of the source checkout. It publishes `Review-Antigravity.md` atomically. Override the model only when needed with `ANTIGRAVITY_DISPATCH_MODEL`; override effort with `ANTIGRAVITY_DISPATCH_EFFORT`.
 
-`/prun` uses a different cost split: every unit runs on Agy, unattended in a scratch directory or throwaway clone with follow-up turns while slower units finish. It spawns no Claude subagents, because those bill the same Claude account the coordinating session runs on. Codex is deliberately excluded from bulk fan-out and reserved for `/vet`. Agy units default to the newest Gemini Flash High at `high` effort. An Argon High run of the same task cost about four times as much on Agy's five-hour meter. The coordinator chooses as many independent units as the task supports rather than imposing a two- or three-worker cap.
+The Claude, Codex, and Agy reviewers take their model and effort from one registry, `user/agent-models.json`, which `scripts/agent_models.py` reads (the `agent-models` skill shows, checks, and changes it). A review runs at the effort of the interactive session by default, with no separate floor. Each dispatcher for these three writes a record with the model and effort it asked for next to what the CLI reported it ran on (`<state-dir>/review-model` for a review, `<state-dir>/model-actual` for a `prun` unit), and prints `MODEL-MISMATCH` when a reported value differs or `MODEL-UNVERIFIED` when the report is missing or incomplete. The Copilot dispatcher uses Copilot's own defaults and writes no such record. Bootstrap runs `agent_models.py sync` to write the interactive Codex and Agy values into `~/.codex/config.toml` and the Antigravity settings; set `AGENT_MODELS_SYNC=off` to skip it.
+
+`/prun` uses a different cost split: every unit runs on Agy, unattended in a scratch directory or throwaway clone with follow-up turns while slower units finish. It spawns no Claude subagents, because those bill the same Claude account the coordinating session runs on. A unit runs on a Codex worker only when you name Codex for it, through `dispatch-task.sh` or `dispatch-task.ps1`; the coordinator never picks Codex on its own, and the default stays Agy. The registry's `prun-worker` rows set the worker model and effort. In one measured comparison, a unit on the reviewer family cost about four times as much on Agy's five-hour meter as the same unit on the smaller worker family. The coordinator chooses as many independent units as the task supports rather than imposing a two- or three-worker cap.
 
 ### One `AGENTS.md`, Rules for Every Agent
 
@@ -314,7 +316,7 @@ The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the
 
 Full reference lives at **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**:
 
-- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `prun`, `readme-polish`, `editable-figure`)
+- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `prun`, `readme-polish`, `editable-figure`, `agent-models`)
 - `AGENTS.md` section-by-section reference
 - Customization guide (fork, override, extend)
 - FAQ, troubleshooting, platform notes (Windows, macOS, Linux)
@@ -386,12 +388,14 @@ anywhere-agents/
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
 │   ├── statusline.py              # compact Claude + Codex + Agy quota row
 │   ├── agent-quota.py             # expanded three-agent quota readout + Agy cache refresh
+│   ├── agent_models.py            # registry resolver: resolve, render, sync, scan, and `actual` (what a CLI really ran on)
 │   ├── compose_packs.py           # v2 composer: bundled packs, direct URLs, drift prompt, locks, state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack modules: auth, config, source fetch, state, locks, transaction, handlers
 │   ├── pre-push-smoke.sh          # pre-push real-agent smoke (validates current checkout)
 │   └── remote-smoke.sh            # post-publish real-agent smoke (validates published install)
 ├── skills/
+│   ├── agent-models/              # show, check, and change each agent's model and effort through the one registry
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # native editable PowerPoint figures for papers, proposals, READMEs
 │   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
@@ -405,7 +409,8 @@ anywhere-agents/
 │   ├── commands/                  # pointer files so Claude Code discovers the skills
 │   └── settings.json              # project-level permissions
 ├── user/
-│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, CLAUDE_CODE_EFFORT_LEVEL=xhigh
+│   ├── agent-models.json          # registry: each agent's model and effort per role
+│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, rendered model and effort keys
 ├── docs/                          # Read the Docs source + README hero assets
 ├── tests/                         # bootstrap / guard / generator / session-bootstrap tests (Ubuntu + Windows + macOS CI, Python 3.9-3.13)
 ├── .github/workflows/             # validate, real-agent-smoke, package-smoke CI

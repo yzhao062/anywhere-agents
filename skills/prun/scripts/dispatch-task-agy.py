@@ -14,8 +14,11 @@ requires an explicit mode, and ``--mode plan`` is the read-only opt-in.
 ``--add-dir`` puts a directory outside the working directory into the unit's
 workspace without copying a repository into the scratch area. The conversation id from Agy's ``init`` event is recorded
 to ``<state-dir>/conversation-id`` so a follow-up dispatch can resume that
-conversation with ``--continue-from``. The dispatcher omits Agy's
-``--sandbox`` flag by default: on Windows that sandbox needs an elevated
+conversation with ``--continue-from``. The model and effort a unit runs on come
+from the registry (see the constants below). Each run also passes ``--log-file``
+and records the model Agy reports it used to ``<state-dir>/model-actual``, with
+a MODEL-MISMATCH line on stderr when that differs from the request. The
+dispatcher omits Agy's ``--sandbox`` flag by default: on Windows that sandbox needs an elevated
 admin broker (``agy --exebox-admin-broker``), which raises a UAC prompt for
 every unit that runs a command. ``PRUN_AGY_SANDBOX`` controls whether the
 flag is added; it does not disable a sandbox enabled in Agy's own settings
@@ -27,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import datetime
+import importlib.util
 import json
 import math
 import os
@@ -42,13 +46,83 @@ from pathlib import Path
 from typing import BinaryIO, Iterable, NamedTuple
 
 
-# Workers stay on Gemini Flash although Agy also lists Gemini 4 Argon. On
-# 2026-10-13 an Argon High run cost about four times a Flash High run of the
-# same task on the Agy five-hour meter. A prun batch spends quota in bulk.
-# The /vet reviewer runs Argon; a unit that needs it names it in
-# ANTIGRAVITY_DISPATCH_MODEL.
-DEFAULT_MODEL = "gemini-3.8-flash-high"
-DEFAULT_EFFORT = "high"
+# The worker model, its effort, and the second quota group's model come from the
+# registry's prun-worker row for Agy (`user/agent-models.json`, read through
+# `scripts/agent_models.py`; the `agent-models` skill says how to change it).
+# No model name or effort is written in this file. The row names a cheaper model
+# than the /vet reviewer's on purpose: on 2026-10-13 a run on the reviewer's
+# model cost about four times a run on the worker model of the same task on the
+# Agy five-hour meter, and a prun batch spends quota in bulk. A unit that needs
+# another model names it in ANTIGRAVITY_DISPATCH_MODEL.
+# The registry's Codex prun-worker row belongs to the sibling dispatch-task
+# scripts, which run a unit on Codex when the user names it.
+#
+# A registry that cannot be read does not stop an import, so tools can still
+# load this module, but main() refuses to dispatch and names the registry. No
+# literal stands in for a missing row.
+class RegistryUnavailable(Exception):
+    pass
+
+
+def find_agent_models():
+    """Path of scripts/agent_models.py, found by walking up from this script.
+
+    A source repo and `.agent-config/repo` hold it at `<A>/scripts/`. A consumer
+    runs the copy bootstrap deploys under `<project>/.claude/skills/`, so there
+    it is `<project>/.agent-config/repo/scripts/`. The registry must sit beside
+    it. Returns None when no ancestor has one.
+    """
+    for base in Path(__file__).resolve().parents:
+        for root in (base, base / ".agent-config" / "repo"):
+            candidate = root / "scripts" / "agent_models.py"
+            if candidate.is_file() and (root / "user" / "agent-models.json").is_file():
+                return candidate
+    return None
+
+
+def load_registry_defaults() -> tuple:
+    """Return the resolver module and the Agy prun-worker row.
+
+    The resolver is loaded from the path `find_agent_models` returns, so that
+    no other module of the same name on `sys.path` can answer for it.
+    """
+    path = find_agent_models()
+    try:
+        if path is None:
+            raise ImportError("scripts/agent_models.py was not found above this script")
+        spec = importlib.util.spec_from_file_location("agent_models", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("no loader for the resolver")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, SyntaxError) as exc:
+        raise RegistryUnavailable(
+            f"cannot load the model resolver {path}: {exc}. The prun worker "
+            "model comes from the registry (user/agent-models.json), which "
+            "this checkout must carry."
+        ) from exc
+    try:
+        row = module.resolve("agy", "prun-worker")
+    except module.RegistryError as exc:
+        raise RegistryUnavailable(
+            f"{exc}. The prun worker model comes from the registry "
+            "(user/agent-models.json; AGENT_MODELS_FILE names another one), "
+            "so it must be readable before a unit can be dispatched."
+        ) from exc
+    return module, row
+
+
+try:
+    agent_models, _WORKER_ROW = load_registry_defaults()
+    REGISTRY_ERROR = ""
+    DEFAULT_MODEL = _WORKER_ROW["slug"]
+    DEFAULT_EFFORT = _WORKER_ROW["effort"]
+    SECOND_MODEL = _WORKER_ROW.get("second_slug") or ""
+except RegistryUnavailable as _exc:
+    agent_models = None
+    REGISTRY_ERROR = str(_exc)
+    DEFAULT_MODEL = DEFAULT_EFFORT = SECOND_MODEL = ""
+
 DEFAULT_TIMEOUT_SECONDS = 2700
 MIN_RESULT_BYTES = 20
 UNIT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -78,11 +152,10 @@ BALANCE_MARGIN = 0.15
 # Two readings 15 points apart in decimal can subtract to slightly less in
 # binary floating point, which decided 0.20/0.35 and 0.50/0.65 differently.
 MARGIN_TOLERANCE = 1e-9
-# Agy 1.2.16 (2026-10) retired `claude-sonnet-4-6` and lists Claude models
-# with the effort tier in the slug, as the Gemini models already were. The
-# high tier matches the Gemini default; a later Sonnet floats to it through
-# newest_in_family.
-SECOND_MODEL = "claude-sonnet-5-5-high"
+# The second group's model is the registry's `second_model` for this role, in the
+# same slug form with the effort tier, and floats to the newest member of its
+# family through newest_in_family. A registry row without one leaves the second
+# group out of the routing.
 # The windows Agy meters. A group's entry in a snapshot is its emptiest bucket,
 # so a group that reports one window says nothing about the other.
 REQUIRED_WINDOWS = frozenset({"5h", "weekly"})
@@ -342,8 +415,8 @@ def still_empty(reset: str, now: float) -> bool:
 def bucket_window(bucket: dict) -> str:
     """The metered window a bucket reports, or an empty string.
 
-    The `id` carries the same thing (`gemini-5h`, `3p-weekly`), and is the
-    fallback for a build that omits the field.
+    The `id` ends in the same word (a group prefix, a dash, then `5h` or
+    `weekly`), and is the fallback for a build that omits the field.
     """
     identifier = str(bucket.get("id", "")).rsplit("-", 1)[-1]
     for value in (bucket.get("window"), identifier):
@@ -454,6 +527,10 @@ def balance_pool(model: str, states: dict[str, PoolState]) -> tuple[str, str]:
     if own is None or other is None:
         return model, ""
     target = SECOND_MODEL if other_pool == "second" else DEFAULT_MODEL
+    # A registry row that names no second-group model, or a worker model outside
+    # the Gemini group, leaves nothing in the other group to move a unit to.
+    if not target or model_pool(target) != other_pool:
+        return model, ""
     note = (
         f"MODEL-BALANCE from={model} to={target} reason=freer-meter "
         f"own={own.remaining:.0%} other={other.remaining:.0%}"
@@ -530,20 +607,21 @@ def newest_in_family(template: str, available: Iterable[str]) -> str:
     """The newest model `available` lists in the same family as `template`.
 
     A family is the template's name without its version and its effort tier:
-    `claude-sonnet-5-5-high` is Claude Sonnet, `gemini-3.8-flash-high` is
-    Gemini Flash. Both the version and the tier may change, so a rename that
-    only moves the tier still resolves, as when Agy 1.2.16 replaced
-    `claude-sonnet-4-6` with `claude-sonnet-5-5-high`. A different name is a
-    different family: no lite or pro variant joins Flash. The tier is chosen
-    first, in this order: the template's own tier (`high` when it has none),
-    then `high`, then an untiered slug. The newest version within that tier
-    wins, comparing versions as integer tuples so 3.10 is newer than 3.9, and
-    the template itself wins a tie. An older high therefore beats a newer
-    medium, which keeps the dispatchers' `high` effort valid. With none of
-    those tiers listed, the newest member wins. A template that does not
-    parse, or whose family `available` does not list, comes back unchanged.
-    The /vet reviewer and the prun worker each carry an identical copy,
-    because the two skills deploy separately.
+    `claude-sonnet-<version>-high` is Claude Sonnet, and
+    `gemini-<version>-flash-high` is Gemini Flash. Both the version and the
+    tier may change, so a rename that only moves the tier still resolves, as
+    when Agy 1.2.16 began listing Claude models with the tier in the slug. A
+    different name is a different family: no lite or pro variant joins Flash.
+    The tier is chosen first, in this order: the template's own tier (`high`
+    when it has none), then `high`, then an untiered slug. The newest version
+    within that tier wins, comparing versions as integer tuples so 3.10 is
+    newer than 3.9, and the template itself wins a tie. An older high
+    therefore beats a newer medium, which keeps the dispatchers' `high` effort
+    valid. With none of those tiers listed, the newest member wins. A template
+    that does not parse, or whose family `available` does not list, comes back
+    unchanged.
+    The /vet reviewer and the prun worker each carry a copy with the same
+    code, because the two skills deploy separately.
     """
     tiers = ("low", "medium", "high", "xhigh", "max", "thinking")
     match = re.match(
@@ -639,8 +717,9 @@ def run_preflight(
                     )
                     model = resolved
                 # A template Agy no longer lists, after a rename such as the
-                # one that retired claude-sonnet-4-6, would fail every unit
-                # routed to it; the fallback template keeps the unit running.
+                # one that moved Claude slugs to carry their tier, would fail
+                # every unit routed to it; the fallback template keeps the
+                # unit running.
                 if model not in available and fallback_model:
                     alternative = newest_in_family(fallback_model, available_listing)
                     if alternative in available:
@@ -831,6 +910,76 @@ def build_prompt(original: str, unit_id: str) -> str:
     )
 
 
+def record_effective_model(
+    state_dir: Path, log_path: Path, requested: str, effort: str
+) -> str:
+    """Write what Agy reports it ran on beside what was requested.
+
+    A requested model that the backend silently swapped, or an effort the CLI
+    ignored, would otherwise leave the ledger naming the request. Agy writes the
+    model it propagated to its backend into the log passed with `--log-file`,
+    and `agent_models.agy_actual` reads that label back. This costs no model
+    call. A different model or tier prints MODEL-MISMATCH on stderr, and a log
+    with no label prints MODEL-UNVERIFIED, because neither is evidence that the
+    request took effect. The status never changes the unit's exit code: the
+    result is still the worker's work, and the coordinator decides what a
+    mismatch means for it.
+
+    The second group's Claude slugs carry their tier in the name, and Agy
+    applies that tier without an `--effort` flag, so the tier a Claude slug
+    names is the effort that was requested for it. A slug the resolver cannot
+    parse into a family is compared by its whole name.
+    """
+    expected_key = agent_models.family_key(requested)
+    if model_pool(requested) == "second":
+        expected_effort = expected_key[2] if expected_key else None
+    else:
+        expected_effort = effort
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    reported = agent_models.agy_actual(text)
+    asked = f"{requested} {expected_effort or '-'}"
+    if reported is None:
+        status, actual = "unknown", "-"
+        print(
+            f"dispatch-task-agy: MODEL-UNVERIFIED requested={asked}: "
+            f"Agy's log {log_path} carries no model label",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        slug, tier = reported
+        actual = f"{slug} {tier or '-'}"
+        # Three states, as the resolver reports them: a label that names the
+        # model but no tier does not show which effort ran.
+        status = agent_models.compare("agy", requested, expected_effort, slug, tier)
+        if status == "mismatch":
+            print(
+                f"dispatch-task-agy: MODEL-MISMATCH requested={asked} actual={actual}",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif status == "unknown":
+            print(
+                f"dispatch-task-agy: MODEL-UNVERIFIED requested={asked} actual={actual}: "
+                "the label names no effort tier",
+                file=sys.stderr,
+                flush=True,
+            )
+    line = f"requested={asked} actual={actual} status={status}"
+    try:
+        (state_dir / "model-actual").write_text(line + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"dispatch-task-agy: could not record the effective model: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return status
+
+
 def echo_tail(path: Path, count: int = 80) -> None:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -845,6 +994,8 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
         return int(exc.code)
+    if REGISTRY_ERROR:
+        return fail(REGISTRY_ERROR)
     if not UNIT_RE.fullmatch(args.unit_id):
         return fail("--unit-id must contain only letters, digits, dashes, or underscores")
 
@@ -1011,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
         if slug_tier in ("low", "medium", "high", "max"):
             effort = slug_tier
 
+    log_path = state_dir / "agy.log"
     relay = build_prompt(original, args.unit_id)
     (state_dir / "prompt-relay").write_text(relay, encoding="utf-8")
     command = [
@@ -1021,6 +1173,10 @@ def main(argv: list[str] | None = None) -> int:
         "stream-json",
         "--model",
         model,
+        # The log is where Agy names the model it really used; the dispatcher
+        # reads it back after the run (see record_effective_model).
+        "--log-file",
+        str(log_path),
     ]
     # Agy rejects `--effort` for the Claude and GPT models ("--effort is not
     # supported for model ..."), so passing it unconditionally made that whole
@@ -1100,6 +1256,8 @@ def main(argv: list[str] | None = None) -> int:
         (state_dir / "conversation-id").write_text(
             f"{conversation_id}\n", encoding="utf-8"
         )
+
+    record_effective_model(state_dir, log_path, model, effort)
 
     status, response, error = extract_result(tail_path)
     reason = ""

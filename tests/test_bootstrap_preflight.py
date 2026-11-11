@@ -565,7 +565,16 @@ def _run_full_bootstrap_with_ledger(
     composer_rc: int | None = 0,
     generator_rc: int | None = 0,
     yaml_available: bool = True,
+    prepare=None,
+    env_extra: dict | None = None,
+    capture=None,
 ) -> tuple[subprocess.CompletedProcess, dict, dict[str, bytes]]:
+    """Run a full bootstrap against the stub fixture and return its ledger.
+
+    `prepare(work, home)` runs before the bootstrap and `capture(work, home)`
+    after it, while the fixture still exists, for a test that plants files in
+    the sparse clone or the home directory and reads back what the run wrote.
+    """
     if entrypoint == "bash" and not BASH:
         raise unittest.SkipTest("bash not available (Git Bash on Windows or system bash on POSIX)")
     if entrypoint == "powershell" and not shell and not POWERSHELL:
@@ -617,6 +626,9 @@ def _run_full_bootstrap_with_ledger(
         # hermetic: the answer changes with who runs it.
         env["APPDATA"] = str(home / "AppData" / "Roaming")
         env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env.update(env_extra or {})
+        if prepare is not None:
+            prepare(work, home)
         result = subprocess.run(
             command,
             cwd=str(work),
@@ -625,6 +637,8 @@ def _run_full_bootstrap_with_ledger(
             text=True,
             timeout=SUBPROCESS_TIMEOUT,
         )
+        if capture is not None:
+            capture(work, home)
         ledger_path = work / ".agent-config" / "last-run.json"
         if not ledger_path.is_file():
             raise AssertionError(
@@ -1267,6 +1281,96 @@ class _BootstrapLedgerContract:
         self.assertEqual(step["status"], "ok")
         self.assertIsNone(step["rc"])
         self.assertEqual(step["targets"], ["CLAUDE.md", "agents/codex.md"])
+
+    # The model sync: bootstrap runs agent_models.py sync after the guard is
+    # deployed, so the interactive Codex and Agy values the registry names are
+    # in the tools' own config before the first session reads them. The
+    # registry here is invented; nothing depends on the live values.
+    SYNC_REGISTRY = {
+        "schema": 1,
+        "families": {
+            "claude": {"model": "claude-test-1", "effort": "high"},
+            "codex": {"model": "codex-test-model", "effort": "medium"},
+            "agy": {"model": "testy-2-stem", "effort": "high"},
+        },
+        "roles": {},
+    }
+
+    def _sync_run(self, *, resolver_text: str | None = None, env_extra: dict | None = None):
+        """Run a bootstrap with the real resolver and an invented registry.
+
+        Returns the run result, its ledger, and the Codex config bytes read
+        back after the run (None when the file is absent).
+        """
+        seen: dict = {}
+
+        def prepare(work: Path, home: Path) -> None:
+            repo = work / ".agent-config" / "repo"
+            (repo / "user").mkdir(parents=True, exist_ok=True)
+            (repo / "user" / "agent-models.json").write_text(
+                json.dumps(self.SYNC_REGISTRY), encoding="utf-8")
+            resolver = repo / "scripts" / "agent_models.py"
+            if resolver_text is None:
+                shutil.copy2(ROOT / "scripts" / "agent_models.py", resolver)
+            else:
+                resolver.write_text(resolver_text, encoding="utf-8")
+            (repo / "scripts" / "guard.py").write_text("# guard stub\n", encoding="utf-8")
+            (home / ".codex").mkdir()
+            (home / ".codex" / "config.toml").write_bytes(
+                b'model = "old-model"\nmodel_reasoning_effort = "low"  # kept comment\n'
+                b'service_tier = "standard"\n\n[features]\nfast_mode = false\n')
+            (home / ".gemini" / "antigravity-cli").mkdir(parents=True)
+
+        def capture(work: Path, home: Path) -> None:
+            config = home / ".codex" / "config.toml"
+            seen["codex"] = config.read_bytes() if config.is_file() else None
+
+        # No real Antigravity CLI: the sync would otherwise ask the developer's
+        # own `agy models` for a listing.
+        env = {"ANTIGRAVITY_BIN": "agy-is-not-installed-here", **(env_extra or {})}
+        result, ledger, _ = _run_full_bootstrap_with_ledger(
+            self.entrypoint, shell=self.shell, prepare=prepare, capture=capture,
+            env_extra=env)
+        return result, ledger, seen["codex"]
+
+    @unittest.skipUnless(sys.version_info >= (3, 11),
+                         "the Codex config edit needs the standard library TOML parser")
+    def test_models_sync_writes_the_registry_into_the_codex_config(self):
+        result, ledger, codex = self._sync_run()
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        text = codex.decode("utf-8")
+        self.assertIn('model = "codex-test-model"', text)
+        self.assertIn('model_reasoning_effort = "medium"  # kept comment', text)
+        self.assertIn('service_tier = "standard"', text)
+        self.assertIn("[features]\nfast_mode = false", text.replace("\r\n", "\n"))
+        targets = self._phase(ledger, "user_files")["targets"]
+        self.assertIn("~/.codex/config.toml", targets)
+        self.assertIn("~/.gemini/antigravity-cli/settings.json", targets)
+        self.assertIs(ledger["completed"], True)
+
+    def test_models_sync_can_be_switched_off(self):
+        before = b'model = "old-model"\nmodel_reasoning_effort = "low"  # kept comment\nservice_tier = "standard"\n\n[features]\nfast_mode = false\n'
+        for value in ("off", "0", "False", "NO", "disabled"):
+            with self.subTest(AGENT_MODELS_SYNC=value):
+                result, ledger, codex = self._sync_run(env_extra={"AGENT_MODELS_SYNC": value})
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                self.assertEqual(codex.replace(b"\r\n", b"\n"), before)
+                targets = self._phase(ledger, "user_files")["targets"]
+                self.assertNotIn("~/.codex/config.toml", targets)
+
+    def test_a_failing_resolver_never_fails_the_run(self):
+        result, ledger, codex = self._sync_run(
+            resolver_text="import sys\nprint('resolver broke', file=sys.stderr)\nsys.exit(7)\n")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIs(ledger["completed"], True)
+        self.assertEqual(self._phase(ledger, "user_files")["status"], "ok")
+        self.assertIn(b'model = "old-model"', codex)
+
+    def test_models_sync_is_skipped_without_a_resolver_in_the_clone(self):
+        """A sparse clone that predates the resolver runs exactly as before."""
+        result, ledger, _ = _run_full_bootstrap_with_ledger(self.entrypoint, shell=self.shell)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertNotIn("~/.codex/config.toml", self._phase(ledger, "user_files")["targets"])
 
     def test_generate_failed(self):
         result, ledger, _ = _run_full_bootstrap_with_ledger(

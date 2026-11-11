@@ -27,10 +27,10 @@ packs:
 
   - name: aa-core-skills
     description: >
-      Core skills bundled with anywhere-agents. Ships the six
+      Core skills bundled with anywhere-agents. Ships the seven
       shipped-skill directories (implement-review, my-router,
-      ci-mockup-figure, readme-polish, prun, editable-figure) plus their
-      .claude/commands/
+      ci-mockup-figure, readme-polish, prun, editable-figure,
+      agent-models) plus their .claude/commands/
       pointer files, and the vet.md alias pointer for implement-review.
       Deployment is host-scoped, not OS-scoped: completing an
       editable-figure PPTX deliverable needs desktop PowerPoint on
@@ -84,3 +84,9 @@ packs:
             to: .claude/skills/editable-figure/
           - from: .claude/commands/editable-figure.md
             to: .claude/commands/editable-figure.md
+      - kind: skill
+        files:
+          - from: skills/agent-models/
+            to: .claude/skills/agent-models/
+          - from: .claude/commands/agent-models.md
+            to: .claude/commands/agent-models.md

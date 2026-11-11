@@ -15,7 +15,10 @@
 #               generate_agent_configs.py, pre-push-smoke.sh,
 #               remote-smoke.sh, check-parity.sh (this script - both
 #               sides carry an identical copy so the maintainer can run
-#               it from either repo), .claude/settings.json,
+#               it from either repo), scripts/agent_models.py and
+#               user/agent-models.json (the model and effort registry and
+#               its resolver; one source of values for both repos),
+#               .claude/settings.json,
 #               .githooks/pre-push, .github/workflows/real-agent-smoke.yml,
 #               .github/workflows/validate.yml, bootstrap/bootstrap.sh
 #               and bootstrap/bootstrap.ps1 (promoted from BY-DESIGN
@@ -25,7 +28,7 @@
 #               the aa raw URLs, and ac-only lines live in
 #               ac/AGENTS.local.md),
 #               skills/{implement-review,ci-mockup-figure,readme-polish,
-#               prun,editable-figure} as recursive trees, and the shared-contract test files
+#               prun,editable-figure,agent-models} as recursive trees, and the shared-contract test files
 #               tests/test_{dispatch_codex,dispatch_copilot,dispatch_claude,
 #               health_check,guard,session_bootstrap,pointer_files,
 #               prompt_byte_parity,bootstrap_preflight,
@@ -55,9 +58,9 @@
 #               pack_identity.py, bootstrap/packs.yaml,
 #               scripts/packs/ recursive (excluding __pycache__/),
 #               skills/{implement-review,my-router,ci-mockup-figure,
-#               readme-polish,prun,editable-figure}/ recursive, the six
-#               shipped .claude/commands/*.md pointers, and the vet.md alias
-#               pointer for implement-review. v0.6.0 promotes this
+#               readme-polish,prun,editable-figure,agent-models}/ recursive,
+#               the seven shipped .claude/commands/*.md pointers, and the
+#               vet.md alias pointer for implement-review. v0.6.0 promotes this
 #               from the v0.5.x manual diff -rq gate to a release gate.
 #
 #   BY-DESIGN   expected to differ (sanitized mirror). Must still exist
@@ -69,7 +72,10 @@
 #               backport). Covers: user/settings.json
 #               (additionalDirectories stripping), skills/my-router
 #               (routing-table rewrite with extension guidance for
-#               forks).
+#               forks). The keys of user/settings.json that mirror the
+#               registry (model, effortLevel, two env entries) are not
+#               by design: each tree's own agent_models.py render --check
+#               must pass, so a sanitized copy that went stale fails.
 #
 # Usage:
 #   bash scripts/check-parity.sh                           # default sibling path
@@ -160,6 +166,13 @@ strict_files=(
   # the same argument as the helpers above.
   scripts/merge_settings.py
   scripts/merge_codex_hooks.py
+  # The one registry of agent models and efforts, and its resolver. The values
+  # are the maintainer's choice and ship in the public repo on purpose, so
+  # unlike user/settings.json (sanitized below) the registry is byte-identical.
+  # Bootstrap runs the resolver's sync from both entry points, and the banner
+  # and every dispatcher read the registry through it.
+  scripts/agent_models.py
+  user/agent-models.json
   # The session banner renderer and the pack-identity helper it imports.
   # Both entry points and the SessionStart hook run them from the sparse
   # clone, and the wheel vendors the pair, so the banner is one calculation
@@ -216,6 +229,11 @@ strict_test_files=(
   tests/test_dispatch_codex.py
   tests/test_dispatch_gemini.py
   tests/test_dispatch_task_agy.py
+  # The Codex worker restored for units the user names Codex for. Both scripts
+  # sit under the recursive prun tree, so their contract test is gated too.
+  tests/test_dispatch_task.py
+  # The resolver's own tests and the drift guard: both repos carry the registry.
+  tests/test_agent_models.py
   tests/test_dispatch_copilot.py
   tests/test_dispatch_claude.py
   tests/test_prun_deployed_path.py
@@ -312,7 +330,7 @@ done
 # implement-review scripts, so the gap was reachable well before prun added
 # one; it simply went unnoticed until a verification run left a cache here.
 $AA_INTERNAL_ONLY || printf '\n== shared skills (recursive byte-identical) ==\n'
-cross_repo_skills="implement-review ci-mockup-figure readme-polish prun editable-figure"
+cross_repo_skills="implement-review ci-mockup-figure readme-polish prun editable-figure agent-models"
 $AA_INTERNAL_ONLY && cross_repo_skills=""
 for skill in $cross_repo_skills; do
   if [ ! -d "$AC_ROOT/skills/$skill" ] || [ ! -d "$AA_ROOT/skills/$skill" ]; then
@@ -364,6 +382,7 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
     .claude/commands/readme-polish.md
     .claude/commands/prun.md
     .claude/commands/editable-figure.md
+    .claude/commands/agent-models.md
   )
   for f in "${aa_internal_files[@]}"; do
     src="$AA_ROOT/$f"
@@ -392,8 +411,8 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
       diff -rq --exclude=__pycache__ "$AA_ROOT/scripts/packs" "$AA_MIRROR/scripts/packs" 2>&1 | sed 's/^/    /'
     fi
   fi
-  # All six shipped skill trees, including my-router.
-  for skill in implement-review my-router ci-mockup-figure readme-polish prun editable-figure; do
+  # All seven shipped skill trees, including my-router.
+  for skill in implement-review my-router ci-mockup-figure readme-polish prun editable-figure agent-models; do
     if [ ! -d "$AA_ROOT/skills/$skill" ] || [ ! -d "$AA_MIRROR/skills/$skill" ]; then
       fail "skills/$skill/ (missing on one side: aa source vs wheel mirror)"
       continue
@@ -428,9 +447,34 @@ for f in "${by_design_files[@]}"; do
   fi
 done
 
+# The rendered keys of user/settings.json are the exception inside that file:
+# they mirror the registry, which is STRICT above. Each tree's own resolver
+# checks its own settings file against its own registry, so a sanitized copy
+# that was edited by hand or not re-rendered after a registry change fails here
+# rather than reaching every consumer's ~/.claude/settings.json. A machine with
+# no Python skips the check; scripts/_python is preferred because it avoids the
+# Windows Store shim that a bare python3 can be.
+if ! $AA_INTERNAL_ONLY; then
+  for root in "$AC_ROOT" "$AA_ROOT"; do
+    [ -f "$root/scripts/agent_models.py" ] && [ -f "$root/user/settings.json" ] || continue
+    if [ -x "$root/scripts/_python" ]; then
+      render_py="$root/scripts/_python"
+    else
+      render_py="$(command -v python3 || command -v python || true)"
+    fi
+    if [ -z "$render_py" ]; then
+      printf '  skipped: user/settings.json rendered keys in %s (no Python found)\n' "$root"
+      continue
+    fi
+    if ! AGENT_MODELS_FILE="" "$render_py" "$root/scripts/agent_models.py" render --check >/dev/null 2>&1; then
+      fail "user/settings.json rendered keys are stale in $root (run scripts/agent_models.py render there)"
+    fi
+  done
+fi
+
 # skills/my-router as a recursive tree. Its two copies route to different
 # skill inventories: ac's table names the research skills under
-# reference-skills/, aa's names the six it ships plus fork guidance. That is
+# reference-skills/, aa's names the seven it ships plus fork guidance. That is
 # a functional split rather than a sanitization one, so it stays BY-DESIGN.
 # skills/editable-figure was BY-DESIGN for one release-preparation session
 # and is now STRICT above: the maintainer's decision is that the private

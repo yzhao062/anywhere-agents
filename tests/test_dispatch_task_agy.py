@@ -1,10 +1,15 @@
 """Contract tests for prun's Antigravity task dispatcher."""
 from __future__ import annotations
 
+import ast
+import atexit
+import contextlib
 import datetime
 import importlib.util
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,11 +24,61 @@ DISPATCH = ROOT / "skills" / "prun" / "scripts" / "dispatch-task-agy.py"
 PYTHON = Path(sys.executable).resolve()
 
 
-def load_dispatch_module():
-    spec = importlib.util.spec_from_file_location("dispatch_task_agy", DISPATCH)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def registry_data(
+    worker_model: str = "gemini-3.8-flash",
+    worker_effort: str = "high",
+    second_model: str | None = "claude-sonnet-5-5",
+    codex_effort: str = "high",
+) -> dict:
+    """A registry in the shape user/agent-models.json has.
+
+    The dispatcher takes its defaults from the prun-worker row, so these tests
+    point it at their own registry and never depend on the live values.
+    """
+    worker = {"model": worker_model, "effort": worker_effort}
+    if second_model:
+        worker["second_model"] = second_model
+    return {
+        "schema": 1,
+        "families": {
+            "claude": {"model": "fable", "effort": "high"},
+            "codex": {"model": "gpt-6-astra", "effort": "medium"},
+            "agy": {"model": "gemini-4-argon", "effort": "high"},
+        },
+        "roles": {
+            "prun-worker": {"agy": worker, "codex": {"effort": codex_effort}},
+        },
+    }
+
+
+def write_registry(directory: Path, name: str = "agent-models.json", **kwargs) -> Path:
+    path = directory / name
+    path.write_text(json.dumps(registry_data(**kwargs)), encoding="utf-8")
+    return path
+
+
+_REGISTRY_DIR = Path(tempfile.mkdtemp(prefix="prun-registry-"))
+atexit.register(shutil.rmtree, _REGISTRY_DIR, ignore_errors=True)
+# The registry every case uses unless it asks for another one. Its values are
+# the ones the model-name fixtures below are written around.
+REGISTRY = write_registry(_REGISTRY_DIR)
+
+
+def load_dispatch_module(registry: Path = REGISTRY):
+    # The dispatcher reads its defaults when it is imported, so the registry is
+    # named for the length of the import and the variable is restored after.
+    previous = os.environ.get("AGENT_MODELS_FILE")
+    os.environ["AGENT_MODELS_FILE"] = str(registry)
+    try:
+        spec = importlib.util.spec_from_file_location("dispatch_task_agy", DISPATCH)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            os.environ.pop("AGENT_MODELS_FILE", None)
+        else:
+            os.environ["AGENT_MODELS_FILE"] = previous
     return module
 
 
@@ -48,6 +103,43 @@ if sys.argv[1:] == ["models"]:
     raise SystemExit(0)
 
 (log / "args.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+
+
+def display_label(slug, default_tier=None):
+    """'claude-sonnet-5-5-high' -> 'Claude Sonnet 5.5 (High)', as `agy models` shows it."""
+    parts = slug.split("-")
+    tier = parts.pop() if parts and parts[-1] in (
+        "low", "medium", "high", "xhigh", "max", "thinking"
+    ) else default_tier
+    words = []
+    for part in parts:
+        if part.isdigit() and words and words[-1].replace(".", "").isdigit():
+            words[-1] += "." + part
+        elif part[:1].isdigit():
+            words.append(part)
+        else:
+            words.append(part.capitalize())
+    label = " ".join(words)
+    return f"{label} ({tier.capitalize()})" if tier else label
+
+
+# Agy names the model it really used in the file --log-file points at.
+if "--log-file" in sys.argv:
+    argv = sys.argv[1:]
+    slug = argv[argv.index("--model") + 1] if "--model" in argv else "unnamed"
+    effort_arg = argv[argv.index("--effort") + 1] if "--effort" in argv else None
+    lines = [
+        f"I1110 09:00:00.000000 1 model.go:1] Model ID {slug} not in local config, defaulting to CCPA"
+    ]
+    if os.environ.get("MOCK_AGY_NO_LABEL") != "1":
+        label = os.environ.get("MOCK_AGY_LABEL") or display_label(slug, effort_arg)
+        lines.append(
+            "I1110 09:00:01.000000 1 backend.go:1] "
+            f'Propagating selected model override to backend: label="{label}"'
+        )
+    Path(argv[argv.index("--log-file") + 1]).write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 # Agy 1.2.16 rejects an --effort that conflicts with the tier in the slug.
 argv = sys.argv[1:]
 if "--model" in argv and "--effort" in argv:
@@ -98,9 +190,62 @@ class DispatchTaskAgyUnitTests(unittest.TestCase):
     def test_script_exists(self) -> None:
         self.assertTrue(DISPATCH.is_file())
 
-    def test_defaults_pin_flash_high(self) -> None:
+    def test_defaults_come_from_the_registry(self) -> None:
+        # The fixture registry names the worker stem and effort, and the
+        # dispatcher turns them into the Agy slug. No literal in the script
+        # may answer for a row the registry carries.
+        self.assertEqual(self.module.REGISTRY_ERROR, "")
         self.assertEqual(self.module.DEFAULT_MODEL, "gemini-3.8-flash-high")
         self.assertEqual(self.module.DEFAULT_EFFORT, "high")
+        self.assertEqual(self.module.SECOND_MODEL, "claude-sonnet-5-5-high")
+
+    def test_another_registry_changes_every_default(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        other = write_registry(
+            Path(temp.name),
+            worker_model="gemini-9.9-spark",
+            worker_effort="low",
+            second_model="claude-sonnet-9-9",
+        )
+        module = load_dispatch_module(other)
+        self.assertEqual(module.DEFAULT_MODEL, "gemini-9.9-spark-low")
+        self.assertEqual(module.DEFAULT_EFFORT, "low")
+        self.assertEqual(module.SECOND_MODEL, "claude-sonnet-9-9-low")
+
+    def test_a_registry_without_a_second_model_leaves_the_second_group_out(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        module = load_dispatch_module(write_registry(Path(temp.name), second_model=None))
+        self.assertEqual(module.SECOND_MODEL, "")
+        states = {
+            "gemini": module.PoolState(0.1, "", frozenset({"5h", "weekly"})),
+            "second": module.PoolState(1.0, "", frozenset({"5h", "weekly"})),
+        }
+        # The unit would move to a better meter if there were a model to move to.
+        self.assertEqual(
+            module.balance_pool(module.DEFAULT_MODEL, states), (module.DEFAULT_MODEL, "")
+        )
+
+    def test_an_unreadable_registry_is_reported_and_not_replaced_by_a_literal(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        missing = Path(temp.name) / "no-such-registry.json"
+        broken = Path(temp.name) / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        for path in (missing, broken):
+            with self.subTest(path=path.name):
+                module = load_dispatch_module(path)
+                self.assertIn(str(path), module.REGISTRY_ERROR)
+                self.assertIn("registry", module.REGISTRY_ERROR)
+                self.assertEqual(module.DEFAULT_MODEL, "")
+                self.assertEqual(module.DEFAULT_EFFORT, "")
+                with contextlib.redirect_stderr(io.StringIO()) as captured:
+                    code = module.main([
+                        "--prompt-file", "p", "--result-file", "r", "--unit-id", "u",
+                    ])
+                self.assertEqual(code, 2)
+                self.assertIn(str(path), captured.getvalue())
 
     def test_unit_id_is_narrow(self) -> None:
         self.assertIsNotNone(self.module.UNIT_RE.fullmatch("paper_review-12"))
@@ -716,6 +861,9 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
                 "TEMP": str(self.root),
                 "TMP": str(self.root),
                 "TMPDIR": str(self.root),
+                # The dispatcher takes its model and effort from the registry,
+                # so these cases name their own rather than the live one.
+                "AGENT_MODELS_FILE": str(REGISTRY),
                 # Every dispatch now consults the Agy meter, so without a
                 # private snapshot these cases would read the operator's real
                 # one and fail on a machine whose Gemini quota is spent.
@@ -1450,14 +1598,27 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--effort") + 1], "medium")
         self.assertTrue(target.is_file())
 
-    def test_newest_in_family_copies_are_identical(self) -> None:
-        # The two skills deploy separately, so each carries its own copy.
+    def test_newest_in_family_copies_have_the_same_code(self) -> None:
+        # The two skills deploy separately, so each carries its own copy. The
+        # docstring is prose that each copy words for itself, so the code is
+        # compared as a syntax tree without it.
         reviewer = ROOT / "skills" / "implement-review" / "scripts" / "dispatch-gemini.py"
 
         def helper(path: Path) -> str:
-            text = path.read_text(encoding="utf-8")
-            start = text.index("def newest_in_family(")
-            return text[start:text.index("\n\n\ndef ", start)]
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            func = next(
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "newest_in_family"
+            )
+            if (
+                func.body
+                and isinstance(func.body[0], ast.Expr)
+                and isinstance(func.body[0].value, ast.Constant)
+                and isinstance(func.body[0].value.value, str)
+            ):
+                func.body = func.body[1:]
+            return ast.dump(func)
 
         self.assertEqual(helper(DISPATCH), helper(reviewer))
 
@@ -1569,6 +1730,179 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
             "gemini-3.8-flash-high",
         )
         self.assertTrue(target.is_file())
+
+
+    # -- the registry decides the model, and the log proves it took effect --
+
+    def _state_dir(self, result: subprocess.CompletedProcess[str]) -> Path:
+        return Path(result.stdout.split("STATE-DIR ", 1)[1].strip())
+
+    def test_the_registry_sets_the_default_model_and_effort_of_a_real_dispatch(self) -> None:
+        # Values the script never names: a literal left in it would show here.
+        registry = write_registry(
+            self.root,
+            "other-registry.json",
+            worker_model="gemini-9.9-spark",
+            worker_effort="low",
+        )
+        result, target = self._run(
+            extra_env={
+                "AGENT_MODELS_FILE": str(registry),
+                "MOCK_AGY_MODELS": "gemini-9.9-spark-low",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-9.9-spark-low")
+        self.assertEqual(argv[argv.index("--effort") + 1], "low")
+        self.assertEqual(
+            (self._state_dir(result) / "model").read_text(encoding="utf-8").strip(),
+            "gemini-9.9-spark-low",
+        )
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertTrue(target.is_file())
+
+    def test_an_unreadable_registry_stops_the_dispatch_before_a_launch(self) -> None:
+        missing = self.root / "no-such-registry.json"
+        broken = self.root / "broken-registry.json"
+        broken.write_text("{not json", encoding="utf-8")
+        for path in (missing, broken):
+            with self.subTest(path=path.name):
+                result, target = self._run(extra_env={"AGENT_MODELS_FILE": str(path)})
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("registry", result.stderr)
+                self.assertIn(str(path), result.stderr)
+                self.assertNotIn("STATE-DIR", result.stdout)
+                self.assertFalse(self.log.exists(), "Agy was launched")
+                self.assertFalse(target.exists())
+
+    def test_the_effort_override_outranks_the_registry(self) -> None:
+        result, _ = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_MODEL": "gemini-9.9-spark",
+                "ANTIGRAVITY_DISPATCH_EFFORT": "medium",
+                "MOCK_AGY_MODELS": "gemini-9.9-spark",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-9.9-spark")
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("status=ok", record)
+
+    def test_a_registry_without_a_second_model_never_balances_into_that_group(self) -> None:
+        registry = write_registry(self.root, "no-second.json", second_model=None)
+        result, _ = self._run(
+            extra_env={
+                "AGENT_MODELS_FILE": str(registry),
+                "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
+        self.assertNotIn("MODEL-BALANCE", result.stderr)
+
+    def test_each_run_passes_a_log_file_inside_its_state_dir(self) -> None:
+        result, _ = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        log_path = Path(argv[argv.index("--log-file") + 1])
+        self.assertEqual(log_path.parent, self._state_dir(result))
+        self.assertTrue(log_path.is_file())
+
+    def test_the_effective_model_is_recorded_beside_the_request(self) -> None:
+        result, _ = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The mock log carries the pre-auth noise line before the label, and the
+        # label is what counts.
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertEqual(
+            record.strip(),
+            "requested=gemini-3.8-flash-high high "
+            "actual=gemini-3.8-flash-high high status=ok",
+        )
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertNotIn("MODEL-UNVERIFIED", result.stderr)
+
+    def test_a_different_model_in_the_log_is_flagged_and_recorded(self) -> None:
+        result, target = self._run(extra_env={"MOCK_AGY_LABEL": "Gemini 4 Argon (High)"})
+        # The unit still ran; the flag is for the coordinator to read.
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(target.is_file())
+        self.assertIn("MODEL-MISMATCH", result.stderr)
+        self.assertIn("requested=gemini-3.8-flash-high high", result.stderr)
+        self.assertIn("actual=gemini-4-argon-high high", result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("status=mismatch", record)
+        self.assertIn("actual=gemini-4-argon-high high", record)
+
+    def test_a_different_effort_in_the_log_is_flagged_too(self) -> None:
+        result, _ = self._run(extra_env={"MOCK_AGY_LABEL": "Gemini 3.8 Flash (Low)"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MODEL-MISMATCH", result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("status=mismatch", record)
+
+    def test_a_label_without_a_tier_is_unverified_not_a_mismatch(self) -> None:
+        # The label names the requested family and no effort tier: that does
+        # not show which effort ran, and it does not show a different one.
+        result, _ = self._run(extra_env={"MOCK_AGY_LABEL": "Gemini 3.8 Flash"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MODEL-UNVERIFIED", result.stderr)
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("status=unknown", record)
+
+    def test_a_newer_version_of_the_family_is_not_a_mismatch(self) -> None:
+        # The dispatcher floats the template to the newest listed member, and
+        # the log names that member; the family and tier are what must agree.
+        result, _ = self._run(
+            extra_env={"MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.9-flash-high"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("requested=gemini-3.9-flash-high high", record)
+        self.assertIn("status=ok", record)
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+
+    def test_a_log_with_no_model_label_is_unverified(self) -> None:
+        result, target = self._run(extra_env={"MOCK_AGY_NO_LABEL": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(target.is_file())
+        self.assertIn("MODEL-UNVERIFIED", result.stderr)
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn("status=unknown", record)
+
+    def test_the_second_group_is_checked_against_the_tier_its_slug_names(self) -> None:
+        # Agy takes no --effort for these models and applies the slug's tier.
+        extra = {
+            "AGY_QUOTA_CACHE": self._quota(gemini=0.2, second=1.0),
+            "MOCK_AGY_MODELS": "gemini-3.8-flash-high\n" + self.module.SECOND_MODEL,
+        }
+        result, _ = self._run(extra_env=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
+        self.assertIn(f"requested={self.module.SECOND_MODEL} high", record)
+        self.assertIn("status=ok", record)
+        extra["MOCK_AGY_LABEL"] = "Claude Sonnet 5.5 (Low)"
+        result, _ = self._run(extra_env=extra, result_path=self.root / "second.md")
+        self.assertIn("MODEL-MISMATCH", result.stderr)
+
+    def test_a_named_model_the_resolver_cannot_parse_is_compared_by_name(self) -> None:
+        extra = {
+            "ANTIGRAVITY_DISPATCH_MODEL": "gpt-oss-120b-medium",
+            "MOCK_AGY_MODELS": "gpt-oss-120b-medium",
+            "MOCK_AGY_LABEL": "GPT-OSS 120B (Medium)",
+        }
+        result, _ = self._run(extra_env=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        extra["MOCK_AGY_LABEL"] = "Gemini 3.8 Flash (High)"
+        result, _ = self._run(extra_env=extra, result_path=self.root / "second.md")
+        self.assertIn("MODEL-MISMATCH", result.stderr)
 
 
 if __name__ == "__main__":

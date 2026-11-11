@@ -1,10 +1,12 @@
-"""prun runs its units on Agy alone.
+"""prun runs its units on Agy, and on Codex only when the user names it.
 
 Routing units to Sonnet subagents billed the coordinating session's own Claude
 account, and a wide fan-out consumed that quota quickly, so the skill dropped
-every Claude-side worker. These checks keep a later edit from quietly putting
-one back through the table, the dispatch step, or a surface that advertises the
-skill.
+every Claude-side worker. Codex is back as a worker on one condition: the user
+names it for a unit or a batch. The coordinator never picks it on its own, and
+not as a fallback when Agy is short. These checks keep a later edit from quietly
+putting a Claude worker back, or making Codex a default, through the table, the
+dispatch step, or a surface that advertises the skill.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "prun" / "SKILL.md"
 POINTER = ROOT / ".claude" / "commands" / "prun.md"
 OPENAI = ROOT / "skills" / "prun" / "agents" / "openai.yaml"
+ROUTING_TABLE = ROOT / "skills" / "my-router" / "references" / "routing-table.md"
 
 
 RELEASE_NOTE = re.compile(r"`v\d+\.\d+")
@@ -50,12 +53,47 @@ def executors_table(text: str) -> list[list[str]]:
 
 
 class PrunExecutorContractTests(unittest.TestCase):
-    def test_agy_is_the_only_worker_in_the_executors_table(self) -> None:
+    def test_agy_is_the_default_worker_and_codex_needs_the_user_to_name_it(self) -> None:
         rows = executors_table(SKILL.read_text(encoding="utf-8"))
         names = [row[0] for row in rows]
-        self.assertEqual(names, ["Agy (`agy`)", "Claude session (this session)"])
+        self.assertEqual(
+            names, ["Agy (`agy`)", "Codex (`codex`)", "Claude session (this session)"]
+        )
+        self.assertIn("default worker", rows[0][2])
+        self.assertIn("Only when the user names Codex", rows[1][2])
+        self.assertIn("prun-worker", rows[1][2])
         # The coordinator's row stays, and it is never a unit.
-        self.assertIn("Never a unit", rows[1][2])
+        self.assertIn("Never a unit", rows[2][2])
+
+    def test_every_surface_states_the_codex_policy(self) -> None:
+        # Same policy in the skill, the command pointer, and the OpenAI wrapper:
+        # Agy by default, Codex only when the user names it, never the
+        # coordinator's own pick or a fallback, run by dispatch-task, and its
+        # model and effort from the registry row.
+        for path in (SKILL, POINTER, OPENAI):
+            with self.subTest(path.name):
+                text = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn("by default", text)
+                self.assertRegex(text, r"only when the (?:user|user's request) names Codex")
+                self.assertRegex(text, r"never picks Codex on its own")
+                self.assertRegex(text, r"fallback when Agy is short|as a fallback")
+                self.assertIn("dispatch-task.sh", text)
+                self.assertIn("prun-worker", text)
+                self.assertNotRegex(text, r"Codex (?:is|are) (?:not|excluded)|not a prun executor")
+                self.assertNotIn("reserved for `/vet`", text)
+
+    def test_the_router_row_follows_the_executor_policy(self) -> None:
+        # The router's one-line summary is read before the skill is, so a row
+        # that still reserves Codex for review sends a user who names it away.
+        rows = [
+            line
+            for line in ROUTING_TABLE.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| `prun` |")
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Agy workers by default", rows[0])
+        self.assertIn("when the user names Codex", rows[0])
+        self.assertNotIn("reserved for", rows[0])
 
     def test_no_surface_spawns_a_claude_subagent(self) -> None:
         for path in (SKILL, POINTER, OPENAI):
@@ -78,7 +116,7 @@ class PrunExecutorContractTests(unittest.TestCase):
     def test_the_prohibition_is_stated_where_units_are_assigned(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertIn("**Never a Claude-side worker.**", text)
-        self.assertIn("3. **Assign**: every unit goes to Agy.", text)
+        self.assertIn("3. **Assign**: every unit goes to Agy, except a unit the user named for Codex.", text)
 
     def test_the_public_docs_do_not_route_units_to_sonnet(self) -> None:
         # anywhere-agents publishes a docs site whose prun page puts its own

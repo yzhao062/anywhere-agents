@@ -101,6 +101,7 @@ nav:
       - Copyable patterns: skills/references/patterns.md
       - Audit checklist: skills/references/checklist.md
     - prun: skills/prun.md
+    - agent-models: skills/agent-models.md
     - editable-figure:
       - skills/editable-figure.md
       - Document contexts: skills/references/document-contexts.md

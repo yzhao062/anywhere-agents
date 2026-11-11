@@ -59,14 +59,14 @@ bash ../agent-config/scripts/check-parity.sh
 #        anywhere-agents URLs in both repos, and agent-config keeps its own lines
 #        in AGENTS.local.md, so there is no sanitize step and no drift to expect),
 #        scripts/{_python, guard.py, session_bootstrap.py, statusline.py, agent-quota.py,
-#        merge_settings.py, render_banner.py, pack_identity.py,
+#        agent_models.py, merge_settings.py, render_banner.py, pack_identity.py,
 #        generate_agent_configs.py, pre-push-smoke.sh, remote-smoke.sh, check-parity.sh},
-#        .claude/settings.json, .githooks/pre-push,
+#        user/agent-models.json, .claude/settings.json, .githooks/pre-push,
 #        .github/workflows/{real-agent-smoke.yml, validate.yml},
 #        bootstrap/bootstrap.{sh,ps1}, .claude/commands/*.md
-#        for all 6 shipped skills, and the STRICT skill trees (recursive)
+#        for all 7 shipped skills, and the STRICT skill trees (recursive)
 #        skills/{implement-review,ci-mockup-figure,readme-polish,prun,
-#        editable-figure} (skills/my-router is BY-DESIGN below).
+#        editable-figure,agent-models} (skills/my-router is BY-DESIGN below).
 #        scripts/check-parity.sh is the authoritative membership list.
 #      BY-DESIGN (expected to differ; both sides must exist; a +/- line delta is
 #      reported per file for eyeball):
@@ -317,7 +317,7 @@ Every workflow in `.github/workflows/` that calls a model API has a documented p
 | `validate.yml` | push + PR | $0 (no API calls) | — |
 | `docs-strict-build.yml` | push + PR | $0 (no API calls) | — |
 | `publish.yml` | `release: published` + manual | $0 (OIDC upload, no API keys) | PyPI `skip-existing`; npm OIDC + provenance; `npm_only` dispatch input for PyPI-already-published reruns |
-| `real-agent-smoke.yml` | `release: published` + manual | under $0.10 | Sonnet pin on `claude -p`; handshake-only (a config probe and a skill-roster enumeration per agent) |
+| `real-agent-smoke.yml` | `release: published` + manual | under $0.10 | `claude -p` runs on the registry's Claude worker row (`user/agent-models.json`) and the job fails when the transcript shows another model or effort; handshake-only (a config probe and a skill-roster enumeration per agent) |
 | `package-smoke.yml` | `release: published` + weekly cron + manual | $0 (install/verify only, no API keys) | 12-attempt retry loop absorbs PyPI/npm CDN lag |
 
 ### Dispatch-approval policy (for agents)

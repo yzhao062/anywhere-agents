@@ -33,11 +33,11 @@ The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest 
 
 ## Review With a Second Model Family
 
-With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest Gemini Argon High the account lists, at `high` effort, through the official Antigravity CLI. Under the default model selection, an account that lists no Argon model falls back to the newest Gemini Flash High. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
+With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest model of the registry's Agy reviewer family that the account lists, through the official Antigravity CLI. Under the default model selection, an account that lists no member of that family falls back to the registry's fallback family. The registry (`user/agent-models.json`, see the `agent-models` skill) names the model and effort of the Claude, Codex, and Agy reviewers, and each of their dispatchers records what the CLI reported it ran on next to what it asked for. The Copilot dispatcher uses Copilot's own defaults and keeps no such record. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
 
 The Agy dispatcher reviews an isolated export of the staged Git index with unattended execution permission, then atomically publishes `Review-Antigravity.md`. It can run tests and experiments, including generated-file writes inside the disposable snapshot, without touching the original worktree. The same validation-capability contract applies to every automated `/vet` backend. See [implement-review](skills/implement-review.md) for backend selection, preflight, model overrides, self-review guards, and failure handling.
 
-For parallel execution, `/prun` runs every unit on Agy, unattended in a scratch directory or throwaway clone. It spawns no Claude subagents, which would bill the same Claude account the coordinating session runs on. Codex quota stays reserved for `/vet`, and fan-out width follows the task's independent units rather than a fixed small cap.
+For parallel execution, `/prun` runs every unit on Agy, unattended in a scratch directory or throwaway clone. It spawns no Claude subagents, which would bill the same Claude account the coordinating session runs on. A unit runs on a Codex worker only when you name Codex for it, and fan-out width follows the task's independent units rather than a fixed small cap.
 
 The installed Claude Code status line also shows all three quota sources in a compact row:
 
@@ -105,7 +105,7 @@ anywhere-agents pack remove profile
 
 - **[Install](install.md)** — PyPI, npm, raw shell. Prerequisites and troubleshooting.
 - **[Rule packs](rule-pack-composition.md)** — the always-on instruction layer. Covers the default `agent-style` writing pack, opt-out, pin-a-version, and how to register a new pack.
-- **[Skills](skills/index.md)** — deep documentation for the six shipped skills: `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`.
+- **[Skills](skills/index.md)** — deep documentation for the seven shipped skills: `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`, `agent-models`.
 - **[AGENTS.md reference](agents-md.md)** — section-by-section tour of the shared configuration, what bootstrap shares, the consumer layout, and which files each agent discovers.
 - **[Session banner](session-banner.md)** — the seven-line banner, how each field is derived, the report file, and the fallback.
 - **[Guard hook](guard-hook.md)** — why each PreToolUse gate denies, asks, or advises, and the escape hatches.

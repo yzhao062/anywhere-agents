@@ -10,7 +10,10 @@ final response atomically as the caller-selected review file.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -25,12 +28,51 @@ from pathlib import Path
 from typing import BinaryIO, Iterable
 
 
-# Agy 1.3.4 (2026-10) lists Gemini 4 Argon, the strongest Gemini it offers,
-# so the reviewer defaults to it. An account that does not list the Argon
-# family falls back to Gemini Flash, the previous default.
-DEFAULT_MODEL = "gemini-4-argon-high"
-FALLBACK_MODEL = "gemini-3.8-flash-high"
-DEFAULT_EFFORT = "high"
+def find_agent_models():
+    """Path of scripts/agent_models.py, found by walking up from this script.
+
+    A source repo and `.agent-config/repo` hold it at `<A>/scripts/`. A consumer
+    runs the copy bootstrap deploys under `<project>/.claude/skills/`, so there
+    it is `<project>/.agent-config/repo/scripts/`. The registry must sit beside
+    it. Returns None when no ancestor has one.
+    """
+    for base in Path(__file__).resolve().parents:
+        for root in (base, base / ".agent-config" / "repo"):
+            candidate = root / "scripts" / "agent_models.py"
+            if candidate.is_file() and (root / "user" / "agent-models.json").is_file():
+                return candidate
+    return None
+
+
+def _read_registry() -> tuple:
+    """The resolver module, the registry's Agy reviewer row, and the failure reason.
+
+    The registry (user/agent-models.json) names the reviewer's model family and
+    effort; scripts/agent_models.py reads it. The reason is empty on success.
+    """
+    resolver = find_agent_models()
+    try:
+        if resolver is None:
+            raise ImportError("scripts/agent_models.py was not found above this script")
+        spec = importlib.util.spec_from_file_location("agent_models", resolver)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {resolver}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, module.resolve("agy", "reviewer"), ""
+    except Exception as exc:  # a missing resolver, or a missing or invalid registry
+        return None, None, str(exc)
+
+
+# The row holds a family stem plus an effort tier as a slug. The preflight
+# floats the slug to the newest version the signed-in account lists, and an
+# account that lists no member of the family falls back to the registry's
+# fallback stem. With no answer these stay None and the dispatch stops, since
+# no literal here could stay current.
+AGENT_MODELS, _REGISTRY_ROW, REGISTRY_ERROR = _read_registry()
+DEFAULT_MODEL = _REGISTRY_ROW["slug"] if _REGISTRY_ROW else None
+FALLBACK_MODEL = _REGISTRY_ROW["fallback_slug"] if _REGISTRY_ROW else None
+DEFAULT_EFFORT = _REGISTRY_ROW["effort"] if _REGISTRY_ROW else None
 DEFAULT_TIMEOUT_SECONDS = 2700
 MIN_REVIEW_BYTES = 500
 # The line shapes health-check.py reads for Check 10, so the structure this
@@ -120,15 +162,15 @@ def newest_in_family(template: str, available: Iterable[str]) -> str:
     """The newest model `available` lists in the same family as `template`.
 
     A family is the template's name without its version and its effort tier:
-    `claude-sonnet-5-5-high` is Claude Sonnet, `gemini-3.8-flash-high` is
-    Gemini Flash. Both the version and the tier may change, so a rename that
-    only moves the tier still resolves, as when Agy 1.2.16 replaced
-    `claude-sonnet-4-6` with `claude-sonnet-5-5-high`. A different name is a
-    different family: no lite or pro variant joins Flash. The tier is chosen
-    first, in this order: the template's own tier (`high` when it has none),
-    then `high`, then an untiered slug. The newest version within that tier
-    wins, comparing versions as integer tuples so 3.10 is newer than 3.9, and
-    the template itself wins a tie. An older high therefore beats a newer
+    in `<name>-<version>-<tier>`, every slug that shares the name is one
+    family. Both the version and the tier may change, so a rename that only
+    moves the tier still resolves, as when Agy 1.2.16 moved the tier into the
+    Claude slugs. A different name is a different family: no lite or pro
+    variant joins the base name. The tier is chosen first, in this order: the
+    template's own tier (`high` when it has none), then `high`, then an
+    untiered slug. The newest version within that tier wins, comparing
+    versions as integer tuples so 3.10 is newer than 3.9, and the template
+    itself wins a tie. An older high therefore beats a newer
     medium, which keeps the dispatchers' `high` effort valid. With none of
     those tiers listed, the newest member wins. A template that does not
     parse, or whose family `available` does not list, comes back unchanged.
@@ -289,13 +331,33 @@ def cli_executable() -> tuple[str | None, int]:
     )
 
 
+class RegistryUnavailable(Exception):
+    """The registry could not name a value no override supplied."""
+
+
 def requested_model() -> tuple[str, str, bool]:
-    """The model and effort the environment asks for, and whether the model may float."""
-    model = os.environ.get("ANTIGRAVITY_DISPATCH_MODEL", DEFAULT_MODEL).strip()
-    effort = os.environ.get("ANTIGRAVITY_DISPATCH_EFFORT", DEFAULT_EFFORT).strip()
-    # A model the caller named runs verbatim; only the default floats to the
-    # newest member of its family during the preflight.
-    return model, effort, "ANTIGRAVITY_DISPATCH_MODEL" not in os.environ
+    """The model and effort a run asks for, and whether the model may float.
+
+    ANTIGRAVITY_DISPATCH_MODEL and ANTIGRAVITY_DISPATCH_EFFORT override the
+    registry for one run; whatever they leave unset comes from the registry.
+    """
+    model_env = os.environ.get("ANTIGRAVITY_DISPATCH_MODEL")
+    effort_env = os.environ.get("ANTIGRAVITY_DISPATCH_EFFORT")
+    if (model_env is None and DEFAULT_MODEL is None) or (
+        effort_env is None and DEFAULT_EFFORT is None
+    ):
+        raise RegistryUnavailable(
+            "cannot read the reviewer model and effort from the registry "
+            "(user/agent-models.json, resolved by scripts/agent_models.py): "
+            f"{REGISTRY_ERROR or 'the resolver did not answer'}. Fix the registry "
+            "(see the agent-models skill), or set ANTIGRAVITY_DISPATCH_MODEL and "
+            "ANTIGRAVITY_DISPATCH_EFFORT for this run"
+        )
+    model = (DEFAULT_MODEL if model_env is None else model_env).strip()
+    effort = (DEFAULT_EFFORT if effort_env is None else effort_env).strip()
+    # A model the caller named runs verbatim; only the registry's slug floats
+    # to the newest member of its family during the preflight.
+    return model, effort, model_env is None
 
 
 def effort_for(model: str, effort: str) -> str:
@@ -318,7 +380,10 @@ def print_model() -> int:
     executable, code = cli_executable()
     if not executable:
         return code
-    model, effort, allow_resolution = requested_model()
+    try:
+        model, effort, allow_resolution = requested_model()
+    except RegistryUnavailable as exc:
+        return fail(str(exc), 70)
     if not model or not effort:
         return fail("model and effort overrides must be non-empty")
     with tempfile.TemporaryDirectory(prefix="implement-review-gemini-model-") as scratch:
@@ -684,6 +749,59 @@ def publish_review(
     return True, ""
 
 
+def record_request(state_dir: Path, model: str, effort: str) -> None:
+    """Write <state-dir>/review-model: what was requested and where each value came from."""
+    model_source = "env" if "ANTIGRAVITY_DISPATCH_MODEL" in os.environ else "registry"
+    if "ANTIGRAVITY_DISPATCH_EFFORT" in os.environ:
+        effort_source = "env"
+    elif effort == DEFAULT_EFFORT:
+        effort_source = "registry"
+    else:
+        effort_source = "slug"  # the floated slug carries a tier other than the registry's
+    (state_dir / "review-model").write_text(
+        f"model={model} source={model_source} effort={effort} effort_source={effort_source}\n",
+        encoding="utf-8",
+    )
+
+
+def record_actual(state_dir: Path, log_path: Path, model: str, effort: str) -> None:
+    """Append the model and effort Agy's own log reports to the record.
+
+    The resolver prints MODEL-MISMATCH on stderr when they differ from the
+    request, and MODEL-UNVERIFIED when the log holds no model label.
+    """
+    line = ""
+    if AGENT_MODELS is not None:
+        report = io.StringIO()
+        namespace = argparse.Namespace(
+            family="agy",
+            session_id=None,
+            stderr_file=None,
+            log_file=str(log_path),
+            expect_model=model,
+            expect_effort=effort,
+        )
+        try:
+            with contextlib.redirect_stdout(report):
+                AGENT_MODELS.cmd_actual(namespace)
+        except Exception:
+            report = io.StringIO()
+        line = report.getvalue().strip()
+    if not line.startswith("actual="):
+        line = "actual=unknown status=unknown"
+        print(
+            "dispatch-gemini: MODEL-UNVERIFIED the run could not be read back "
+            f"(no resolver); requested {model} {effort}",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        with (state_dir / "review-model").open("a", encoding="utf-8") as record:
+            record.write(line + "\n")
+    except OSError:
+        pass
+
+
 def tail_to_stderr(path: Path, count: int = 80) -> None:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -765,7 +883,10 @@ def main(argv: list[str] | None = None) -> int:
     if not executable:
         return code
 
-    model, effort, allow_resolution = requested_model()
+    try:
+        model, effort, allow_resolution = requested_model()
+    except RegistryUnavailable as exc:
+        return fail(str(exc), 70)
     if not model or not effort:
         return fail("model and effort overrides must be non-empty")
     try:
@@ -808,6 +929,7 @@ def main(argv: list[str] | None = None) -> int:
     if preflight_code:
         return preflight_code
     effort = effort_for(model, effort)
+    record_request(state_dir, model, effort)
 
     validation_dir, diff_text, _ = prepare_snapshot(cwd, state_dir)
     if validation_dir is None:
@@ -825,6 +947,9 @@ def main(argv: list[str] | None = None) -> int:
 
     tail_path = state_dir / "tail"
     stderr_path = state_dir / "tail.stderr-tmp"
+    # Agy logs the model label it propagates to its backend; the actual-model
+    # check reads that line after the run.
+    agy_log_path = state_dir / "agy.log"
     command = [
         executable,
         "--input-format",
@@ -842,6 +967,8 @@ def main(argv: list[str] | None = None) -> int:
         str(validation_dir),
         "--print-timeout",
         f"{timeout_seconds}s",
+        "--log-file",
+        str(agy_log_path),
     ]
     event = json.dumps(
         {"event": "user", "message": {"content": relay_prompt}},
@@ -887,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 70
         stdout_thread.join()
         stderr_thread.join()
+
+    record_actual(state_dir, agy_log_path, model, effort)
 
     if exit_code == 0:
         status, response, error = extract_result(tail_path)

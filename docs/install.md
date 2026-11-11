@@ -75,11 +75,12 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 ## What the bootstrap does
 
 1. Fetches the latest `AGENTS.md` from upstream and copies it into the project root (also `.agent-config/AGENTS.md` as the cached source).
-2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, `scripts/statusline.py`, `scripts/agent-quota.py`, and `user/settings.json` into `.agent-config/repo/`.
+2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, `scripts/statusline.py`, `scripts/agent-quota.py`, `scripts/agent_models.py`, `user/agent-models.json`, and `user/settings.json` into `.agent-config/repo/`.
 3. Copies shared `.claude/commands/*.md` into the project's `.claude/commands/`. Non-destructive — does not delete unrelated local pointer files.
 4. Merges shared `.claude/settings.json` keys into the project's copy. Project-only keys are preserved.
-5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json`. The merge carries hook wiring, the statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=65`, `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`, and user-level permissions.
-6. Appends `.agent-config/` to the project's `.gitignore` if not already present.
+5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json`. The merge carries hook wiring, the statusLine command, the model and effort keys (`model`, `effortLevel`, and the `env` entries `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_CODE_SUBAGENT_MODEL`, whose values come from the registry `user/agent-models.json`), `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=65`, and user-level permissions.
+6. Runs `scripts/agent_models.py sync`, which writes the registry's interactive Codex values into `~/.codex/config.toml` and its interactive Agy value into the Antigravity settings. It leaves a tool that is not installed alone, and `AGENT_MODELS_SYNC=off` skips the step.
+7. Appends `.agent-config/` to the project's `.gitignore` if not already present.
 
 ## Pack manifest schema (v0.6.0)
 
@@ -136,11 +137,11 @@ irm https://claude.ai/install.ps1 | iex
 
 Migrating from a package manager: run `npm uninstall -g @anthropic-ai/claude-code` or `winget uninstall Anthropic.ClaudeCode` first, then the native installer. Inside Claude Code, `/config` sets the release channel (`latest` or `stable`). `claude doctor` inspects the updater and `claude update` forces an immediate check. To disable auto-update, set `DISABLE_AUTOUPDATER=1` in the environment or add `"env": {"DISABLE_AUTOUPDATER": "1"}` to `~/.claude/settings.json`; the environment variable takes precedence over every other flag. The session banner reads the same signals to report `auto-update: on` or `off`.
 
-**Effort level.** Bootstrap installs `CLAUDE_CODE_EFFORT_LEVEL=xhigh` into the `env` block of `~/.claude/settings.json` through the shared `user/settings.json`, so one bootstrap run on any consuming project lands the user-level default. A managed cap applies first. The `CLAUDE_CODE_EFFORT_LEVEL` environment variable then outranks `--effort` at launch and `/effort` inside a session, where the slash command warns that the variable is overriding the live effort. Without the variable, `--effort <level>` at launch lasts one session, `/effort <level>` saves the level for the current model, and `/effort max` lasts one session. When nothing is chosen, Claude checks settings files in precedence order, and the first file with an applicable level decides. Within one file, the level saved for the model wins over a top-level `effortLevel`. With no applicable level, Claude uses the model's own default, which differs by model. A top-level `effortLevel` in user settings does not apply to Opus 5.5 or later models; one in project, local, or managed settings does.
+**Model and effort level.** The registry (`user/agent-models.json`, see the `agent-models` skill) names the model and effort of every agent role, and `scripts/agent_models.py render` keeps the matching keys of the shared `user/settings.json` equal to it. Bootstrap merges those keys, including `CLAUDE_CODE_EFFORT_LEVEL` in the `env` block, into `~/.claude/settings.json`, so one bootstrap run on any consuming project lands the user-level default. A managed cap applies first. The `CLAUDE_CODE_EFFORT_LEVEL` environment variable then outranks `--effort` at launch and `/effort` inside a session, where the slash command warns that the variable is overriding the live effort. Without the variable, `--effort <level>` at launch lasts one session, `/effort <level>` saves the level for the current model, and `/effort max` lasts one session. When nothing is chosen, Claude checks settings files in precedence order, and the first file with an applicable level decides. Within one file, the level saved for the model wins over a top-level `effortLevel`. With no applicable level, Claude uses the model's own default, which differs by model. A top-level `effortLevel` in user settings does not apply to Opus 5.5 or later models; one in project, local, or managed settings does.
 
-Claude reviews dispatched by `/vet` skip user settings and pass `--effort max`, so the daily default does not lower them. A `CLAUDE_CODE_EFFORT_LEVEL` inherited from the launching environment still takes precedence. Bootstrap rewrites the user-level value on every run. To keep one repository at `max`, set the variable in that repository's `.claude/settings.local.json` `env` block, which outranks user settings.
+Claude reviews dispatched by `/vet` skip user settings, and the dispatcher passes the reviewer model and effort from the registry through `--model` and `--effort` and sets `CLAUDE_CODE_EFFORT_LEVEL` in the child environment to the same effort, so a variable inherited from a Claude parent cannot change the review. Bootstrap rewrites the user-level value on every run, and a session reads it once at start, so a running session keeps its old effort until it restarts. To keep one repository at a different level, set the variable in that repository's `.claude/settings.local.json` `env` block, which outranks user settings.
 
-The variable is the only persistent form of `max`. As of Claude Code v2.1.111 the `/effort` slider exposes `low`, `medium`, `high`, `xhigh`, and `max`, while the persisted `effortLevel` accepts the first four (v2.1.111 added `xhigh`). Selecting `max` through the slider therefore silently does not persist. Bootstrap uses the variable for the `xhigh` default as well, because a top-level `effortLevel` in user settings does not apply to Opus 5.5 or later. To set the variable by hand:
+The variable is the only persistent form of `max`. As of Claude Code v2.1.111 the `/effort` slider exposes `low`, `medium`, `high`, `xhigh`, and `max`, while the persisted `effortLevel` accepts the first four (v2.1.111 added `xhigh`). Selecting `max` through the slider therefore silently does not persist. Bootstrap uses the variable for the registry's level as well, because a top-level `effortLevel` in user settings does not apply to Opus 5.5 or later. To set the variable by hand, take the level from `python3 .agent-config/repo/scripts/agent_models.py resolve --family claude --role interactive --field effort` and put it in place of `<level>`:
 
 ```bash
 # macOS / Linux: add to the env block of ~/.claude/settings.json
@@ -148,7 +149,7 @@ python3 - <<'EOF'
 import json, pathlib
 p = pathlib.Path.home() / ".claude" / "settings.json"
 data = json.loads(p.read_text()) if p.exists() else {}
-data.setdefault("env", {})["CLAUDE_CODE_EFFORT_LEVEL"] = "xhigh"
+data.setdefault("env", {})["CLAUDE_CODE_EFFORT_LEVEL"] = "<level>"
 p.write_text(json.dumps(data, indent=2) + "\n")
 EOF
 ```
@@ -158,7 +159,7 @@ EOF
 $p = Join-Path $env:USERPROFILE ".claude\settings.json"
 $data = if (Test-Path $p) { Get-Content $p -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
 if (-not $data.env) { $data | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) }
-$data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyValue "xhigh" -Force
+$data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyValue "<level>" -Force
 # WriteAllText with an explicit encoding: Set-Content -Encoding utf8 writes a
 # byte-order mark on Windows PowerShell 5.1, which a strict JSON reader rejects.
 [System.IO.File]::WriteAllText($p, ($data | ConvertTo-Json -Depth 10) + "`n", [System.Text.UTF8Encoding]::new($false))
@@ -166,7 +167,7 @@ $data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyV
 
 **Auto-compaction.** The same `env` block carries `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=65`, which starts auto-compaction at 65% of the auto-compact window. A 1M-context model tunes that window to about 967K tokens, so compaction starts near 629K. Claude Code re-sends the whole conversation on every request, so a lower threshold keeps requests smaller on average. The variable only lowers the threshold; `/autocompact <tokens>` sets an absolute window per user instead.
 
-**Subagent model.** `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` runs the general-purpose subagent, teammates, and workflow agents on Sonnet when nothing else assigns them a model. On Claude Code v2.1.251 or later, a model Claude passes when it spawns an agent still wins, as does a `model` field in the agent's definition. A hard task can therefore still ask for Opus. Earlier versions let the variable override both. The built-in Explore and Plan subagents keep their own model selection, and forks keep the main conversation's model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257 or later) would move Explore and Plan too.
+**Subagent model.** `CLAUDE_CODE_SUBAGENT_MODEL` runs the general-purpose subagent, teammates, and workflow agents on the registry's Claude worker model when nothing else assigns them one. On Claude Code v2.1.251 or later, a model Claude passes when it spawns an agent still wins, as does a `model` field in the agent's definition. A hard task can therefore still ask for a different model, and an agent that acts as a reviewer passes the registry's reviewer model in the call. Earlier versions let the variable override both. The built-in Explore and Plan subagents keep their own model selection, and forks keep the main conversation's model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257 or later) would move Explore and Plan too.
 
 ### Codex
 

@@ -29,6 +29,15 @@ an incomplete-checks banner that names the failed phase or the skipped step.
 A zero exit alone never yields ``all clear``: every other check still runs.
 When an input is missing or unreadable, its check reports ``unavailable``
 rather than a zero, because a zero reads as a clean check.
+
+The model and effort each tool is configured to use come from the registry
+(``user/agent-models.json``, read through ``agent_models.py`` beside this
+file). The check compares what the tool will actually read (the process
+environment first, then its own config file) with the registry and names each
+difference. A copy of this script that ships without the resolver, such as
+the one in the anywhere-agents wheel, loads it from the consumer's
+``.agent-config/repo/scripts``; when neither place has one, the comparison is
+skipped without a message.
 """
 
 from __future__ import annotations
@@ -148,10 +157,47 @@ def _is_off(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _claude_setting(root: str, user_settings: str, settings_env: dict, env: Any,
+                    env_name: str, key: str) -> tuple:
+    """``(value, source, file_value)`` for a setting Claude Code reads from the
+    environment or from a config file.
+
+    The process environment wins, then the ``env`` block of the user settings,
+    then the ``key`` of a project-local, project, and user settings file in
+    that order. ``file_value`` is what the files alone say, which differs from
+    ``value`` when this session was started with an older environment.
+    """
+    file_value = ""
+    file_source = ""
+    if settings_env.get(env_name):
+        file_value = str(settings_env[env_name])
+        file_source = "settings-env"
+    else:
+        for candidate in (
+            os.path.join(root, ".claude", "settings.local.json"),
+            os.path.join(root, ".claude", "settings.json"),
+            user_settings,
+        ):
+            data = _read_json(candidate)
+            if isinstance(data, dict) and data.get(key):
+                file_value = str(data[key])
+                file_source = "settings"
+                break
+    if env.get(env_name):
+        return str(env[env_name]), "env", file_value
+    return file_value, file_source, file_value
+
+
+def _claude_user_settings() -> str:
+    """The user settings file Claude Code reads, honoring CLAUDE_CONFIG_DIR as the resolver does."""
+    override = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    return os.path.join(override or os.path.join(home_dir(), ".claude"), "settings.json")
+
+
 def claude_fields(root: str, environ: Optional[dict] = None) -> dict:
     """Version, latest, auto-update state, and effort for the Claude row."""
     env = os.environ if environ is None else environ
-    user_settings = os.path.join(home_dir(), ".claude", "settings.json")
+    user_settings = _claude_user_settings()
     settings_env = _settings_env(user_settings)
     version = _run_version("claude")
     latest = version_cache().get("claude_latest") or ""
@@ -162,27 +208,24 @@ def claude_fields(root: str, environ: Optional[dict] = None) -> dict:
     if isinstance(claude_json, dict) and claude_json.get("autoUpdates") is False:
         auto_update = False
 
-    effort = env.get("CLAUDE_CODE_EFFORT_LEVEL") or settings_env.get("CLAUDE_CODE_EFFORT_LEVEL") or ""
-    effort_source = "env" if effort else ""
-    if not effort:
-        for candidate in (
-            os.path.join(root, ".claude", "settings.local.json"),
-            os.path.join(root, ".claude", "settings.json"),
-            user_settings,
-        ):
-            data = _read_json(candidate)
-            if isinstance(data, dict) and data.get("effortLevel"):
-                effort = str(data["effortLevel"])
-                effort_source = "settings"
-                break
+    effort, effort_source, effort_file = _claude_setting(
+        root, user_settings, settings_env, env, "CLAUDE_CODE_EFFORT_LEVEL", "effortLevel")
+    model, model_source, model_file = _claude_setting(
+        root, user_settings, settings_env, env, "ANTHROPIC_MODEL", "model")
     if not effort:
         effort = "default"
+    subagent = env.get("CLAUDE_CODE_SUBAGENT_MODEL") or settings_env.get("CLAUDE_CODE_SUBAGENT_MODEL") or ""
     return {
         "version": version,
         "latest": str(latest),
         "auto_update": auto_update,
         "effort": effort,
         "effort_source": effort_source,
+        "effort_file": effort_file,
+        "model": model,
+        "model_source": model_source,
+        "model_file": model_file,
+        "subagent_model": str(subagent),
     }
 
 
@@ -268,8 +311,9 @@ def codex_fields() -> dict:
     version = _run_version("codex")
     latest = version_cache().get("codex_latest") or ""
     config_error = ""
+    codex_home = os.environ.get("CODEX_HOME", "").strip() or os.path.join(home_dir(), ".codex")
     try:
-        config = read_toml(os.path.join(home_dir(), ".codex", "config.toml"))
+        config = read_toml(os.path.join(codex_home, "config.toml"))
     except TomlError as exc:
         config = None
         config_error = str(exc)
@@ -280,6 +324,7 @@ def codex_fields() -> dict:
         "configured": isinstance(config, dict),
         "config_error": config_error,
         "model": "",
+        "provider": "",
         "reasoning": "",
         "tier": "",
         "fast_mode": None,
@@ -287,6 +332,7 @@ def codex_fields() -> dict:
     }
     if isinstance(config, dict):
         fields["model"] = str(config.get("model") or "")
+        fields["provider"] = str(config.get("model_provider") or "")
         fields["reasoning"] = str(config.get("model_reasoning_effort") or "")
         fields["tier"] = str(config.get("service_tier") or "")
         features = config.get("features")
@@ -451,7 +497,7 @@ def python_command(python: str, platform: Optional[str] = None) -> str:
 
 def agent_style_fields(root: str, consumer: bool, environ: Optional[dict] = None) -> dict:
     env = os.environ if environ is None else environ
-    settings_env = _settings_env(os.path.join(home_dir(), ".claude", "settings.json"))
+    settings_env = _settings_env(_claude_user_settings())
     python = sys.executable or "python"
     return {
         "installed": agent_style_installed(),
@@ -463,6 +509,73 @@ def agent_style_fields(root: str, consumer: bool, environ: Optional[dict] = None
         "disabled": _switch_off("AGENT_STYLE_HOOK", env, settings_env)
         or _switch_off("AGENT_CONFIG_GATES", env, settings_env),
     }
+
+
+def agy_fields() -> dict:
+    """The model the Antigravity CLI is configured to use, from its settings file."""
+    override = os.environ.get("ANTIGRAVITY_SETTINGS_FILE", "").strip()
+    path = override or os.path.join(home_dir(), ".gemini", "antigravity-cli", "settings.json")
+    if not os.path.isfile(path):
+        return {"present": False, "model": ""}
+    data = _read_json(path)
+    model = data.get("model") if isinstance(data, dict) else None
+    return {"present": True, "model": model if isinstance(model, str) else ""}
+
+
+def _agent_models(root: Optional[str] = None) -> Any:
+    """The resolver, or ``None`` when no copy of it is reachable.
+
+    It is read from this script's own directory first. A copy of this script
+    that ships alone (the anywhere-agents wheel renders the banner again after
+    its own heal pass) falls back to the sparse clone bootstrap keeps in the
+    consumer, ``<root>/.agent-config/repo/scripts``, so the banner reads the
+    same whichever entry point wrote it. The module is loaded from its file
+    rather than imported by name, so an unrelated ``agent_models`` on the
+    path is never mistaken for it.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    directories = [here]
+    if root:
+        directories.append(os.path.join(root, ".agent-config", "repo", "scripts"))
+    for directory in directories:
+        path = os.path.join(directory, "agent_models.py")
+        if not os.path.isfile(path):
+            continue
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("agent_models", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception:
+            return None
+    return None
+
+
+def registry_fields(root: Optional[str] = None) -> Optional[dict]:
+    """The interactive rows of the model registry, or ``None`` to skip the check.
+
+    ``None`` means there is nothing to compare against: the resolver or the
+    registry file is not reachable. A registry that exists but cannot be read
+    is reported, because a check that quietly turns itself off hides the
+    defect it exists to find.
+    """
+    module = _agent_models(root)
+    if module is None:
+        return None
+    try:
+        if not module.registry_path().is_file():
+            return None
+        data = module.load()
+        return {
+            "module": module,
+            "claude": module.resolve("claude", "interactive", data),
+            "claude_worker": module.resolve("claude", "worker", data),
+            "codex": module.resolve("codex", "interactive", data),
+            "agy": module.resolve("agy", "interactive", data),
+        }
+    except Exception as exc:
+        return {"error": _one_line(exc)}
 
 
 def pack_fields(root: str) -> dict:
@@ -517,6 +630,86 @@ def codex_issues(codex: dict) -> list:
             "Codex config.toml: set project_doc_max_bytes = %d (the default injects 32 KiB of AGENTS.md)"
             % PROJECT_DOC_MIN_BYTES
         )
+    return issues
+
+
+def _claude_model_name(value: str) -> str:
+    """A model setting without a context-window suffix such as ``[1m]``."""
+    return value.split("[", 1)[0].strip()
+
+
+def _claude_drift(label: str, have: str, want: str, source: str, env_name: str, file_is_right: bool) -> str:
+    """One Claude difference. A value taken from the environment while the
+    settings file already holds the registry's value is a session started with
+    the older file, which only a restart fixes."""
+    where = " (from %s in the environment)" % env_name if source == "env" else ""
+    fix = ("restart this session; if it persists, a shell or a project settings file sets %s" % env_name
+           if source == "env" and file_is_right else "run bootstrap to refresh ~/.claude/settings.json")
+    return "Claude %s is %s%s but the registry says %s (%s)" % (label, have, where, want, fix)
+
+
+def _model_matches(module: Any, want: str, have: str) -> bool:
+    """A configured Claude model equals the registry's, as an alias or a full id."""
+    return bool(have) and (have == want or module.matches("claude", want, None, have, None))
+
+
+def registry_issues(fields: dict) -> list:
+    """Where a tool's own configuration differs from the registry.
+
+    The comparison reads what each tool will use, not what bootstrap meant to
+    write: the process environment outranks Claude Code's settings files, so a
+    stale shell variable, a session that started before the file was fixed, or
+    an ``ANTHROPIC_MODEL`` export shows up here even when
+    ``~/.claude/settings.json`` is correct. A tool that is not installed or has
+    no config file is left alone.
+    """
+    registry = fields.get("registry")
+    if not registry:
+        return []
+    if registry.get("error"):
+        return ["model registry unusable (%s)" % registry["error"]]
+    module = registry["module"]
+    issues = []
+
+    claude = fields["claude"]
+    if claude.get("version") is not None:
+        want = registry["claude"]
+        if claude["effort"] != want["effort"]:
+            issues.append(_claude_drift(
+                "effort", claude["effort"], want["effort"], claude.get("effort_source", ""),
+                "CLAUDE_CODE_EFFORT_LEVEL", claude.get("effort_file") == want["effort"]))
+        have = _claude_model_name(claude.get("model") or "")
+        if not have:
+            issues.append("Claude model is not set but the registry says %s (run bootstrap to refresh ~/.claude/settings.json)"
+                          % want["model"])
+        elif not _model_matches(module, want["model"], have):
+            issues.append(_claude_drift(
+                "model", have, want["model"], claude.get("model_source", ""), "ANTHROPIC_MODEL",
+                _model_matches(module, want["model"], _claude_model_name(claude.get("model_file") or ""))))
+        worker = registry["claude_worker"]
+        have = _claude_model_name(claude.get("subagent_model") or "")
+        if not _model_matches(module, worker["model"], have):
+            issues.append("Claude subagent model is %s but the registry says %s (run bootstrap to refresh ~/.claude/settings.json)"
+                          % (have or "not set", worker["model"]))
+
+    codex = fields["codex"]
+    if codex.get("installed") and codex.get("configured"):
+        want = registry["codex"]
+        if codex.get("provider") in ("", "openai") and codex.get("model") != want["model"]:
+            issues.append("Codex model is %s but the registry says %s (run bootstrap, or `agent_models.py sync`)"
+                          % (codex.get("model") or "not set", want["model"]))
+        if codex.get("reasoning") != want["effort"]:
+            issues.append("Codex reasoning effort is %s but the registry says %s (run bootstrap, or `agent_models.py sync`)"
+                          % (codex.get("reasoning") or "not set", want["effort"]))
+
+    agy = fields.get("agy") or {}
+    if agy.get("present"):
+        want = registry["agy"]
+        wanted = [module.family_key(slug) for slug in (want.get("slug"), want.get("fallback_slug")) if slug]
+        have = agy.get("model") or ""
+        if not have or module.family_key(module.display_to_slug(have)) not in wanted:
+            issues.append("Agy model is %s but the registry says %s (run bootstrap, or `agent_models.py sync`)"
+                          % (have or "not set", want["slug"]))
     return issues
 
 
@@ -588,6 +781,8 @@ def collect(root: str, event_ts: Optional[float] = None, bootstrap_rc: Optional[
         "skills": skill_buckets(root),
         "hooks": hook_state(),
         "agent_style": agent_style_fields(root, consumer, environ),
+        "registry": registry_fields(root),
+        "agy": agy_fields(),
         "workflows": workflow_findings(root),
         "ledger": read_ledger(root) if consumer else None,
         "event_ts": event_ts if event_ts is not None else (read_event_ts(root) if consumer else None),
@@ -609,9 +804,7 @@ def session_check(fields: dict) -> str:
         issues.append("session_bootstrap.py missing from ~/.claude/hooks (run bootstrap)")
     if hooks["guard"]:
         issues.extend(agent_style_issues(fields.get("agent_style")))
-    claude = fields["claude"]
-    if claude["effort"] not in ("xhigh", "max"):
-        issues.append("Claude effort is %s; set CLAUDE_CODE_EFFORT_LEVEL=xhigh in ~/.claude/settings.json env" % claude["effort"])
+    issues.extend(registry_issues(fields))
     issues.extend(codex_issues(fields["codex"]))
     issues.extend(fields["workflows"])
     packs = fields["packs"]

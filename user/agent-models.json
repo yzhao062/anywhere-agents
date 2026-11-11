@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "about": "The one place that names the model and effort of each agent. Every dispatcher, review panel, audit, and bootstrap sync reads it through scripts/agent_models.py. Change it with that script's set command and follow skills/agent-models/SKILL.md.",
+  "families": {
+    "claude": {
+      "model": "opus",
+      "effort": "xhigh"
+    },
+    "codex": {
+      "model": "gpt-6-astra",
+      "effort": "medium"
+    },
+    "agy": {
+      "model": "gemini-4-argon",
+      "effort": "high",
+      "fallback_model": "gemini-3.8-flash"
+    }
+  },
+  "roles": {
+    "interactive": {},
+    "reviewer": {},
+    "premium": {
+      "claude": {
+        "model": "fable",
+        "effort": "high"
+      }
+    },
+    "worker": {
+      "claude": {
+        "model": "sonnet"
+      }
+    },
+    "prun-worker": {
+      "agy": {
+        "model": "gemini-3.8-flash",
+        "effort": "high",
+        "second_model": "claude-sonnet-5-5",
+        "fallback_model": null
+      },
+      "codex": {
+        "effort": "high"
+      }
+    }
+  }
+}

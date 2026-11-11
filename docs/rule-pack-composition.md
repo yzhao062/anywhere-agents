@@ -8,7 +8,7 @@ anywhere-agents ships two composition layers. They are independent; a project ca
 
 | Layer | Mechanism | Examples |
 |---|---|---|
-| **Skill pack** | On-demand, invoked via the `Skill` tool when the agent routes to it | `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun` |
+| **Skill pack** | On-demand, invoked via the `Skill` tool when the agent routes to it | `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`, `agent-models` |
 | **Rule pack** | Always-on; injected into `AGENTS.md` at bootstrap time so every prompt sees the content | `agent-style` (writing rules). Future candidates: `agent-security`, `agent-research-ethics` |
 
 Rule packs are the right fit when the content should apply to every interaction (writing discipline, banned words, formatting defaults). Skill packs are the right fit for workflows the agent invokes explicitly (code review, README polish).

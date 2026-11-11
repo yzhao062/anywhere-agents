@@ -8,8 +8,8 @@ live run does not abort a compose transaction (anywhere-agents#43).
 
 These two tests were the part of tests/test_dispatch_task.py that did not cover
 the Codex worker scripts. Those scripts moved to legacy/prun-codex-worker/ and
-their contract tests retired with them. These cover scripts that stay, so they
-live here. dispatch-task.sh used to sort ahead of both and hide them, which is
+their contract tests retired with them; the scripts and a slim contract set
+came back on 2026-11-10. These two cover other scripts, so they stay here. dispatch-task.sh used to sort ahead of both and hide them, which is
 why they were written in that file to begin with.
 """
 from __future__ import annotations

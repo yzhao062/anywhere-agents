@@ -9,7 +9,7 @@ description: Context-aware router that detects work type and dispatches to the r
 
 A routing layer that sits between the outer workflow (e.g., `superpowers` brainstorm/plan/execute/verify) and domain skills. The router reads the working directory, file types, and user prompt to decide which skill to invoke, so the user does not need to remember skill names.
 
-In this repo's shipped form, the routing table has concrete entries for the six shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, `editable-figure`, `my-router` itself, and `prun` for explicit parallel fan-out intent). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
+In this repo's shipped form, the routing table has concrete entries for the seven shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, `editable-figure`, `agent-models`, `my-router` itself, and `prun` for explicit parallel fan-out intent). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
 
 ## When to Use Superpowers vs. Direct Dispatch
 
@@ -35,9 +35,11 @@ At dispatch time, the router checks three signals in order (keywords, file types
 
 ### 1. Prompt keywords (highest priority)
 
-The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, `readme-polish`, and `editable-figure`. Add entries for your own skills in your fork's `references/routing-table.md`, or, in a consuming project, in a bootstrap-proof local file (see [Extending the Router](#extending-the-router)).
+The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, `readme-polish`, `editable-figure`, and `agent-models`. Add entries for your own skills in your fork's `references/routing-table.md`, or, in a consuming project, in a bootstrap-proof local file (see [Extending the Router](#extending-the-router)).
 
 When a figure request explicitly asks for PowerPoint or native editability, take the `editable-figure` route ahead of the generic figure, README-polish, or slide routes. A request to simplify an existing editable figure stays on that route. An explicit HTML mockup, TikZ, screenshot, or prompt-only request keeps its requested format. Before taking that route, check that the session can perform the desktop PowerPoint validation `editable-figure` requires. If it cannot, explain the limitation and offer `ci-mockup-figure` only when its output fits the request. Do not silently substitute HTML for an explicitly requested PPTX.
+
+A question about which model or effort an agent role runs on, a request to change one, or a doubt that a setting took effect goes to `agent-models`. Run its `show` and `doctor` commands before answering, and never state a model name or effort level from memory.
 
 See [`references/routing-table.md`](references/routing-table.md) for the current table and the extension template.
 
@@ -113,6 +115,9 @@ See `implement-review/SKILL.md` for the review loop protocol.
 
 **User says:** "Make an HTML mockup for the method figure"
 → Router detects: keyword "mockup" → dispatches to `ci-mockup-figure`.
+
+**User says:** "Which model does the /vet reviewer run on, and is my effort change taking effect?"
+→ Router detects: keywords "which model" and "taking effect" → dispatches to `agent-models`, which reads the registry with `show`, compares the live configs with `doctor`, and reads back what each CLI ran on with `verify`.
 
 **User says:** "Polish the README with modern patterns"
 → Router detects: keyword "polish README" → dispatches to `readme-polish`.

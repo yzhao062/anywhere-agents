@@ -62,7 +62,7 @@ anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
 
 一个 **pack** 就是一个小包：一组规则、一个 skill、或者一份权限策略。`composer` 把它送到该到的位置 —— `AGENTS.md`、`.claude/skills/`、`.claude/commands/`、`~/.claude/hooks/`、或 `~/.claude/settings.json`。
 
-`bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`，其中 `aa-core-skills` 目前包含六个 skill：`ci-mockup-figure`、`editable-figure`、`implement-review`、`my-router`、`prun`、`readme-polish`；`editable-figure` 要交付完整的 PPTX 需要 Windows 或 macOS 上的桌面版 PowerPoint，随附的导出脚本仅限 Windows），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
+`bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`，其中 `aa-core-skills` 目前包含七个 skill：`agent-models`、`ci-mockup-figure`、`editable-figure`、`implement-review`、`my-router`、`prun`、`readme-polish`；`editable-figure` 要交付完整的 PPTX 需要 Windows 或 macOS 上的桌面版 PowerPoint，随附的导出脚本仅限 Windows），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
 
 从 v0.6.0 起，bundled 默认 policy 表是：`agent-style`（passive）→ `auto`（静默刷新 + stderr 摘要），`aa-core-skills`（active）→ `prompt`（默认应用 + stderr 摘要）。第三方 pack 默认 `prompt`。裸 `anywhere-agents` 对 mutable ref 上的 prompt-policy drift 走 inline apply；每个被命中的 pack 输出一行 stderr 摘要（`applied 1 update for <pack> @ <ref>: <old> -> <new>`)。每次跑要跳过：用 `ANYWHERE_AGENTS_UPDATE=skip` 环境变量（v0.5.0 契约）或 `--no-apply-drift` CLI flag（两者都设时 flag 优先）。需要长期 fail-closed：在 `agent-config.yaml` 里 pin `update_policy: locked`。`anywhere-agents pack add | remove | list` CLI 写一份用户级 manifest 到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`。从 v0.5.2 起，`pack add` 是一步到位：写行 + 跑 composer + 部署，全在一个命令里。
 
@@ -100,7 +100,7 @@ your-project/
 cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100% (6d23h) @now
 ```
 
-`cc` 是 Claude 那段，从 statusLine stdin 拿；`gpt` 是 Codex，读最近的 `~/.codex/sessions/**/rollout-*.jsonl`；`agy` 表示 `agy -p "/usage" --output-format json` 返回的 `Gemini Models` 额度组。百分比表示剩余额度，括号里是距窗口重置的时间，`(reset)` 表示窗口已重置但新读数尚未到，`@2m` 表示磁盘快照是两分钟前的。这个零 turn 查询从用户主目录在隐藏且有超时上限的后台 helper 中运行，每五分钟最多一次，所以状态行不等网络，也不会打开项目级 Agy workspace；lock 和失败冷却避免重复刷新。为了紧凑，statusline 只显示默认的 Gemini 池。独立的 `agent-quota.py` 会同时列出另一个 `Claude/GPT` 池，可通过 `claude-sonnet-4-6`、`claude-opus-4-6-thinking` 或 `gpt-oss-120b-medium` 使用。
+`cc` 是 Claude 那段，从 statusLine stdin 拿；`gpt` 是 Codex，读最近的 `~/.codex/sessions/**/rollout-*.jsonl`；`agy` 表示 `agy -p "/usage" --output-format json` 返回的 `Gemini Models` 额度组。百分比表示剩余额度，括号里是距窗口重置的时间，`(reset)` 表示窗口已重置但新读数尚未到，`@2m` 表示磁盘快照是两分钟前的。这个零 turn 查询从用户主目录在隐藏且有超时上限的后台 helper 中运行，每五分钟最多一次，所以状态行不等网络，也不会打开项目级 Agy workspace；lock 和失败冷却避免重复刷新。为了紧凑，statusline 只显示默认的 Gemini 池。独立的 `agent-quota.py` 会同时列出另一个 `Claude/GPT` 池，Agy 模型列表里的 Claude 模型和开源 GPT 模型使用这个池。
 
 ### 用 `/vet` 选择 reviewer
 
@@ -109,14 +109,16 @@ cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100
 | 命令 | Reviewer |
 |---|---|
 | `/vet` | Codex，不加 token 时的默认 reviewer |
-| `/vet agy` | Antigravity 里最新的 Gemini Argon High，`effort=high`；账号没有 Argon 时退回 Gemini Flash High |
+| `/vet agy` | Antigravity 账号列出的、属于 registry 里 Agy reviewer 模型系列的最新版本；账号没有该系列时退回 registry 里的 fallback 系列 |
 | `/vet gemini` 或 `/vet antigravity` | `/vet agy` 的兼容别名 |
 | `/vet copilot` | GitHub Copilot CLI |
 | `/vet claude` | 无头 Claude Code；如果主 agent 本来就是 Claude Code，自审 guard 会改走别家 |
 
 如果没有设置用户级 Auto-terminal 默认，就显式写一次 channel：`/vet auto agy`。Agy backend 使用已安装 `agy` CLI 上登录的 Google AI plan，不另要 Gemini API key。它在 staged Git index 的隔离导出中以 `accept-edits` 加自动批准工具权限运行，因此能实际跑实验，同时不会把生成物写进原工作树。完成后原子发布 `Review-Antigravity.md`。需要临时换模型时设 `ANTIGRAVITY_DISPATCH_MODEL`，需要换 effort 时设 `ANTIGRAVITY_DISPATCH_EFFORT`。
 
-`/prun` 采用另一套成本分工：每个单元都交给 Agy，在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。它不启动 Claude subagent，因为这些 subagent 消耗的是协调 session 所在的同一个 Claude 账户额度。Codex 明确退出批量 fan-out，只保留给 `/vet`。Agy worker 默认最新的 Gemini Flash High / `high`，因为同一任务在 Agy 的五小时额度上，Argon High 的消耗约为 Flash High 的四倍；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
+Claude、Codex 和 Agy 这三个 reviewer 的模型和 effort 都来自同一个 registry，`user/agent-models.json`，由 `scripts/agent_models.py` 读取（`agent-models` skill 用来查看、检查和修改它）。review 默认使用与交互 session 相同的 effort，不再有单独的下限。这三者的 dispatcher 都会写一份记录，把请求的模型和 effort 与 CLI 自己报告的实际值并列（review 写 `<state-dir>/review-model`，`prun` 单元写 `<state-dir>/model-actual`），报告的值与请求不一致时打印 `MODEL-MISMATCH`，报告缺失或不完整时打印 `MODEL-UNVERIFIED`。Copilot dispatcher 使用 Copilot 自己的默认值，不写这份记录。Bootstrap 会运行 `agent_models.py sync`，把交互用的 Codex 和 Agy 取值写进 `~/.codex/config.toml` 与 Antigravity 设置；设 `AGENT_MODELS_SYNC=off` 可跳过。
+
+`/prun` 采用另一套成本分工：每个单元都交给 Agy，在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。它不启动 Claude subagent，因为这些 subagent 消耗的是协调 session 所在的同一个 Claude 账户额度。只有你明确指定某个单元用 Codex 时，它才会在 Codex worker 上运行（通过 `dispatch-task.sh` 或 `dispatch-task.ps1`）；协调器不会自己选 Codex，默认仍是 Agy。worker 的模型和 effort 由 registry 的 `prun-worker` 行决定。在一次实测对比中，同一单元用 reviewer 系列模型跑，在 Agy 五小时额度上的消耗约为较小 worker 系列的四倍；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
 
 ### 一份 AGENTS.md，每个 agent 一个生成文件
 
@@ -316,7 +318,7 @@ rule_packs:
 
 完整参考在 **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**：
 
-- 每个 skill 的深度文档（`implement-review`、`my-router`、`ci-mockup-figure`、`prun`、`readme-polish`、`editable-figure`）
+- 每个 skill 的深度文档（`implement-review`、`my-router`、`ci-mockup-figure`、`prun`、`readme-polish`、`editable-figure`、`agent-models`）
 - `AGENTS.md` 一节一节的说明
 - 定制指南（fork、override、扩展）
 - FAQ、troubleshooting、各平台注意事项（Windows、macOS、Linux）
@@ -388,12 +390,14 @@ anywhere-agents/
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
 │   ├── statusline.py              # 紧凑显示 Claude + Codex + Agy 额度
 │   ├── agent-quota.py             # 三家额度详情 + Agy cache 刷新
+│   ├── agent_models.py            # registry resolver: resolve, render, sync, scan, and `actual` (what a CLI really ran on)
 │   ├── compose_packs.py           # v2 composer: bundled pack、direct URL、drift prompt、locks、state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
 │   ├── packs/                     # pack 模块: auth、config、source fetch、state、locks、transaction、handlers
 │   ├── pre-push-smoke.sh          # pre-push real-agent smoke (validates current checkout)
 │   └── remote-smoke.sh            # post-publish real-agent smoke (validates published install)
 ├── skills/
+│   ├── agent-models/              # 通过唯一的 registry 查看、检查和修改每个 agent 的模型与 effort
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # 为论文/proposal/README 生成原生可编辑 PowerPoint 图
 │   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
@@ -407,7 +411,8 @@ anywhere-agents/
 │   ├── commands/                  # pointer files so Claude Code discovers the skills
 │   └── settings.json              # project-level permissions
 ├── user/
-│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, CLAUDE_CODE_EFFORT_LEVEL=xhigh
+│   ├── agent-models.json          # registry: 每个 agent 在各角色下的模型与 effort
+│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, rendered model and effort keys
 ├── docs/                          # Read the Docs source + README hero assets
 ├── tests/                         # bootstrap / guard / generator / session-bootstrap tests (Ubuntu + Windows + macOS CI, Python 3.9-3.13)
 ├── .github/workflows/             # validate, real-agent-smoke, package-smoke CI
