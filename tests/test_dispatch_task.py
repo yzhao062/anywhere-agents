@@ -255,7 +255,9 @@ class _DispatchTaskContractMixin:
             self.assertTrue(pre.isdigit() and int(pre) < 10**12, "Unix epoch seconds, not FILETIME")
             self.assertAlmostEqual(int(pre), old_mtime, delta=2)
             self.assertAlmostEqual(int(self._text(state, "timestamp")), int(time.time()), delta=60)
-            self.assertEqual(self._text(state, "result-file"), str(result_file))
+            # Resolved on both sides: a Windows temp directory can be spelled
+            # in its 8.3 short form on one side and in full on the other.
+            self.assertEqual(Path(self._text(state, "result-file")).resolve(), result_file.resolve())
             self.assertTrue(self._text(state, "dispatch-pid").isdigit())
             self.assertIn("mock-codex: stdout", self._text(state, "tail"))
 

@@ -641,9 +641,26 @@ class ResolverLocationTests(_HermeticCase):
             shutil.copy2(SCRIPTS / name, scripts / name)
         return scripts / "render_banner.py"
 
+    def _fake_claude(self) -> str:
+        """A directory holding a `claude` that answers --version.
+
+        The comparison leaves a tool that is not installed alone, and these
+        tests run the renderer in a subprocess, where the patched version probe
+        does not reach. A CI runner has no Claude Code, so the run brings one.
+        """
+        bin_dir = self.tmp / "bin"
+        if os.name == "nt":
+            _write(bin_dir / "claude.cmd", "@echo 2.1.0 (Claude Code)\r\n")
+        else:
+            shim = bin_dir / "claude"
+            _write(shim, "#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
+            shim.chmod(0o755)
+        return str(bin_dir)
+
     def _run(self, renderer: Path) -> str:
         env = dict(os.environ)
         env.pop("AGENT_MODELS_FILE", None)
+        env["PATH"] = self._fake_claude() + os.pathsep + env.get("PATH", "")
         _write(self.root / ".agent-config" / "last-run.json", _ledger())
         result = subprocess.run(
             [sys.executable, str(renderer), "--root", str(self.root), "--stdout"],

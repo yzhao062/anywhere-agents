@@ -188,6 +188,9 @@ class _DispatchInvokerMixin:
         codex_bin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        # The controlled PATH below holds no Python, and the dispatcher needs
+        # one to read the model registry.
+        env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
         env.pop("CODEX_BIN", None)
         if codex_bin is not None:
             env["CODEX_BIN"] = codex_bin
@@ -370,6 +373,7 @@ class WindowsPathResolutionTests(_DispatchInvokerMixin, unittest.TestCase):
             if git:
                 path_value += ";" + str(Path(git).parent)
             env = os.environ.copy()
+            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
             env.pop("CODEX_BIN", None)
             env["Path"] = path_value
             env["PATH"] = path_value
@@ -428,6 +432,7 @@ class WindowsPathResolutionTests(_DispatchInvokerMixin, unittest.TestCase):
             # Store alias listed FIRST on PATH; real install second.
             path_value = f"{fake_store};{real_bin};{_system32()}"
             env = os.environ.copy()
+            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
             env.pop("CODEX_BIN", None)
             env["Path"] = path_value
             env["PATH"] = path_value
