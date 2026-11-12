@@ -212,7 +212,7 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
    - **User-scoped default override**: when the environment variable `IMPLEMENT_REVIEW_DEFAULT_CHANNEL` is set (case-insensitive) to `auto`, `cli`, or `auto-terminal`, the synonyms the slash args accept, Auto-terminal becomes that user's default and no per-invocation opt-in token is needed. Read the variable once at Phase 1c entry. It is a per-user, per-machine setting, deliberately not a change to the shipped default. Claude Code reads it from the `env` block of `~/.claude/settings.json`, and Codex from `[shell_environment_policy] set` in `~/.codex/config.toml`. Agy has no such setting and sees only the environment it was started in.
    - When the variable is unset, empty, or holds an unrecognized value, the shipped Terminal-relay default applies, so a typo degrades to today's behavior. Unset and empty also leave the channel line unchanged. An unrecognized value adds one clause to the channel line naming the ignored value, so the user does not go on believing Auto-terminal is their default.
    - The override changes only which channel is the *default*. Every rule in item 2 still applies on top of it: manual override tokens still win, the `codex` PATH probe and the dispatch-script presence check still run, and a failed probe still routes through the Phase 1c backend-probe step.
-   - **User-scoped reviewer default**: `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way, supplies the reviewer tokens when the invocation names none: `both`, or any of `codex`, `claude`, `agy`, `copilot`, and `grok`, space-separated and case-insensitive. The item 2 rules then apply as if it had been typed, so `both` resolves against the coordinator. A reviewer token in the invocation wins. Unset, empty, or unrecognized keeps Codex, and an unrecognized value adds a clause to the channel line.
+   - **User-scoped reviewer default**: `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way, supplies the reviewer tokens when the invocation names none: `both`, `all`, or any of `codex`, `claude`, `agy`, `copilot`, and `grok`, space-separated and case-insensitive. The item 2 rules then apply as if it had been typed, so `both` resolves against the coordinator. A reviewer token in the invocation wins. Unset, empty, or unrecognized keeps Codex, and an unrecognized value adds a clause to the channel line.
 2. **Auto-terminal opt-in triggers**, evaluated in detection order at Phase 1c entry:
    - Mid-flow override toward manual: "back to manual" / "next round manual" / "use terminal-relay" in the user's most recent message forces Terminal-relay.
    - Mid-flow opt-in toward auto: "next round use cli" / "next round auto codex" forces Auto-terminal.
@@ -227,39 +227,38 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
      selects the two backends from `claude`, `codex`, and `agy` that are not
      coordinating. Under Claude Code it is `codex agy`, under Codex
      `claude agy`, and under Agy `codex claude`. Any other coordinator gets
-     `codex agy`. Resolve `both` using the coordinator identity passed to
+     `codex agy`. Resolve `both` and `all` using the coordinator identity passed to
      dispatchers in Phase 1c step 5. Do this before the self-review rewrites
-     in the other reviewer-backend items. The resolved pair excludes the
-     coordinator, so those rewrites leave it unchanged. When `both` includes
+     in the other reviewer-backend items. The resolved set excludes the
+     coordinator, so those rewrites leave it unchanged. When the set includes
      Claude, Auto-terminal requires every staged path to be in scope; see
      Phase 1b. `both` means that pair specifically rather than every backend
      that exists, so Copilot and Grok are never part of it; name the tokens explicitly
-     for any other combination. An invocation or plain phrase naming the
+     for any other combination. `all`, as a leading reviewer token
+     (`/vet all`, `vet all`), selects the three of `claude`, `codex`, `agy`,
+     and `grok` that are not coordinating.
+     An invocation or plain phrase naming the
      resolved pair is equivalent to `/vet both` under the same negation
      guard. Under Claude Code, examples are `/vet codex agy` and
      `review with codex and agy`. The channel lines name the coordinator and
      the resolved pair, for example `both → claude agy (coordinator: codex)`.
-     The same token reaches different reviewers depending on who runs the
-     skill, and those lines keep the target visible. Everything downstream
-     already takes a set. The expected reviewer set is the comma-separated
+     For `both`, the expected reviewer set is the comma-separated
      normalized list: `Codex,Antigravity` under Claude Code,
      `Claude-Code,Antigravity` under Codex, and `Codex,Claude-Code` under
-     Agy. Each reviewer gets its own watcher on its exact `Review-<Name>.md`.
+     Agy. For `all`, add `Grok`, or `Claude-Code` under Grok. Each reviewer gets its
+     own watcher on its exact `Review-<Name>.md`.
      Phase 2's multi-reviewer consolidation classifies each finding as
      Convergent or Single-source. With a single reviewer, nothing here
      changes.
 
      **Dispatch them in parallel when memory allows, one after another
-     otherwise.** Before the second dispatch, check available memory. On
+     otherwise.** Before each further concurrent dispatch, check available memory. On
      macOS, multiply the system-wide free percentage from
      `memory_pressure -Q` by `sysctl -n hw.memsize`; Linux reports
      `MemAvailable` in `/proc/meminfo`, and Windows reports
      `FreePhysicalMemory` (in KB) through `Win32_OperatingSystem`. With at
      least 16 GB available, dispatch the reviewers in parallel. Below that,
-     or when the check fails, dispatch them sequentially. With 4.5 GB free on
-     a 32 GB workstation, two concurrent dispatches were once both killed for
-     low memory, and neither produced a review. Sequential dispatch survived
-     the same conditions.
+     or when the check fails, dispatch them sequentially.
 
      In both modes the watcher is a wait-for-any helper. `auto-watch` exits as
      soon as one file matching its glob appears, so a single watcher over
@@ -268,9 +267,11 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
      per reviewer**, each with that reviewer's own `STATE-DIR` and its exact
      `Review-<Name>.md` rather than the wildcard. Where a later step names a
      single reviewer, a single `DONE`, or a whole-round fallback, apply it per
-     reviewer in a multi-reviewer round. A failing reviewer goes through the
-     failover queue while the other slots continue, and consolidation waits
-     for every expected reviewer.
+     reviewer in a multi-reviewer round. A failing reviewer other than Grok
+     goes through the failover queue while the other slots continue. In such
+     a round, a Grok slot that is absent, refused, or failed is a confirmed
+     failure: no failover and no round downgrade. Consolidation waits for
+     every expected reviewer.
 
      In sequential mode, before launching the next reviewer, require that the
      previous dispatcher returned, or identity-checked evidence that its worker
@@ -293,11 +294,10 @@ Codex runs as an IDE plugin with direct access to the repo. The user tells Codex
 
      Keep the full expected set for consolidation, so Phase 2 still classifies
      findings as Convergent or Single-source. If a reviewer fails, still run
-     the rest; when the round ends with one healthy current-round source and
-     the others confirmed failed, that source is complete intake, labelled
-     Single-source, and the manual follow-up and direct-paste steps Phase 2
-     otherwise asks for when several reviewers were expected do not apply,
-     because a confirmed dispatch failure already answers what they ask.
+     the rest; when every missing expected reviewer is confirmed failed, the
+     healthy current-round reviews are complete intake (Single-source if one
+     remains), and Phase 2's missing-reviewer follow-up and direct-paste
+     steps do not apply.
      Emit one channel line per reviewer so the user can see which backend
      each round actually reached.
 
@@ -418,11 +418,11 @@ Then wait for the user to relay the reviewer's feedback or confirm that the revi
 
 If the scripts are present, Claude Code does NOT present a copy-paste prompt block. Instead, the skill:
 
-1. Probes the selected backend: `codex`, `copilot` (with `gh copilot` fallback), `claude`, `agy`, or `grok` (via `GROK_BIN`, `PATH`, or `~/.grok/bin/grok`). For Gemini on Windows, accept `%LOCALAPPDATA%\agy\bin\agy.exe` even when the current process has the installer's older PATH. If absent: warn the user, and take the next entry of the Phase 1c failover queue if one probes clean, otherwise downgrade to Terminal-relay for this round. This is a preflight absence rather than a dispatched failure, so it does not set sticky downgrade either way.
+1. Probes the selected backend: `codex`, `copilot` (with `gh copilot` fallback), `claude`, `agy`, or `grok` (via `GROK_BIN`, `PATH`, or `~/.grok/bin/grok`). For Gemini on Windows, accept `%LOCALAPPDATA%\agy\bin\agy.exe` even when the current process has the installer's older PATH. If absent: warn the user, and take the next entry of the Phase 1c failover queue if one probes clean, otherwise downgrade to Terminal-relay for this round. In a multi-reviewer round, an absent `grok` instead leaves its slot confirmed failed, with no failover and no downgrade. A preflight absence never sets sticky downgrade.
 2. Probes session sticky-downgrade state. If active: downgrade to Terminal-relay (silent unless the user asks why).
 3. Assembles the prompt: byte-identical to the fenced Terminal-relay block above (same save contract, lens, focus, scope-challenge focus, prior findings).
 4. Writes the prompt to `<scratch>/agent-io/round-<N>-prompt.txt` under `%TEMP%` / `$TMPDIR`. See **Where the round's own files go** below for why the directory is named.
-5. Invokes the selected dispatcher from the same lookup root: `dispatch-codex.{ps1,sh}`, `dispatch-copilot.{ps1,sh}`, `dispatch-claude.{ps1,sh}`, `<python> dispatch-gemini.py`, or `<python> dispatch-grok.py`. Pass `--prompt-file <temp-path>`, `--round <N>`, and the matching expected review file: `Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Claude-Code.md`, `Review-Antigravity.md`, or `Review-Grok.md`. Set `IMPLEMENT_REVIEW_ORCHESTRATOR` in the dispatcher's environment to the coordinator's own identity: `claude` for Claude Code, `codex` for Codex, `agy` for Agy. Do this on every dispatch, including retries and failover, so an inherited runtime marker never decides who the coordinator is. Run in the background and size the timeout to the backend and reasoning tier. For Codex, use about 20 minutes (`1200000`) at the registry's effort and about 45 minutes (`2700000`) for a round raised to a higher level. Agy defaults its own `--print-timeout` to 45 minutes. Each dispatcher launches the shared `stall-watch` in the background. Its default 600-second silence threshold records `<state-dir>/stall-warning` without killing any process. A terminal Codex response-stream suffix records `<state-dir>/stream-death` and invokes the bounded reap contract below. Run the dispatcher from the reviewed repository's root, which is the session's working directory; to review another repository, change directory in its own tool call first, never as `cd <path> && <dispatcher>`, which the guard denies (23 of the 97 re-dispatches in 60 days were that denial).
+5. Invokes the selected dispatcher from the same lookup root: `dispatch-codex.{ps1,sh}`, `dispatch-copilot.{ps1,sh}`, `dispatch-claude.{ps1,sh}`, `<python> dispatch-gemini.py`, or `<python> dispatch-grok.py`. Pass `--prompt-file <temp-path>`, `--round <N>`, and the matching expected review file: `Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Claude-Code.md`, `Review-Antigravity.md`, or `Review-Grok.md`. Set `IMPLEMENT_REVIEW_ORCHESTRATOR` in the dispatcher's environment to the coordinator's own identity: `claude` for Claude Code, `codex` for Codex, `agy` for Agy, `grok` for Grok. Do this on every dispatch, including retries and failover, so an inherited runtime marker never decides who the coordinator is. Run in the background and size the timeout to the backend and reasoning tier. For Codex, use about 20 minutes (`1200000`) at the registry's effort and about 45 minutes (`2700000`) for a round raised to a higher level. Agy defaults its own `--print-timeout` to 45 minutes. Each dispatcher launches the shared `stall-watch` in the background. Its default 600-second silence threshold records `<state-dir>/stall-warning` without killing any process. A terminal Codex response-stream suffix records `<state-dir>/stream-death` and invokes the bounded reap contract below. Run the dispatcher from the reviewed repository's root, which is the session's working directory; to review another repository, change directory in its own tool call first, never as `cd <path> && <dispatcher>`, which the guard denies (23 of the 97 re-dispatches in 60 days were that denial).
 6. Reads the dispatch script's stdout: it emits exactly one line `STATE-DIR <abs-path>` (the only stdout line). Capture this path for Phase 2 to pass to `health-check --state-dir <abs-path> --round <N> --review-file Review-<Reviewer>.md`. Pass the backend's exact review filename explicitly (`Review-Codex.md`, `Review-GitHub-Copilot.md`, `Review-Claude-Code.md`, `Review-Antigravity.md`, or `Review-Grok.md`). All other dispatch diagnostics plus the last 80 backend lines go to the script's stderr.
 7. Phase 1d auto-watch runs once per reviewer; each watcher polls for that backend's exact review file with the current round marker. Phase 2 prologue (defined in Phase 2 below) adds Auto-terminal-specific gating before silent advance.
 
@@ -438,7 +438,7 @@ On a confirmed failure, consume the next entry and dispatch to it, stating in on
 
 Track requested reviewers and failover attempts by the same normalized identity. Every dispatch consumes that backend's entry, including an originally requested dispatch. A healthy review satisfies that backend's requested slot, so skip any later scheduled dispatch for it. A confirmed failed attempt is also final for that backend this round, apart from the bounded same-backend retries above.
 
-When no eligible automatic backend remains, finish with Single-source intake if the round already has a healthy review and all remaining requested reviewers are conclusively resolved. Do not set sticky downgrade in that case. Use Terminal-relay and set sticky downgrade only when automatic attempts have produced no healthy review.
+When no eligible automatic backend remains, finish intake with the healthy reviews the round has (Single-source if one) once all remaining requested reviewers are conclusively resolved. Do not set sticky downgrade in that case. Use Terminal-relay and set sticky downgrade only when automatic attempts have produced no healthy review.
 
 Routing a confirmed failure to a working reviewer rather than to the user is what § "Agent Fungibility" in `AGENTS.md` asks for: the review loop is the core function, and it has to survive one vendor being unavailable. Terminal-relay needs a person to carry the prompt and the answer by hand, so a session that reaches for it first has stopped being a review loop and started being a transcription task. Some users never take that step at all, which turns an automatic downgrade into a silent end of reviewing for the session. Terminal-relay stays as the final fallback, because a channel that needs no working CLI is the only one left when none of them run. A harness notification that the background task was stopped is not one of these triggers, and neither is a watcher that stopped with it. Resolve that case with `await-review` first (see Phase 1d); only its `DEAD` verdict is an Auto-terminal runtime failure. With the default `--sandbox danger-full-access` Codex can inspect the repo directly and tool-sandbox failures should be vanishingly rare; if one does occur (typically only when `CODEX_DISPATCH_SANDBOX` has been narrowed in a CI / shared environment) and Phase 2.0 surfaces it via Check 7 / 8 / Substance heuristics with dispatch exit 0, use the embedded-diff retry once before setting sticky downgrade (see "Embedded-diff retry for Codex tool-sandbox failure" in Codex Channels for the procedure and the diff-scoped-findings caveat). Do not add a truncated positional-argument fallback.
 

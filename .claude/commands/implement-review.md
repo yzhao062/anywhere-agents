@@ -1,6 +1,6 @@
 ---
 description: Run the implement-review staged-change review loop
-argument-hint: "[both|agy|claude|copilot|codex|grok] [auto|cli|auto-terminal|manual|plugin] [focus...]"
+argument-hint: "[both|all|agy|claude|copilot|codex|grok] [auto|cli|auto-terminal|manual|plugin] [focus...]"
 ---
 
 Read and follow the skill definition. Look for it at `skills/implement-review/SKILL.md` first, then `.claude/skills/implement-review/SKILL.md`, then `.agent-config/repo/skills/implement-review/SKILL.md`.
@@ -13,6 +13,6 @@ Treat the command arguments as part of the user's current task.
 With Auto-terminal as the user default, `/implement-review agy` selects
 Antigravity directly; `gemini` and `antigravity` remain aliases. With no
 reviewer token, the default is Codex unless `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`
-names others, such as `both`.
+names others, such as `both` or `all`.
 
 Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.

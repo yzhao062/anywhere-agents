@@ -4,7 +4,7 @@ This reference documents the opt-in Grok CLI backend for `/vet` (`skills/impleme
 
 ## Role and Opt-In Scope
 
-Grok is an explicit opt-in reviewer selected via `/vet grok` (or `/implement-review grok`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=grok` when a project or user sets it). Grok is never part of `both` and is never placed in the automatic failover queue. A failed Grok review exits with a non-zero status and does not fail over to another paid reviewer backend.
+Grok is an explicit opt-in reviewer selected via `/vet grok` (or `/implement-review grok`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=grok` when a project or user sets it), or via `all` (`/vet all`, `/implement-review all`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=all`), which selects the three of Claude, Codex, Agy, and Grok that are not coordinating. Grok is never part of `both` and is never placed in the automatic failover queue. In a multi-reviewer round, a Grok slot that is absent, refused by the budget guard, or failed is a confirmed failure, and the round continues with the other reviewers. A failed Grok review exits with a non-zero status and does not fail over to another paid reviewer backend.
 
 When `IMPLEMENT_REVIEW_ORCHESTRATOR=grok`, `dispatch-grok.py` refuses self-review and exits `2`.
 
@@ -91,7 +91,7 @@ After a clean `end_turn` exit, the dispatcher checks `<state-dir>/staged-snapsho
 
 ## Launch Route
 
-Because `user/settings.json` does not pre-authorize paid third-party CLIs for all consumers, `/vet grok` uses the following launch route under Claude Code:
+Because `user/settings.json` does not pre-authorize paid third-party CLIs for all consumers, `/vet grok` and `/vet all` use the following launch route under Claude Code:
 
 - In auto mode the classifier judges each command, and it refused a direct `grok --always-approve` launch. An `autoMode.allow` entry in the maintainer's own `~/.claude/settings.json` that describes the two Grok dispatchers lets it run them unattended. Keep `"$defaults"` in the list, because a list without it drops the built-in allow rules. Claude Code reads `autoMode` from user settings, managed settings, and inline settings passed with `--settings` or the Agent SDK, never from a project's `.claude/settings.json` or `.claude/settings.local.json`.
 - A permission allow rule does not do this job. Auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-grok.py *)`, a pattern that would also match `python3 -c "<code>" dispatch-grok.py`, and an allow rule does not match past a leading assignment such as `PRUN_SCRATCH_CWD=`. Never allow the `grok` binary itself, and never put either setting in the shared `user/settings.json`.

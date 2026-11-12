@@ -769,6 +769,69 @@ class TestReviewerSelectionInvariants(unittest.TestCase):
         )
         self.assertIn("`Grok` or `Grok Build` → `Review-Grok.md`", save_line)
 
+    def test_all_is_the_three_reviewers_not_coordinating(self) -> None:
+        index = _unique_unfenced_index(
+            self.masked, "Reviewer-backend selection (two reviewers in one invocation)"
+        )
+        para = self.text[index:index + 2000]
+        self.assertIn(
+            "`all`, as a leading reviewer token\n     (`/vet all`, `vet all`), selects the three of "
+            "`claude`, `codex`, `agy`,\n     and `grok` that are not coordinating.",
+            para,
+        )
+        self.assertIn("For `both`, the expected reviewer set is the comma-separated", para)
+        self.assertIn("For `all`, add `Grok`, or `Claude-Code` under Grok.", para)
+        # `all` resolves before the self-review rewrites, as `both` does, so a Grok
+        # coordinator keeps three reviewers and no per-backend item rewrites the set.
+        self.assertIn("Resolve `both` and `all` using the coordinator identity", para)
+        self.assertIn("The resolved set excludes the\n     coordinator", para)
+        # `both` keeps its meaning: the pair, without Grok.
+        self.assertIn("so Copilot and Grok are never part of it", para)
+
+        default_line = _unique_line_containing(
+            self.text, "IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way"
+        )
+        self.assertIn("`both`, `all`, or any of", default_line)
+
+        grok_line = _unique_line_containing(
+            self.text, "Reviewer-backend selection (Grok cross-vendor backend, opt-in)"
+        )
+        self.assertNotIn("`/vet all`", grok_line)
+
+        reference = (SKILL_MD.parent / "references" / "grok-backend.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "which selects the three of Claude, Codex, Agy, and Grok that are not coordinating", reference
+        )
+        self.assertIn("`/vet grok` and `/vet all` use the following launch route", reference)
+
+        # Rules written for a pair now hold for three, and a Grok slot never fails over.
+        self.assertIn("Before each further concurrent dispatch, check available memory.", self.text)
+        self.assertIn(
+            "In such\n     a round, a Grok slot that is absent, refused, or failed is a confirmed\n"
+            "     failure: no failover and no round downgrade.",
+            self.text,
+        )
+        self.assertIn(
+            "when every missing expected reviewer is confirmed failed, the\n"
+            "     healthy current-round reviews are complete intake",
+            self.text,
+        )
+        probe_line = _unique_line_containing(self.text, "Probes the selected backend")
+        self.assertIn(
+            "In a multi-reviewer round, an absent `grok` instead leaves its slot confirmed failed, "
+            "with no failover and no downgrade.",
+            probe_line,
+        )
+        identity_line = _unique_line_containing(self.text, "Invokes the selected dispatcher")
+        self.assertIn("`agy` for Agy, `grok` for Grok.", identity_line)
+
+        # Both pointers advertise the token in their argument hint.
+        for name in ("vet.md", "implement-review.md"):
+            with self.subTest(pointer=name):
+                pointer = (SKILL_MD.parents[2] / ".claude" / "commands" / name).read_text(encoding="utf-8")
+                self.assertIn("[both|all|agy|claude|copilot|codex|grok]", pointer)
+                self.assertIn("such as `both` or `all`.", pointer)
+
 
 if __name__ == "__main__":
     unittest.main()
