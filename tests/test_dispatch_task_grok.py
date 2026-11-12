@@ -216,6 +216,11 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
+@unittest.skipIf(
+    os.name == "nt",
+    "Grok is not exercised on Windows yet: the fake grok is a POSIX script "
+    "that Windows cannot launch (WinError 193)",
+)
 class DispatchTaskGrokTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="test-grok-prun-")

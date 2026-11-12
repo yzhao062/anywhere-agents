@@ -914,6 +914,11 @@ class TestDispatchGrokBudgetRegistryAndGuards(DispatchGrokHarness):
         self.assertIsNone(state_dir)
         self.assertIn("IMPLEMENT_REVIEW_ORCHESTRATOR=grok", proc.stderr)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Grok is not exercised on Windows yet: a missing GROK_BIN there "
+        "surfaces as exit 1, not the POSIX 127 this test pins",
+    )
     def test_preflight_missing_binary_and_missing_login(self) -> None:
         proc_bin, _ = self._run_dispatch(
             extra_env={

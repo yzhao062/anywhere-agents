@@ -1272,49 +1272,49 @@ function Invoke-GrokAutoUpdate {
 
   $runnerPath = Join-Path $lockDir 'run-update.ps1'
   $runnerBody = @'
-param(
-  [string]$GrokBin,
-  [string]$LockDir,
-  [string]$LogPath,
-  [int]$CheckTimeout,
-  [int]$UpdateTimeout
-)
-$ErrorActionPreference = 'SilentlyContinue'
-function Invoke-BoundedGrok([string]$Bin, [string]$ArgLine, [int]$TimeoutSec, [string]$LogFile) {
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Bin
-  $psi.Arguments = $ArgLine
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $p = [System.Diagnostics.Process]::Start($psi)
-  if (-not $p) { return $null }
-  try { $p.StandardInput.Close() } catch {}
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-    try { $p.Kill() } catch {}
-    return $null
+  param(
+    [string]$GrokBin,
+    [string]$LockDir,
+    [string]$LogPath,
+    [int]$CheckTimeout,
+    [int]$UpdateTimeout
+  )
+  $ErrorActionPreference = 'SilentlyContinue'
+  function Invoke-BoundedGrok([string]$Bin, [string]$ArgLine, [int]$TimeoutSec, [string]$LogFile) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Bin
+    $psi.Arguments = $ArgLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    if (-not $p) { return $null }
+    try { $p.StandardInput.Close() } catch {}
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+      try { $p.Kill() } catch {}
+      return $null
+    }
+    $p.WaitForExit()
+    $combined = ($outTask.GetAwaiter().GetResult()) + ($errTask.GetAwaiter().GetResult())
+    if (-not [string]::IsNullOrEmpty($combined)) {
+      try { [System.IO.File]::AppendAllText($LogFile, $combined) } catch {}
+    }
+    return [PSCustomObject]@{ ExitCode = $p.ExitCode; Output = $combined }
   }
-  $p.WaitForExit()
-  $combined = ($outTask.GetAwaiter().GetResult()) + ($errTask.GetAwaiter().GetResult())
-  if (-not [string]::IsNullOrEmpty($combined)) {
-    try { [System.IO.File]::AppendAllText($LogFile, $combined) } catch {}
+  try {
+    if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) { return }
+    [System.IO.File]::WriteAllText((Join-Path $LockDir 'pid'), "$PID`n")
+    $res = Invoke-BoundedGrok $GrokBin 'update --check --json' $CheckTimeout $LogPath
+    if ($null -ne $res -and $res.ExitCode -eq 0 -and $res.Output -match '"updateAvailable"\s*:\s*true(?![A-Za-z0-9_])') {
+      [void](Invoke-BoundedGrok $GrokBin 'update' $UpdateTimeout $LogPath)
+    }
+  } finally {
+    Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
   }
-  return [PSCustomObject]@{ ExitCode = $p.ExitCode; Output = $combined }
-}
-try {
-  if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) { return }
-  [System.IO.File]::WriteAllText((Join-Path $LockDir 'pid'), "$PID`n")
-  $res = Invoke-BoundedGrok $GrokBin 'update --check --json' $CheckTimeout $LogPath
-  if ($null -ne $res -and $res.ExitCode -eq 0 -and $res.Output -match '"updateAvailable"\s*:\s*true(?![A-Za-z0-9_])') {
-    [void](Invoke-BoundedGrok $GrokBin 'update' $UpdateTimeout $LogPath)
-  }
-} finally {
-  Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
-}
 '@
   try {
     [System.IO.File]::WriteAllText($runnerPath, $runnerBody)

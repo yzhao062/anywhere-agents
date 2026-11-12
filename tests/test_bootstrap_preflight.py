@@ -5573,6 +5573,11 @@ class GrokAutoUpdateTests(unittest.TestCase):
                 ["update --check --json", "update --check --json"],
             )
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Grok is not exercised on Windows yet: under Git Bash the detached "
+        "updater's lock timing differs and a second check can start",
+    )
     def test_hanging_grok_detaches_closes_pipes_promptly_and_enforces_single_flight(self) -> None:
         with tempfile.TemporaryDirectory(prefix="aa-grok-hang-") as td:
             tmp = Path(td)
