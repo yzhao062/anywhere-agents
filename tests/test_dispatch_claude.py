@@ -1091,22 +1091,11 @@ class DispatchClaudePowerShellTests(_DispatchContractMixin, unittest.TestCase):
             )
 
 
-class DispatchScriptsTracked(unittest.TestCase):
-    """Sanity: both scripts must be present in the repo."""
-
-    def test_sh_exists(self) -> None:
-        self.assertTrue(DISPATCH_SH.exists(),
-                        f"dispatch-claude.sh missing: {DISPATCH_SH}")
-
-    def test_ps1_exists(self) -> None:
-        self.assertTrue(DISPATCH_PS1.exists(),
-                        f"dispatch-claude.ps1 missing: {DISPATCH_PS1}")
-
-
 class DispatchClaudeFlagContract(unittest.TestCase):
-    """Static contract: both dispatchers feed a relay prompt via stdin (`<`),
-    pass the full default tool list, use `--permission-mode bypassPermissions`,
-    keep `--bare` opt-in, set GIT_PAGER, and never pass Codex's --sandbox flag.
+    """Static checks for what the captured claude invocation does not record: no
+    model or effort literal, the Windows long-path export, GIT_PAGER, and the
+    self-review guard on disk. Flags are asserted on the captured invocation in
+    `_DispatchContractMixin`.
     """
 
     def _both(self) -> list[str]:
@@ -1142,150 +1131,10 @@ class DispatchClaudeFlagContract(unittest.TestCase):
             # every indexed file rather than only the changed ones.
             self.assertIn("checkout-" + "index -a", text.replace("$checkoutSubcmd", "checkout-index"))
 
-    def test_prompt_via_stdin_redirection(self) -> None:
-        # The sh side uses shell stdin redirection. The PowerShell side uses
-        # ProcessStartInfo with redirected stdin to avoid Windows .cmd quoting
-        # noise around paths such as C:\tmp.
-        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
-        ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        self.assertIn(
-            '< "$RELAY_PROMPT_FILE"', sh_text,
-            "dispatch-claude.sh must redirect relay prompt to stdin",
-        )
-        self.assertIn(
-            "RedirectStandardInput = $true", ps1_text,
-            "dispatch-claude.ps1 must redirect stdin into claude",
-        )
-        self.assertIn(
-            "StandardInput.WriteLine", ps1_text,
-            "dispatch-claude.ps1 must feed the relay prompt through stdin",
-        )
-
-    def test_no_dash_p_at_file_reference(self) -> None:
-        """Claude takes the prompt via stdin, NOT `-p "@<file>"` like Copilot.
-        Guards against accidentally copying the Copilot flag shape."""
-        for text in self._both():
-            self.assertNotIn(
-                '-p "@', text,
-                "dispatch-claude must NOT use Copilot-style -p @<file>",
-            )
-
-    def test_permission_mode_bypass_present(self) -> None:
-        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
-        ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        self.assertIn("--permission-mode", sh_text,
-                      "dispatch-claude.sh must pass --permission-mode")
-        self.assertTrue(
-            ("--permission-mode" in ps1_text)
-            or ("'--per' + 'mission-' + 'mode'" in ps1_text),
-            "dispatch-claude.ps1 must pass --permission-mode, inline or split",
-        )
-        self.assertIn("bypassPermissions", sh_text,
-                      "dispatch-claude.sh must use bypassPermissions")
-        self.assertTrue(
-            ("bypassPermissions" in ps1_text)
-            or ("'bypass' + 'Permissions'" in ps1_text)
-            or ("'by' + 'pass' + 'Per' + 'missions'" in ps1_text),
-            "dispatch-claude.ps1 must use bypassPermissions, inline or split",
-        )
-
-    def test_all_default_tools_present(self) -> None:
-        sh_text = DISPATCH_SH.read_text(encoding="utf-8")
-        ps1_text = DISPATCH_PS1.read_text(encoding="utf-8")
-        self.assertIn('--tools default', sh_text,
-                      "dispatch-claude.sh must grant all default tools")
-        self.assertTrue(
-            ("$toolList = 'default'" in ps1_text),
-            "dispatch-claude.ps1 must grant all default tools",
-        )
-
-    def test_mcp_and_settings_isolation_preserved(self) -> None:
-        """Web tools are built-in, not MCP, so adding them must not weaken the
-        isolation that keeps a user-level Codex MCP server (and user hooks) out
-        of the Claude reviewer: empty MCP config + strict-mcp-config +
-        project,local settings must all remain."""
-        for text in self._both():
-            self.assertIn("--strict-mcp-config", text,
-                          "dispatch-claude must keep --strict-mcp-config")
-            self.assertIn("--setting-sources", text,
-                          "dispatch-claude must keep --setting-sources")
-            self.assertIn("project,local", text,
-                          "dispatch-claude must scope settings to project,local")
-            self.assertIn('"mcpServers":{}', text,
-                          "dispatch-claude must write an empty MCP config")
-
-    def test_no_write_edit_or_allowedtools_pattern_allowlist(self) -> None:
-        """Claude should not get Write/Edit tools or Bash pattern preapproval."""
-        def _strip_comments(text: str) -> str:
-            stripped: list[str] = []
-            for line in text.splitlines():
-                lstripped = line.lstrip()
-                if lstripped.startswith("#"):
-                    continue
-                stripped.append(line)
-            return "\n".join(stripped)
-        for text in self._both():
-            executable = _strip_comments(text)
-            self.assertNotIn("Write(", executable,
-                             "dispatcher must not pass path-scoped Write")
-            self.assertNotIn("Edit(", executable,
-                             "dispatcher must not pass path-scoped Edit")
-            self.assertNotIn("--allowedTools", executable,
-                             "dispatcher must not use hanging allowedTools patterns")
-
-    def test_bare_flag_opt_in_via_env(self) -> None:
-        """`--bare` is OPT-IN: the source must reference the
-        CLAUDE_DISPATCH_BARE env var so users in API-key environments can
-        enable it, and the literal --bare string must appear in the gated
-        branch. Runtime tests (test_claude_invoked_without_bare_by_default
-        + test_claude_invoked_with_bare_when_env_opt_in) verify the
-        end-to-end gating."""
-        for text in self._both():
-            self.assertIn(
-                "CLAUDE_DISPATCH_BARE", text,
-                "dispatcher must reference the CLAUDE_DISPATCH_BARE env var",
-            )
-            self.assertIn(
-                "--bare", text,
-                "dispatcher must contain the --bare literal in the gated branch",
-            )
-
-    def test_add_dir_present(self) -> None:
-        for text in self._both():
-            self.assertIn("--add-dir", text,
-                          "dispatcher must pass --add-dir for repo access")
-
     def test_git_pager_neutralized(self) -> None:
         for text in self._both():
             self.assertIn("GIT_PAGER", text,
                           "dispatcher must neutralize the git pager (GIT_PAGER=cat)")
-
-    def test_no_sandbox_flag(self) -> None:
-        # Strip shell + PowerShell comments so the assertion catches `--sandbox`
-        # only in executable lines, not in the explanatory header that names
-        # the Codex-only flag for context.
-        def _strip_comments(text: str) -> str:
-            stripped: list[str] = []
-            for line in text.splitlines():
-                lstripped = line.lstrip()
-                if lstripped.startswith("#"):
-                    continue
-                stripped.append(line)
-            return "\n".join(stripped)
-        for text in self._both():
-            executable = _strip_comments(text)
-            self.assertNotIn(
-                "--sandbox", executable,
-                "--sandbox is Codex-only; must not appear in dispatch-claude "
-                "executable lines (comments naming it for context are fine)",
-            )
-
-    def test_no_fallback_binary(self) -> None:
-        """Claude has no fallback equivalent of `gh copilot`. The dispatcher
-        must not reference GH_BIN or any other fallback resolution."""
-        for text in self._both():
-            self.assertNotIn("GH_BIN", text,
-                             "dispatch-claude must NOT have a gh-fallback (copy-paste leak)")
 
     def test_self_review_guard_present(self) -> None:
         """The self-review guard must be present at the script level. The .sh

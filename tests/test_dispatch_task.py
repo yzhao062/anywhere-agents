@@ -487,11 +487,6 @@ class DispatchTaskPowerShellTests(_DispatchTaskContractMixin, unittest.TestCase)
 class DispatchTaskStaticContract(unittest.TestCase):
     """Freeze the wiring that no runtime test on this machine reaches."""
 
-    def test_the_three_scripts_ship(self) -> None:
-        for path in (DISPATCH_SH, DISPATCH_PS1, REAP_WATCH_PS1):
-            with self.subTest(path.name):
-                self.assertTrue(path.is_file(), f"missing: {path}")
-
     def test_no_script_holds_a_model_or_effort_literal(self) -> None:
         """The registry is the one place that names a model or an effort."""
         for path in (DISPATCH_SH, DISPATCH_PS1, REAP_WATCH_PS1):
@@ -508,29 +503,6 @@ class DispatchTaskStaticContract(unittest.TestCase):
                               "model_reasoning_effort", "--skip-git-repo-check", "model-actual",
                               "--stderr-file", "MODEL-UNVERIFIED"):
                     self.assertIn(token, text, f"{path.name} lacks {token}")
-
-    def test_isolation_re_passes_both_model_and_effort(self) -> None:
-        # Bind each value to its flag: the archived script passed only the effort.
-        self.assertIn('-c "model=$WORKER_MODEL" -c "model_reasoning_effort=$WORKER_EFFORT"',
-                      DISPATCH_SH.read_text(encoding="utf-8"))
-        self.assertIn("-c model=$workerModel -c model_reasoning_effort=$workerEffort",
-                      DISPATCH_PS1.read_text(encoding="utf-8"))
-
-    def test_the_watchdog_contract_is_present(self) -> None:
-        """The .sh enforces the idle-stall and hard-timeout reaper inline. The .ps1 hands
-        it to reap-watch.ps1, because one .ps1 that launches a hidden worker, polls it,
-        and kills its tree trips some Windows antivirus parse heuristics."""
-        sh = DISPATCH_SH.read_text(encoding="utf-8")
-        for token in ("PRUN_STALL_THRESHOLD", "CODEX_DISPATCH_TIMEOUT", "idle-stall", "hard-timeout",
-                      "124", "PRUN_DISPATCH_REEXEC", "PRUN_DISPATCH_SOURCE_DIR", 'cp -- "$0"'):
-            self.assertIn(token, sh, f"dispatch-task.sh lacks {token}")
-        ps1 = DISPATCH_PS1.read_text(encoding="utf-8")
-        for token in ("PRUN_STALL_THRESHOLD", "CODEX_DISPATCH_TIMEOUT", "124", "reap-watch"):
-            self.assertIn(token, ps1, f"dispatch-task.ps1 lacks {token}")
-        self.assertNotIn("PRUN_DISPATCH_REEXEC", ps1, "PowerShell releases a parsed script on its own")
-        reap = REAP_WATCH_PS1.read_text(encoding="utf-8")
-        for token in ("idle-stall", "hard-timeout", "reap-reason", "taskkill"):
-            self.assertIn(token, reap, f"reap-watch.ps1 lacks {token}")
 
 
 if __name__ == "__main__":

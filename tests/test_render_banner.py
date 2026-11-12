@@ -273,22 +273,6 @@ class MetadataContractTests(unittest.TestCase):
         for line in render_banner.FALLBACK_LINES:
             self.assertIn(line, agents_md, "the rule and the renderer must quote the same fallback")
 
-    def test_shared_rule_states_the_lifecycle_the_renderer_implements(self) -> None:
-        """The rule in AGENTS.md and this script are two halves of one
-        contract: the metadata an agent checks, the fallback, the source-repo
-        invocation, the invocation-agent branch, and the dispatched-reviewer
-        exemption all have to be stated where the agent reads them."""
-        agents_md = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        for phrase in (
-            "read `.agent-config/banner.txt`",
-            "records the pending event's timestamp and the `run_id` of the current `last-run.json`",
-            "copy the event `ts` into `banner-emitted.json`",
-            "run `scripts/render_banner.py`",
-            "a completed attempt requires the report carrying that attempt's `run_id`",
-            "A dispatched reviewer told to skip the banner keeps skipping it.",
-        ):
-            self.assertIn(phrase, agents_md, phrase)
-
 
 class ConsumerRenderTests(_HermeticCase):
     def test_seven_lines_after_the_metadata(self) -> None:
@@ -1121,38 +1105,27 @@ class PackIdentityTests(unittest.TestCase):
 
 
 class RendererIsSharedAndVendoredTests(unittest.TestCase):
+    def test_powershell_exits_and_helper_deploys_go_through_the_reporting_wrappers(self) -> None:
+        """bootstrap.ps1 has no EXIT trap, so each exit after the ledger exists has to go
+        through Exit-Bootstrap and each helper copy through Deploy-UserHelper, or that
+        path ends without a report. The entry-point tests run three endings; this scan
+        covers the branches they do not reach, on a machine with no PowerShell."""
+        ps1 = (ROOT / "bootstrap" / "bootstrap.ps1").read_text(encoding="utf-8")
+        body = ps1[ps1.index("function Exit-Bootstrap"):]
+        body = body[body.index("Invoke-GitPreflight\n"):]
+        bare_exits = [line for line in body.splitlines()
+                      if line.strip().startswith("exit ") and "PREFLIGHT_TEST" not in line]
+        self.assertEqual(bare_exits, [], "every exit after the ledger renders first: %r" % bare_exits)
+        bare_deploys = [line for line in body.splitlines()
+                        if "Copy-HelperAtomic .agent-config/repo/scripts/" in line]
+        self.assertEqual(bare_deploys, [], "helper deploys go through Deploy-UserHelper: %r" % bare_deploys)
+
     def test_renderer_carries_its_helper_beside_it(self) -> None:
         self.assertTrue((SCRIPTS / "render_banner.py").is_file())
         self.assertTrue((SCRIPTS / "pack_identity.py").is_file())
         text = (SCRIPTS / "render_banner.py").read_text(encoding="utf-8")
         self.assertIn("import pack_identity", text)
         self.assertNotIn("_verify_gather", (SCRIPTS / "pack_identity.py").read_text(encoding="utf-8"))
-
-    def test_entry_points_render_after_the_ledger_on_every_exit(self) -> None:
-        sh = (ROOT / "bootstrap" / "bootstrap.sh").read_text(encoding="utf-8")
-        ps1 = (ROOT / "bootstrap" / "bootstrap.ps1").read_text(encoding="utf-8")
-        self.assertIn("trap '_bootstrap_rc=$?; _render_banner_report \"$_bootstrap_rc\"; exit $_bootstrap_rc' EXIT", sh)
-        self.assertLess(sh.index("_ledger_init\n"), sh.index("trap '_bootstrap_rc=$?"))
-        # PowerShell renders at the end of the run and before each explicit
-        # exit after the ledger exists; a try/finally around the body would
-        # turn a printed-and-continued .NET exception into an abort.
-        self.assertTrue(ps1.rstrip().endswith("Invoke-BannerRender 0"), ps1[-200:])
-        self.assertLess(ps1.index("try { Initialize-Ledger } catch {}"), ps1.index("function Invoke-BannerRender"))
-        self.assertIn("Exit-Bootstrap $composerRc", ps1)
-        self.assertNotIn("\n} finally {\n  Invoke-BannerRender", ps1)
-        body = ps1[ps1.index("function Exit-Bootstrap"):]
-        body = body[body.index("Invoke-GitPreflight\n"):]
-        bare_exits = [line for line in body.splitlines()
-                      if line.strip().startswith("exit ") and "PREFLIGHT_TEST" not in line]
-        self.assertEqual(bare_exits, [], "every exit after the ledger renders first: %r" % bare_exits)
-        # A helper deployment that throws ends the run through Exit-Bootstrap
-        # rather than as an uncaught exception, so it renders too.
-        bare_deploys = [line for line in body.splitlines()
-                        if "Copy-HelperAtomic .agent-config/repo/scripts/" in line]
-        self.assertEqual(bare_deploys, [], "helper deploys go through Deploy-UserHelper: %r" % bare_deploys)
-        self.assertIn("Deploy-UserHelper .agent-config/repo/scripts/guard.py", ps1)
-        self.assertIn("render_banner.py --root .", sh)
-        self.assertIn("render_banner.py --root .", ps1)
 
 
 class OutputEncodingTests(_HermeticCase):

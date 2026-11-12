@@ -568,16 +568,6 @@ class StallWatchPowerShellTests(_StallContractMixin, unittest.TestCase):
     SHELL_KIND = "powershell"
 
 
-class StallScriptsTracked(unittest.TestCase):
-    def test_sh_exists(self) -> None:
-        self.assertTrue(STALL_SH.exists(),
-                        f"stall-watch.sh missing: {STALL_SH}")
-
-    def test_ps1_exists(self) -> None:
-        self.assertTrue(STALL_PS1.exists(),
-                        f"stall-watch.ps1 missing: {STALL_PS1}")
-
-
 class StallSafetyInvariants(unittest.TestCase):
     """Source checks for reason-bounded, identity-checked worker reaping."""
 

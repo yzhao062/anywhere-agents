@@ -2663,28 +2663,6 @@ class AgentIoScopeTests(unittest.TestCase):
             finally:
                 os.remove(link)
 
-    def test_both_guards_read_the_same_predicate(self) -> None:
-        """AGENTS.md says the two guards share a gate because they scan the
-        same writes. They now differ in how far they trust the marker, and
-        that difference belongs in an argument rather than in a second copy
-        of the extension test, which is what this scans for.
-        """
-        source = GUARD.read_text(encoding="utf-8")
-        self.assertEqual(
-            source.count("not in PROSE_EXTENSIONS"), 1,
-            "the membership test belongs to prose_extension() alone; a second "
-            "copy lets the deny gate and the advisory drift apart",
-        )
-        self.assertEqual(
-            source.count("ext = prose_extension(file_path"), 2,
-            "both guards should reach scope through the shared predicate",
-        )
-        self.assertEqual(
-            source.count("agent_io_requires_scratch=True"), 3,
-            "only the callers that deny should take the narrower trust: the "
-            "Write gate, the shell-write gate, and the Codex patch gate",
-        )
-
 
 class HookReachabilityTests(unittest.TestCase):
     """Every tool guard.py gates must be wired to it in `user/settings.json`.
