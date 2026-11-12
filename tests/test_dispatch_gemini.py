@@ -40,6 +40,7 @@ def write_registry(
     effort: str = FIXTURE_EFFORT,
     fallback: str | None = FIXTURE_FALLBACK_STEM,
     name: str = "agent-models.json",
+    reviewer: dict | None = None,
 ) -> Path:
     agy = {"model": stem, "effort": effort}
     if fallback:
@@ -51,7 +52,7 @@ def write_registry(
             "codex": {"model": "fixture-codex", "effort": "low"},
             "agy": agy,
         },
-        "roles": {},
+        "roles": {"reviewer": {"agy": reviewer}} if reviewer else {},
     }
     path = directory / name
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1474,6 +1475,44 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "gemini-3.9-flash-high high\n")
         self.assertIn("MODEL-FALLBACK", result.stderr)
+
+    def _reviewer_override(self) -> Path:
+        # A reviewer row on a family fewer accounts list, whose own fallback is
+        # the family row's model at that row's tier.
+        return write_registry(
+            self.root, stem="fixture-8-beta", fallback="fixture-7-gamma", name="override.json",
+            reviewer={
+                "model": "fixture-9-alpha", "effort": "medium",
+                "fallback_model": "fixture-8-beta", "fallback_effort": "high",
+            },
+        )
+
+    def test_print_model_takes_the_role_fallback_at_its_own_effort(self) -> None:
+        result = self._print_model({
+            "AGENT_MODELS_FILE": str(self._reviewer_override()),
+            "MOCK_AGY_MODELS": "fixture-8-beta-medium\nfixture-8-beta-high\nfixture-7-gamma-high",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "fixture-8-beta-high high\n")
+        self.assertIn("MODEL-FALLBACK from=fixture-9-alpha-medium to=fixture-8-beta-high", result.stderr)
+
+    def test_print_model_ends_on_the_family_fallback(self) -> None:
+        result = self._print_model({
+            "AGENT_MODELS_FILE": str(self._reviewer_override()),
+            "MOCK_AGY_MODELS": "fixture-7-gamma-high",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "fixture-7-gamma-high high\n")
+        self.assertIn("MODEL-FALLBACK from=fixture-9-alpha-medium to=fixture-7-gamma-high", result.stderr)
+
+    def test_print_model_runs_the_role_model_when_the_account_lists_it(self) -> None:
+        result = self._print_model({
+            "AGENT_MODELS_FILE": str(self._reviewer_override()),
+            "MOCK_AGY_MODELS": "fixture-9-alpha-medium\nfixture-8-beta-high",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "fixture-9-alpha-medium medium\n")
+        self.assertNotIn("MODEL-FALLBACK", result.stderr)
 
     def test_print_model_effort_follows_the_resolved_tier(self) -> None:
         result = self._print_model({"MOCK_AGY_MODELS": "gemini-4-argon-medium"})

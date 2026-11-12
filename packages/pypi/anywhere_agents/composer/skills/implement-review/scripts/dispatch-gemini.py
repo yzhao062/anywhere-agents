@@ -67,11 +67,16 @@ def _read_registry() -> tuple:
 # The row holds a family stem plus an effort tier as a slug. The preflight
 # floats the slug to the newest version the signed-in account lists, and an
 # account that lists no member of the family falls back to the registry's
-# fallback stem. With no answer these stay None and the dispatch stops, since
-# no literal here could stay current.
+# fallback stems in order: the row's own, then the family row's. With no
+# answer these stay None and the dispatch stops, since no literal here could
+# stay current.
 AGENT_MODELS, _REGISTRY_ROW, REGISTRY_ERROR = _read_registry()
 DEFAULT_MODEL = _REGISTRY_ROW["slug"] if _REGISTRY_ROW else None
 FALLBACK_MODEL = _REGISTRY_ROW["fallback_slug"] if _REGISTRY_ROW else None
+FALLBACK_MODELS = (
+    list(_REGISTRY_ROW.get("fallback_slugs") or filter(None, [FALLBACK_MODEL]))
+    if _REGISTRY_ROW else []
+)
 DEFAULT_EFFORT = _REGISTRY_ROW["effort"] if _REGISTRY_ROW else None
 DEFAULT_TIMEOUT_SECONDS = 2700
 MIN_REVIEW_BYTES = 500
@@ -216,7 +221,7 @@ def run_preflight(
     model: str,
     state_dir: Path,
     allow_resolution: bool = False,
-    fallback_model: str | None = None,
+    fallback_models: Iterable[str] = (),
 ) -> tuple[int, str]:
     mode = os.environ.get("ANTIGRAVITY_PREFLIGHT", "auto").strip().lower()
     if mode not in {"auto", "force", "off"}:
@@ -291,16 +296,19 @@ def run_preflight(
                 model = resolved
             available = set(available_list)
             # An account that does not list the default's family would fail
-            # every round; the fallback family keeps the reviewer running.
-            if allow_resolution and model not in available and fallback_model:
-                alternative = newest_in_family(fallback_model, available_list)
-                if alternative in available:
-                    print(
-                        f"dispatch-gemini: MODEL-FALLBACK from={model} to={alternative} reason=template-unlisted",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    model = alternative
+            # every round; the first fallback family it does list keeps the
+            # reviewer running.
+            if allow_resolution and model not in available:
+                for fallback_model in fallback_models:
+                    alternative = newest_in_family(fallback_model, available_list)
+                    if alternative in available:
+                        print(
+                            f"dispatch-gemini: MODEL-FALLBACK from={model} to={alternative} reason=template-unlisted",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        model = alternative
+                        break
             if model not in available:
                 (state_dir / "preflight-tail").write_text(
                     "\n".join(output_parts), encoding="utf-8"
@@ -392,7 +400,7 @@ def print_model() -> int:
             model,
             Path(scratch),
             allow_resolution=allow_resolution,
-            fallback_model=FALLBACK_MODEL,
+            fallback_models=FALLBACK_MODELS,
         )
     if code:
         return code
@@ -924,7 +932,7 @@ def main(argv: list[str] | None = None) -> int:
         model,
         state_dir,
         allow_resolution=allow_resolution,
-        fallback_model=FALLBACK_MODEL,
+        fallback_models=FALLBACK_MODELS,
     )
     if preflight_code:
         return preflight_code

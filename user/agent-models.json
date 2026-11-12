@@ -22,7 +22,14 @@
   },
   "roles": {
     "interactive": {},
-    "reviewer": {},
+    "reviewer": {
+      "agy": {
+        "model": "gemini-4-carbon",
+        "effort": "medium",
+        "fallback_model": "gemini-4-argon",
+        "fallback_effort": "high"
+      }
+    },
     "premium": {
       "claude": {
         "model": "fable",
@@ -32,6 +39,13 @@
     "worker": {
       "claude": {
         "model": "sonnet"
+      },
+      "agy": {
+        "model": "gemini-3.8-flash",
+        "fallback_model": null
+      },
+      "grok": {
+        "effort": "medium"
       }
     },
     "prun-worker": {
@@ -42,11 +56,14 @@
         "fallback_model": null
       },
       "codex": {
-        "effort": "high"
+        "effort": "medium"
       },
       "grok": {
         "model": "grok-4.7",
-        "effort": "high"
+        "effort": "medium"
+      },
+      "claude": {
+        "model": "sonnet"
       }
     }
   }

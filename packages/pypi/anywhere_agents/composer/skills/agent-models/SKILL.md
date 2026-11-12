@@ -58,6 +58,8 @@ agent_models.py verify                    # launch each CLI once and read back w
 agent_models.py sync [--dry-run]          # write the Codex and Agy interactive values
 agent_models.py render [--check]          # keep user/settings.json equal to the registry
 agent_models.py set --family <family> [--role <role>] [--model <name>] [--effort <level>]
+agent_models.py set --family agy --role <role> --role-only --fallback-model <stem> [--fallback-effort <tier>]
+agent_models.py map <dir>...              # which skills and scripts read which row, per repository
 agent_models.py actual --family <family> (--session-id ID | --stderr-file F | --log-file F | --json-file F)
 ```
 

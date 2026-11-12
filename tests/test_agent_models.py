@@ -154,6 +154,68 @@ class ResolveTests(TempRegistryCase):
         self.assertEqual(row["second_slug"], "claude-sonnet-9-medium")
         self.assertIsNone(row["fallback_slug"])
 
+    def test_an_agy_fallback_takes_its_own_effort_and_ends_on_the_family_fallback(self) -> None:
+        def reviewer(data: dict) -> None:
+            data["roles"]["reviewer"]["agy"] = {
+                "model": "gemini-9-peak",
+                "effort": "medium",
+                "fallback_model": "gemini-9-test",
+                "fallback_effort": "high",
+            }
+
+        row = agent_models.resolve("agy", "reviewer", fixture(reviewer))
+        self.assertEqual(row["slug"], "gemini-9-peak-medium")
+        self.assertEqual(row["fallback_slug"], "gemini-9-test-high")
+        # The role's fallback first, then the one the family row carries.
+        self.assertEqual(row["fallback_slugs"], ["gemini-9-test-high", "gemini-8-fast-high"])
+
+        def same_tier(data: dict) -> None:
+            reviewer(data)
+            del data["roles"]["reviewer"]["agy"]["fallback_effort"]
+
+        row = agent_models.resolve("agy", "reviewer", fixture(same_tier))
+        self.assertEqual(row["fallback_slugs"], ["gemini-9-test-medium", "gemini-8-fast-high"])
+
+    def test_a_fallback_is_built_in_the_row_that_names_it(self) -> None:
+        def family_tier(data: dict) -> None:
+            data["families"]["agy"]["fallback_effort"] = "low"
+
+        def effort_only(data: dict) -> None:
+            family_tier(data)
+            data["roles"]["reviewer"]["agy"] = {"model": "gemini-9-peak", "effort": "medium"}
+
+        # A role that changes its effort keeps the family's fallback at the family's tier.
+        row = agent_models.resolve("agy", "reviewer", fixture(effort_only))
+        self.assertEqual(row["slug"], "gemini-9-peak-medium")
+        self.assertEqual(row["fallback_slugs"], ["gemini-8-fast-low"])
+        row = agent_models.resolve(
+            "agy", "reviewer",
+            fixture(lambda d: d["roles"]["reviewer"].update(agy={"effort": "medium"})),
+        )
+        self.assertEqual(row["fallback_slugs"], ["gemini-8-fast-high"])
+
+        def own_stem(data: dict) -> None:
+            family_tier(data)
+            data["roles"]["reviewer"]["agy"] = {
+                "model": "gemini-9-peak", "effort": "medium", "fallback_model": "gemini-9-test",
+            }
+
+        # A role's own fallback takes the role's effort, never the family's fallback tier.
+        row = agent_models.resolve("agy", "reviewer", fixture(own_stem))
+        self.assertEqual(row["fallback_slugs"], ["gemini-9-test-medium", "gemini-8-fast-low"])
+        # A row that sets its fallback to null has none, whatever the family carries.
+        row = agent_models.resolve("agy", "prun-worker", fixture(family_tier))
+        self.assertIsNone(row["fallback_slug"])
+        self.assertEqual(row["fallback_slugs"], [])
+
+    def test_fallback_slugs_of_the_rows_that_name_no_second_step(self) -> None:
+        self.assertEqual(
+            agent_models.resolve("agy", "interactive", fixture())["fallback_slugs"], ["gemini-8-fast-high"]
+        )
+        # A row that drops its fallback has none: the family's is not put back.
+        self.assertEqual(agent_models.resolve("agy", "prun-worker", fixture())["fallback_slugs"], [])
+        self.assertNotIn("fallback_slugs", agent_models.resolve("codex", "reviewer", fixture()))
+
     def test_unknown_family_and_role_raise(self) -> None:
         with self.assertRaises(agent_models.RegistryError):
             agent_models.resolve("gemini", "interactive", fixture())
@@ -242,6 +304,27 @@ class ValidateTests(unittest.TestCase):
 
     def test_fixture_is_valid(self) -> None:
         agent_models.validate(fixture())
+
+    def test_a_fallback_stem_with_a_tier_is_rejected(self) -> None:
+        # The resolver appends the tier, so a stem that already has one would name no model.
+        self.assert_rejected(
+            lambda d: d["families"]["agy"].update(fallback_model="gemini-8-fast-high"), "stem without a tier"
+        )
+
+    def test_a_fallback_tier_needs_its_stem_and_a_stem_needs_a_plain_name(self) -> None:
+        self.assert_rejected(
+            lambda d: d["roles"]["reviewer"].update(agy={"fallback_effort": "low"}), "needs a fallback_model"
+        )
+        self.assert_rejected(lambda d: d["families"]["agy"].update(fallback_model="bad name"), "bad fallback_model")
+        self.assert_rejected(
+            lambda d: d["roles"]["prun-worker"]["agy"].update(second_model="claude-sonnet-9-high"),
+            "stem without a tier",
+        )
+
+    def test_fallback_effort_is_an_agy_key_with_an_agy_tier(self) -> None:
+        agent_models.validate(fixture(lambda d: d["families"]["agy"].update(fallback_effort="low")))
+        self.assert_rejected(lambda d: d["families"]["agy"].update(fallback_effort="xhigh"), "fallback_effort")
+        self.assert_rejected(lambda d: d["families"]["codex"].update(fallback_effort="low"), "unknown keys")
 
     def test_rejects_a_bad_effort_for_the_family(self) -> None:
         self.assert_rejected(lambda d: d["families"]["claude"].update(effort="ultra"), "effort")
@@ -387,6 +470,29 @@ class SetTests(TempRegistryCase):
         data = json.loads(self.registry.read_text(encoding="utf-8"))
         self.assertEqual(data["roles"]["worker"]["codex"], {"model": "gpt-9-other"})
         self.assertEqual(data["families"]["codex"]["model"], "gpt-9-test")
+
+    def test_set_writes_a_role_fallback_and_refuses_one_on_another_family(self) -> None:
+        code, _, _ = run_main(
+            ["set", "--family", "agy", "--role", "reviewer", "--role-only", "--model", "gemini-9-peak",
+             "--effort", "medium", "--fallback-model", "gemini-9-test", "--fallback-effort", "high"],
+            self.env,
+        )
+        self.assertEqual(code, 0)
+        row = agent_models.resolve("agy", "reviewer", agent_models.load(self.registry))
+        self.assertEqual(row["slug"], "gemini-9-peak-medium")
+        self.assertEqual(row["fallback_slugs"], ["gemini-9-test-high", "gemini-8-fast-high"])
+        # A new stem does not keep the tier that was written for the old one.
+        code, _, _ = run_main(
+            ["set", "--family", "agy", "--role", "reviewer", "--role-only", "--fallback-model", "gemini-9-other"],
+            self.env,
+        )
+        self.assertEqual(code, 0)
+        row = agent_models.resolve("agy", "reviewer", agent_models.load(self.registry))
+        self.assertEqual(row["fallback_slug"], "gemini-9-other-medium")
+        before = self.registry.read_bytes()
+        code, _, _ = run_main(["set", "--family", "codex", "--fallback-effort", "high"], self.env)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.registry.read_bytes(), before)
 
     def test_set_refuses_an_invalid_value_and_leaves_the_file_alone(self) -> None:
         before = self.registry.read_bytes()
@@ -713,6 +819,140 @@ class ActualReaderTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertIn("status=mismatch", out)
                 self.assertIn("MODEL-MISMATCH", err)
+
+
+class MapTests(unittest.TestCase):
+    def readers(self, text: str, suffix: str = ".md") -> set:
+        return agent_models.map_text(text, suffix)[0]
+
+    def test_a_resolver_call_names_its_family_and_role(self) -> None:
+        self.assertEqual(
+            self.readers("<resolver> resolve --family codex --role reviewer prints two words"),
+            {("codex", "reviewer", "resolver")},
+        )
+        self.assertEqual(
+            self.readers('[sys.executable, R, "resolve", "--family", "agy", "--role", "prun-worker"]', ".py"),
+            {("agy", "prun-worker", "resolver")},
+        )
+        self.assertEqual(
+            self.readers('row = module.resolve("agy", "reviewer")', ".py"), {("agy", "reviewer", "resolver")}
+        )
+
+    def test_a_role_passed_by_name_is_found_through_its_assignment(self) -> None:
+        text = 'ROLE = "prun-worker"\nargv = ["resolve", "--family", family, "--role", ROLE, "--json"]\n'
+        self.assertEqual(self.readers(text, ".py"), {("*", "prun-worker", "resolver")})
+        # A family written out beside the named role is kept.
+        text = 'ROLE = "prun-worker"\nargv = ["resolve", "--family", "agy", "--role", ROLE]\n'
+        self.assertEqual(self.readers(text, ".py"), {("agy", "prun-worker", "resolver")})
+        # A name the file never assigns a role to is not a reader.
+        self.assertEqual(self.readers('argv = ["--family", "agy", "--role", role]\n', ".py"), set())
+
+    def test_dispatchers_settings_and_slash_commands_stand_for_a_row(self) -> None:
+        self.assertIn(("agy", "reviewer", "dispatch-gemini.py --print-model"),
+                      self.readers("run dispatch-gemini.py --print-model first"))
+        # The flag alone belongs to no dispatcher, and one call is one reader.
+        self.assertEqual(self.readers("pass --print-model to see what a tool would run"), set())
+        self.assertEqual(
+            self.readers("run dispatch-gemini.py --print-model first"),
+            {("agy", "reviewer", "dispatch-gemini.py --print-model")},
+        )
+        self.assertIn(("grok", "prun-worker", "dispatch-task-grok"), self.readers("dispatch-task-grok.py"))
+        self.assertIn(("claude", "worker", "CLAUDE_CODE_SUBAGENT_MODEL"),
+                      self.readers("follows CLAUDE_CODE_SUBAGENT_MODEL", ".js"))
+        self.assertIn(("*", "reviewer", "/vet"), self.readers("then run /vet both on the staged batch"))
+        self.assertIn(("*", "prun-worker", "/prun"), self.readers("dispatch bounded /prun workers"))
+        # A slash command is prose: a path such as skills/vet is not one, nor is code.
+        self.assertEqual(self.readers("see skills/vet/SKILL.md"), set())
+        self.assertEqual(self.readers("x = a /vet", ".py"), set())
+        self.assertEqual(
+            self.readers("export const meta = {}\nawait agent('do it')\n", ".js"),
+            {("claude", "worker", "Workflow agent()")},
+        )
+
+    def test_direct_launches_are_listed_as_candidates(self) -> None:
+        launches = lambda text: agent_models.map_text(text, ".py")[1]  # noqa: E731
+        self.assertEqual(launches("Direct `claude -p` and `codex exec` are routes."), {"claude -p", "codex exec"})
+        self.assertEqual(launches('subprocess.run(["codex", "exec", "--json"])'), {"codex exec"})
+        self.assertEqual(launches("run(['agy', '--model', slug])"), {"agy --model"})
+        self.assertEqual(launches("a claude-powered tool, executed"), set())
+        # A comment in a script is not a launch; prose in a skill file is still read.
+        self.assertEqual(launches("    # + direct codex exec, because the wrapper hides it"), set())
+        self.assertEqual(agent_models.map_text("# Run `codex exec` here", ".md")[1], {"codex exec"})
+
+    def test_map_repo_lists_readers_and_launches_and_skips_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "consumer"
+            panel = repo / "skills" / "panel"
+            (panel / "references").mkdir(parents=True)
+            (panel / "SKILL.md").write_text("Run the panel.\n", encoding="utf-8")
+            (panel / "references" / "protocol.md").write_text(
+                "Direct `claude -p`, `agy -p`, and `codex exec` are candidate routes.\n", encoding="utf-8")
+            audit = repo / "skills" / "audit"
+            audit.mkdir(parents=True)
+            # Every direct launch is listed, read or not; a marked line is left out.
+            (audit / "SKILL.md").write_text(
+                "Launch `codex exec` with the values below, then `claude -p` for a second read.\n"
+                "Run /vet afterwards.\n"
+                "Probe with `grok -p` <!-- agent-models: allow -->\n", encoding="utf-8")
+            (audit / "route.py").write_text('ARGS = ["resolve", "--family", "codex", "--role", "reviewer"]\n',
+                                            encoding="utf-8")
+            (repo / "README.md").write_text("Try `agy -p` by hand.\n", encoding="utf-8")
+            # A dated record and a test fixture are not live launch sites.
+            record = repo / "skills" / "panel" / "runs" / "2026-01-02-round"
+            record.mkdir(parents=True)
+            (record / "run.sh").write_text("codex exec --json\n", encoding="utf-8")
+            (repo / "scripts" / "tests").mkdir(parents=True)
+            (repo / "scripts" / "tests" / "t.sh").write_text("claude -p hi\n", encoding="utf-8")
+            result = agent_models.map_repo(repo)
+        self.assertEqual(
+            result["launches"],
+            [{"file": "skills/audit/SKILL.md", "launches": ["claude -p", "codex exec"]},
+             {"file": "skills/panel/references/protocol.md", "launches": ["agy -p", "claude -p", "codex exec"]}],
+        )
+        self.assertEqual(
+            [(r["file"], r["family"], r["role"], r["how"], r["purpose"]) for r in result["readers"]],
+            [("skills/audit/SKILL.md", "*", "reviewer", "/vet", "review"),
+             ("skills/audit/route.py", "codex", "reviewer", "resolver", "review")],
+        )
+        self.assertEqual(result["registry_copy"], "none")
+
+    def test_a_dispatcher_name_is_a_reader_only_where_the_dispatcher_is_not_shipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            consumer = Path(tmp) / "consumer"
+            (consumer / "scripts").mkdir(parents=True)
+            (consumer / "scripts" / "audit.py").write_text("run dispatch-codex.sh for the audit\n", encoding="utf-8")
+            source = Path(tmp) / "source"
+            scripts = source / "skills" / "review" / "scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "dispatch-codex.sh").write_text(
+                "# sibling of dispatch-claude.sh\nresolve --family codex --role reviewer\n", encoding="utf-8")
+            (scripts / "dispatch-claude.sh").write_text(
+                "# mirrors dispatch-codex.sh\nresolve --family claude --role reviewer\n", encoding="utf-8")
+            (source / "scripts").mkdir()
+            (source / "scripts" / "agent_models.py").write_text("dispatch-codex dispatch-gemini\n", encoding="utf-8")
+            # A file whose name only starts like a dispatcher does not make the repository its owner.
+            (source / "scripts" / "dispatch-task-custom.py").write_text("calls dispatch-task.sh\n", encoding="utf-8")
+            self.assertEqual(
+                [(r["family"], r["how"]) for r in agent_models.map_repo(consumer)["readers"]],
+                [("codex", "dispatch-codex")],
+            )
+            self.assertEqual(
+                [(r["file"].rsplit("/", 1)[-1], r["family"], r["how"]) for r in agent_models.map_repo(source)["readers"]],
+                [("dispatch-task-custom.py", "codex", "dispatch-task"),
+                 ("dispatch-claude.sh", "claude", "resolver"), ("dispatch-codex.sh", "codex", "resolver")],
+            )
+
+    def test_map_reports_whether_a_registry_copy_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "consumer"
+            copy_dir = repo / ".agent-config" / "repo" / "user"
+            copy_dir.mkdir(parents=True)
+            (copy_dir / "agent-models.json").write_bytes(b"{}")
+            self.assertEqual(agent_models.map_repo(repo, b"{}")["registry_copy"], "current")
+            self.assertEqual(agent_models.map_repo(repo, b"{ }")["registry_copy"], "differs")
+
+    def test_every_role_has_a_purpose(self) -> None:
+        self.assertEqual(set(agent_models.PURPOSES), set(agent_models.ROLES))
 
 
 class ScanTests(unittest.TestCase):
@@ -1061,6 +1301,22 @@ class ConfigEditSafetyTests(TempRegistryCase):
             self.assertEqual(agent_models.agy_fallback_verdict(row)[0], "drift")
         with mock.patch.object(agent_models, "agy_listing", lambda: None):
             self.assertEqual(agent_models.agy_fallback_verdict(row)[0], "skip")
+
+    def test_verify_holds_a_fallback_run_to_the_fallback_tier(self) -> None:
+        # A family whose fallback runs at another tier than the row's effort.
+        row = agent_models.resolve(
+            "agy", "interactive", fixture(lambda d: d["families"]["agy"].update(fallback_effort="low"))
+        )
+        self.assertEqual((row["effort"], row["fallback_slug"]), ("high", "gemini-8-fast-low"))
+        only_fallback = {"gemini-8-fast-low": "Gemini 8 Fast (Low)"}
+        with mock.patch.object(agent_models, "agy_listing", lambda: only_fallback):
+            self.assertEqual(agent_models.agy_fallback_status(row, "gemini-8-fast-low", "low"), "ok")
+            self.assertEqual(agent_models.agy_fallback_status(row, "gemini-8-fast-low", "high"), "mismatch")
+        with mock.patch.object(agent_models, "agy_listing", lambda: None):
+            self.assertEqual(agent_models.agy_fallback_status(row, "gemini-8-fast-low", "low"), "unknown")
+        listed = dict(only_fallback, **{"gemini-9-test-high": "x"})
+        with mock.patch.object(agent_models, "agy_listing", lambda: listed):
+            self.assertEqual(agent_models.agy_fallback_status(row, "gemini-8-fast-low", "low"), "mismatch")
 
     def test_unsupported_shapes_raise_and_sync_leaves_the_file_alone(self) -> None:
         for text in ('x = """\n[t]\n', 'model = { a = 1 }\n'):

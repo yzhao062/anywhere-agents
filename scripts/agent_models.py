@@ -20,7 +20,9 @@ Commands:
         Rewrite the keys of user/settings.json that mirror the registry
         (model, effortLevel, and two env entries). --check exits 1 when stale.
     set --family F [--role R] [--model M] [--effort E]
-        Change the registry in a source repository, then render.
+        [--fallback-model STEM] [--fallback-effort TIER]
+        Change the registry in a source repository, then render. The two
+        fallback flags are for an Agy row.
     sync [--dry-run] [--quiet]
         Write the interactive Codex and Agy values into ~/.codex/config.toml
         and the Antigravity settings file. Claude's values reach
@@ -30,6 +32,10 @@ Commands:
         list model literals in the given trees. Exit 1 on a mismatch.
     scan PATH ...
         List model and effort literals outside the registry. Exit 1 on a hit.
+    map PATH ... [--json]
+        For each repository, list the files that read a registry row and the
+        places that launch an agent CLI directly. These are candidates found
+        by pattern, to check by hand.
     actual --family F (--session-id ID | --stderr-file F | --log-file F | --json-file F)
            [--expect-model M --expect-effort E]
         Read what a finished run actually used from the CLI's own report and
@@ -127,7 +133,7 @@ def _check_row(family: str, row: dict, family_row: bool, where: str = "family") 
         raise RegistryError(f"{where} {family}: row must be an object")
     allowed = {"model", "effort"}
     if family == "agy":
-        allowed |= {"fallback_model", "second_model"}
+        allowed |= {"fallback_model", "fallback_effort", "second_model"}
     extra = set(row) - allowed
     if extra:
         raise RegistryError(f"{where} {family}: unknown keys {sorted(extra)}")
@@ -141,8 +147,20 @@ def _check_row(family: str, row: dict, family_row: bool, where: str = "family") 
         raise RegistryError(
             f"{where} {family}: effort {effort!r} is not one of {', '.join(EFFORTS[family])}"
         )
-    if family == "agy" and model and re.search(r"-(%s)$" % "|".join(AGY_TIERS), str(model)):
-        raise RegistryError(f"{where} agy: model {model!r} must be a stem without a tier")
+    fallback_effort = row.get("fallback_effort")
+    if fallback_effort is not None and fallback_effort not in EFFORTS[family]:
+        raise RegistryError(
+            f"{where} {family}: fallback_effort {fallback_effort!r} is not one of "
+            f"{', '.join(EFFORTS[family])}"
+        )
+    if fallback_effort is not None and not row.get("fallback_model"):
+        raise RegistryError(f"{where} {family}: fallback_effort needs a fallback_model in the same row")
+    for key in ("model", "fallback_model", "second_model") if family == "agy" else ():
+        stem = row.get(key)
+        if stem is not None and key != "model" and not re.fullmatch(r"[A-Za-z0-9._:/-]+", str(stem)):
+            raise RegistryError(f"{where} agy: bad {key} name {stem!r}")
+        if stem and re.search(r"-(%s)$" % "|".join(AGY_TIERS), str(stem)):
+            raise RegistryError(f"{where} agy: {key} {stem!r} must be a stem without a tier")
 
 
 def resolve(family: str, role: str = "interactive", data: dict | None = None) -> dict:
@@ -154,15 +172,36 @@ def resolve(family: str, role: str = "interactive", data: dict | None = None) ->
     data = data if data is not None else load()
     if family not in data["families"]:
         raise RegistryError(f"registry has no families.{family} row")
-    row = dict(data["families"][family])
-    row.update(data.get("roles", {}).get(role, {}).get(family, {}))
+    family_row = data["families"][family]
+    role_row = data.get("roles", {}).get(role, {}).get(family, {})
+    row = dict(family_row)
+    row.update(role_row)
     result = {"family": family, "role": role, "model": row["model"], "effort": row["effort"]}
     if family == "agy":
         result["slug"] = f"{row['model']}-{row['effort']}"
-        for key in ("fallback_model", "second_model"):
-            stem = row.get(key)
-            result[key.replace("_model", "_slug")] = f"{stem}-{row['effort']}" if stem else None
+        second = row.get("second_model")
+        result["second_slug"] = f"{second}-{row['effort']}" if second else None
+        # A fallback is a stem and a tier that belong together, so it is built
+        # in the row that names the stem. The family's stays at the family's
+        # tier whatever effort a role runs at; a role's own takes the role's
+        # fallback_effort, else the role's effort.
+        family_fallback = _fallback_slug(family_row, family_row["effort"])
+        if "fallback_model" in role_row:
+            result["fallback_slug"] = _fallback_slug(role_row, row["effort"])
+        else:
+            result["fallback_slug"] = family_fallback
+        # The row's own fallback, then the family's. A role may name a model
+        # fewer accounts list; it still ends where every other role does, so
+        # an account that lists neither keeps running. A row that drops its
+        # fallback has none.
+        chain = (result["fallback_slug"], family_fallback) if result["fallback_slug"] else ()
+        result["fallback_slugs"] = list(dict.fromkeys(slug for slug in chain if slug))
     return result
+
+
+def _fallback_slug(row: dict, effort: str) -> str | None:
+    stem = row.get("fallback_model")
+    return f"{stem}-{row.get('fallback_effort') or effort}" if stem else None
 
 
 # --------------------------------------------------------------------------
@@ -516,8 +555,11 @@ def cmd_set(args: argparse.Namespace) -> int:
               "anywhere-agents); a consumer copy is overwritten by the next bootstrap",
               file=sys.stderr)
         return 2
-    if not (args.model or args.effort):
-        print("agent_models: set needs --model and/or --effort", file=sys.stderr)
+    fallback_model = getattr(args, "fallback_model", None)
+    fallback_effort = getattr(args, "fallback_effort", None)
+    if not (args.model or args.effort or fallback_model or fallback_effort):
+        print("agent_models: set needs --model, --effort, --fallback-model, or --fallback-effort",
+              file=sys.stderr)
         return 2
     path = registry_path()
     data = load(path)
@@ -531,6 +573,12 @@ def cmd_set(args: argparse.Namespace) -> int:
         row["model"] = args.model
     if args.effort:
         row["effort"] = args.effort
+    # Agy keys; validate() refuses them on another family.
+    if fallback_model:
+        row["fallback_model"] = fallback_model
+        row.pop("fallback_effort", None)
+    if fallback_effort:
+        row["fallback_effort"] = fallback_effort
     validate(data)
     atomic_write(path, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
                  backup=False)
@@ -660,6 +708,18 @@ def agy_fallback_verdict(row: dict) -> tuple:
     return "drift", "fallback family, though the account lists the primary"
 
 
+def agy_fallback_status(row: dict, model: str, effort: str | None) -> str:
+    """ok, mismatch, or unknown for a run that landed on the row's fallback family.
+
+    The fallback slug carries its own tier, which need not be the row's effort.
+    """
+    verdict, _ = agy_fallback_verdict(row)
+    if verdict != "ok":
+        return {"skip": "unknown", "drift": "mismatch"}[verdict]
+    slug = row["fallback_slug"]
+    return compare("agy", slug, slug.rsplit("-", 1)[-1], model, effort)
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     if os.environ.get("AGENT_MODELS_SYNC", "").strip().lower() in ("off", "0", "false", "no", "disabled"):
         if not args.quiet:
@@ -749,6 +809,207 @@ def cmd_scan(args: argparse.Namespace) -> int:
     for path, number, literal, line in hits:
         print(f"{path}:{number}: {literal}    {line[:140]}")
     return 1 if hits else 0
+
+
+# --------------------------------------------------------------------------
+# map: who reads which row
+# --------------------------------------------------------------------------
+
+# Two purposes share the registry. A review needs depth. General work (fan-out
+# units, subagents, Workflow agents) needs to be fast, parallel, and cheap.
+PURPOSES = {"reviewer": "review", "worker": "general", "prun-worker": "general",
+            "interactive": "session", "premium": "session"}
+_FAMILY_RE = "|".join(FAMILIES)
+_ROLE_RE = "|".join(re.escape(role) for role in ROLES)
+_SEP = r"[\"',\s\[\]]+"
+# A reader named with its family and role on one line.
+PAIR_PATTERNS = [
+    re.compile(rf"--family{_SEP}(?P<family>{_FAMILY_RE}){_SEP}--role{_SEP}(?P<role>{_ROLE_RE})\b"),
+    re.compile(rf"\bresolve\(\s*[\"'](?P<family>{_FAMILY_RE})[\"']\s*,\s*[\"'](?P<role>{_ROLE_RE})[\"']"),
+]
+# A role passed as a name that the same file assigns: "--role", REGISTRY_ROLE.
+# The family before it is kept when it is written out.
+ROLE_NAME = re.compile(
+    rf"--family{_SEP}(?:(?P<family>{_FAMILY_RE})\b|[A-Za-z_][A-Za-z0-9_.]*)"
+    rf"{_SEP}--role{_SEP}(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
+)
+# A dispatcher or a setting that stands for one row. "*" is every family.
+FIXED_READERS = [
+    (re.compile(r"dispatch-gemini[^\n]*--print-model"), "agy", "reviewer",
+     "dispatch-gemini.py --print-model"),
+    (re.compile(r"\bdispatch-codex\b"), "codex", "reviewer", "dispatch-codex"),
+    (re.compile(r"\bdispatch-claude\b"), "claude", "reviewer", "dispatch-claude"),
+    (re.compile(r"\bdispatch-gemini\b"), "agy", "reviewer", "dispatch-gemini"),
+    (re.compile(r"\bdispatch-grok\b"), "grok", "reviewer", "dispatch-grok"),
+    (re.compile(r"\bdispatch-task-agy\b"), "agy", "prun-worker", "dispatch-task-agy"),
+    (re.compile(r"\bdispatch-task-grok\b"), "grok", "prun-worker", "dispatch-task-grok"),
+    (re.compile(r"\bdispatch-task\.(?:sh|ps1)\b"), "codex", "prun-worker", "dispatch-task"),
+    (re.compile(r"\bCLAUDE_CODE_SUBAGENT_MODEL\b"), "claude", "worker", "CLAUDE_CODE_SUBAGENT_MODEL"),
+    (re.compile(r"(?<![\w/.-])/(?:vet|implement-review)\b"), "*", "reviewer", "/vet"),
+    (re.compile(r"(?<![\w/.-])/prun\b"), "*", "prun-worker", "/prun"),
+]
+WORKFLOW_AGENT = re.compile(r"\bagent\(")
+# A direct launch of an agent CLI, written as a command line or as a quoted
+# argument list. These are candidates to check by hand, not a verdict: the
+# pattern does not follow a binary held in a variable, and it cannot tell
+# whether the launch is given the registry's values.
+LAUNCH = re.compile(
+    r"\b(?P<cli>claude|codex|agy|grok)(?:\s+|[\"']\s*,\s*[\"'])(?P<verb>-p|exec|--model)(?![\w-])"
+)
+SLASH_COMMANDS = ("/vet", "/prun")
+MAP_ROOT_SUFFIXES = {".py", ".sh", ".ps1", ".js", ".mjs"}
+MAP_ROOTS = ("skills", "scripts", "workflows", "src", "bootstrap", ".claude/commands", ".github/workflows")
+MAP_SUFFIXES = {".py", ".sh", ".ps1", ".md", ".js", ".mjs", ".yaml", ".yml"}
+MAP_SKIP_PARTS = {"tests", "test", "node_modules", "archive", "archived", "__pycache__"}
+DATED_PART = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def map_text(text: str, suffix: str = "") -> tuple[set, set]:
+    """The rows a text reads, as (family, role, how), and the direct launches it names."""
+    readers: set = set()
+    for pattern in PAIR_PATTERNS:
+        for match in pattern.finditer(text):
+            readers.add((match.group("family"), match.group("role"), "resolver"))
+    for match in ROLE_NAME.finditer(text):
+        name = match.group("name")
+        assigned = re.search(rf"\b{re.escape(name)}\s*=\s*[\"'](?P<role>{_ROLE_RE})[\"']", text)
+        if assigned:
+            readers.add((match.group("family") or "*", assigned.group("role"), "resolver"))
+    for pattern, family, role, how in FIXED_READERS:
+        if how in SLASH_COMMANDS and suffix != ".md":
+            continue
+        if pattern.search(text):
+            readers.add((family, role, how))
+    if ("agy", "reviewer", "dispatch-gemini.py --print-model") in readers:
+        readers.discard(("agy", "reviewer", "dispatch-gemini"))    # one call, not two readers
+    if suffix in (".js", ".mjs") and WORKFLOW_AGENT.search(text) and "export const meta" in text:
+        readers.add(("claude", "worker", "Workflow agent()"))
+    launches = set()
+    for line in text.splitlines():
+        if ALLOW_MARKER in line or (suffix != ".md" and line.lstrip().startswith("#")):
+            continue
+        for match in LAUNCH.finditer(line):
+            launches.add(f"{match.group('cli')} {match.group('verb')}")
+    return readers, launches
+
+
+def _map_files(repo: Path) -> list:
+    """Tracked text files in the places that hold live skills and scripts."""
+    try:
+        listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"], capture_output=True,
+                                text=True, encoding="utf-8", errors="replace", timeout=60)
+        names = [n for n in listed.stdout.split("\0") if n] if listed.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        names = None
+    if names is None:
+        names = [str(p.relative_to(repo).as_posix()) for p in repo.rglob("*") if p.is_file()]
+    kept = []
+    for name in names:
+        parts = name.split("/")
+        suffix = Path(name).suffix
+        if len(parts) == 1:
+            if suffix not in MAP_ROOT_SUFFIXES:      # a script at the root, not a README
+                continue
+        elif not any(name.startswith(root + "/") for root in MAP_ROOTS) or suffix not in MAP_SUFFIXES:
+            continue
+        if parts[-1] == "agent_models.py":           # the registry tool names every reader
+            continue
+        if MAP_SKIP_PARTS & set(parts[:-1]) or parts[0] == ".git" or any(DATED_PART.search(p) for p in parts):
+            continue
+        kept.append(name)
+    return sorted(kept)
+
+
+def map_repo(repo: Path, registry_bytes: bytes | None = None) -> dict:
+    readers, launches = [], []
+    names = _map_files(repo)
+    basenames = {name.rsplit("/", 1)[-1] for name in names}
+
+    def ships(how: str) -> bool:
+        # A repository that ships a dispatcher reads the row inside it, through
+        # the resolver; the dispatcher's name elsewhere in that repository is a
+        # mention. A consumer that names one runs it. A --print-model call is a
+        # caller wherever it is written.
+        if not how.startswith("dispatch-") or how.endswith("--print-model"):
+            return False
+        return any(base.split(".")[0] == how for base in basenames)
+
+    for name in names:
+        try:
+            text = (repo / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        found, launched = map_text(text, Path(name).suffix)
+        for family, role, how in sorted(found):
+            if ships(how):
+                continue
+            readers.append({"file": name, "family": family, "role": role, "how": how,
+                            "purpose": PURPOSES[role]})
+        if launched:
+            launches.append({"file": name, "launches": sorted(launched)})
+    copy_state = "none"
+    for candidate in (repo / ".agent-config" / "repo" / "user" / "agent-models.json",
+                      repo / "user" / "agent-models.json"):
+        if candidate.is_file():
+            try:
+                same = registry_bytes is not None and candidate.read_bytes() == registry_bytes
+            except OSError:
+                same = False
+            copy_state = "current" if same else "differs"
+            break
+    return {"repo": repo.name, "registry_copy": copy_state, "readers": readers, "launches": launches}
+
+
+def map_repos(paths: Iterable[str]) -> list:
+    registry = registry_path()
+    try:
+        registry_bytes = registry.read_bytes()
+    except OSError:
+        registry_bytes = None
+    repos: list = []
+    for raw in paths:
+        path = Path(raw).expanduser().resolve()
+        if (path / ".git").exists():
+            repos.append(path)
+            continue
+        children = sorted(c for c in path.iterdir() if c.is_dir() and not c.is_symlink()
+                          and (c / ".git").exists()) if path.is_dir() else []
+        repos.extend(children or ([path] if path.is_dir() else []))
+    return [map_repo(repo, registry_bytes) for repo in repos]
+
+
+def cmd_map(args: argparse.Namespace) -> int:
+    results = map_repos(args.paths)
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    data = load()
+    print(f"registry: {registry_path()}")
+    for purpose in ("review", "general"):
+        for role in (r for r in ROLES if PURPOSES[r] == purpose):
+            values = "  ".join(
+                "{family}={model}/{effort}".format(**resolve(family, role, data))
+                for family in FAMILIES if family in data["families"]
+            )
+            print(f"{purpose:8} {role:12} {values}")
+    for result in results:
+        if not (result["readers"] or result["launches"]):
+            continue
+        print(f"\n{result['repo']}  (registry copy: {result['registry_copy']})")
+        for purpose in ("review", "general", "session"):
+            rows: dict = {}
+            for reader in result["readers"]:
+                if reader["purpose"] == purpose:
+                    rows.setdefault(reader["file"], []).append(
+                        f"{reader['family']}/{reader['role']} via {reader['how']}")
+            for name, found in sorted(rows.items()):
+                print(f"  {purpose:8} {name}: {'; '.join(found)}")
+        for item in result["launches"]:
+            print(f"  launch   {item['file']}: {', '.join(item['launches'])}")
+    if any(result["launches"] for result in results):
+        print("\nA launch line is a direct agent CLI launch found by pattern. Check by hand that it is"
+              " given the registry's values; the pattern does not see every launch.")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -1034,9 +1295,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             if family == "agy" and agy_family_state(model, want) == "fallback":
                 # The same account-aware answer doctor gives, so the three
                 # commands agree on an account that lacks the primary family.
-                verdict, _ = agy_fallback_verdict(want)
-                status = {"skip": "unknown", "drift": "mismatch"}.get(verdict) or compare(
-                    family, want["fallback_slug"], want["effort"], model, effort)
+                status = agy_fallback_status(want, model, effort)
             failed = failed or status == "mismatch"
             label = {"ok": "ok", "mismatch": "drift", "unknown": "unverified"}[status]
             print(f"[{label}] {family} interactive: actual {model} {effort or '-'}"
@@ -1077,8 +1336,10 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"registry: {registry_path()}")
     print(f"{'family':<8} {'role':<12} {'model':<22} {'effort':<8} extra")
     for row in rows:
-        extra = " ".join(f"{k}={v}" for k, v in row.items()
-                         if k in ("slug", "fallback_slug", "second_slug") and v)
+        extra = " ".join(
+            f"{k}={'>'.join(v) if isinstance(v, list) else v}" for k, v in row.items()
+            if k in ("slug", "fallback_slugs", "second_slug") and v
+        )
         print(f"{row['family']:<8} {row['role']:<12} {row['model']:<22} {row['effort']:<8} {extra}")
     return 0
 
@@ -1192,6 +1453,8 @@ def main(argv: list | None = None) -> int:
                    help="write an interactive or reviewer override instead of the family row")
     p.add_argument("--model")
     p.add_argument("--effort")
+    p.add_argument("--fallback-model", help="agy: the stem an account without the row's family falls back to")
+    p.add_argument("--fallback-effort", help="agy: the fallback's tier, when it differs from the row's effort")
     p.set_defaults(func=cmd_set)
     p = sub.add_parser("sync")
     p.add_argument("--dry-run", action="store_true")
@@ -1203,6 +1466,11 @@ def main(argv: list | None = None) -> int:
     p = sub.add_parser("scan")
     p.add_argument("paths", nargs="+")
     p.set_defaults(func=cmd_scan)
+    p = sub.add_parser("map", help="list candidate references: which skills and scripts read which "
+                                   "registry row, and where an agent CLI is launched directly")
+    p.add_argument("paths", nargs="+", help="a repository, or a directory of repositories")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_map)
     p = sub.add_parser("actual")
     p.add_argument("--family", required=True, choices=FAMILIES)
     p.add_argument("--session-id", help="claude or grok: the session id the run used")
