@@ -5584,8 +5584,9 @@ class GrokAutoUpdateTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
                 f'printf "1\\n" > "{started_marker.as_posix()}"\n'
-                "/bin/sleep 30 2>/dev/null || sleep 30\n"
-                "exit 0\n",
+                # exec, so the timeout kills the sleeping process itself and no
+                # shell of the stub's own reports the death into the check output.
+                "exec /bin/sleep 30\n",
             )
             state_dir = home / ".claude"
             stamp_path = state_dir / "grok-update-stamp"
@@ -5644,6 +5645,10 @@ class GrokAutoUpdateTests(unittest.TestCase):
                 "bounded check timeout did not release single-flight lock",
             )
             self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+            # The watcher killed during its grace sleep is reaped quietly too.
+            log_path = state_dir / "grok-update.log"
+            log_text = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+            self.assertNotIn("Terminated", log_text)
 
     def test_update_available_invokes_update_once_and_false_skips_update(self) -> None:
         with tempfile.TemporaryDirectory(prefix="aa-grok-avail-true-") as td:
@@ -5687,7 +5692,10 @@ class GrokAutoUpdateTests(unittest.TestCase):
                 ["update --check --json", "update"],
             )
             self.assertTrue(log_file.is_file())
-            self.assertIn("Updated grok to 1.1.0", log_file.read_text(encoding="utf-8"))
+            log_text = log_file.read_text(encoding="utf-8")
+            self.assertIn("Updated grok to 1.1.0", log_text)
+            # The timeout watcher is reaped quietly, not reported as a killed job.
+            self.assertNotIn("Terminated", log_text)
 
             # Subsequent bootstrap within 24h does not invoke grok again.
             result2, _, _ = self._run_bootstrap(
@@ -5731,6 +5739,9 @@ class GrokAutoUpdateTests(unittest.TestCase):
                 )
             )
             self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+            log_text = (home / ".claude" / "grok-update.log").read_text(encoding="utf-8")
+            self.assertIn('"updateAvailable":false', log_text)
+            self.assertNotIn("Terminated", log_text)
 
     def test_discovers_grok_under_home_dot_grok_bin_when_not_on_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="aa-grok-homebin-") as td:

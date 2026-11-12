@@ -947,6 +947,7 @@ maybe_update_grok_cli() {
       wait "$_cmd_pid" 2>/dev/null
       _rc=$?
       kill "$_wd_pid" 2>/dev/null || true
+      wait "$_wd_pid" 2>/dev/null || true
       return "$_rc"
     }
     if _run_bounded "$_check_to" "$_check_out" "$_bin" update --check --json; then

@@ -93,5 +93,17 @@ After a clean `end_turn` exit, the dispatcher checks `<state-dir>/staged-snapsho
 
 Because `user/settings.json` does not pre-authorize paid third-party CLIs for all consumers, `/vet grok` uses the following launch route under Claude Code:
 
-- Automatic execution once the maintainer's own `~/.claude/settings.json` carries a narrow `Bash(*dispatch-grok.py*)` allow rule for the dispatcher script (never a broad allow rule for the `grok` binary itself, and never in the shared `user/settings.json`).
-- Otherwise, Claude Code presents its normal permission prompt before running `dispatch-grok.py`.
+- In auto mode the classifier judges each command, and it refused a direct `grok --always-approve` launch. An `autoMode.allow` entry in the maintainer's own `~/.claude/settings.json` that describes the two Grok dispatchers lets it run them unattended. Keep `"$defaults"` in the list, because a list without it drops the built-in allow rules. Claude Code reads `autoMode` from user settings, managed settings, and inline settings passed with `--settings` or the Agent SDK, never from a project's `.claude/settings.json` or `.claude/settings.local.json`.
+- A permission allow rule does not do this job. Auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-grok.py *)`, a pattern that would also match `python3 -c "<code>" dispatch-grok.py`, and an allow rule does not match past a leading assignment such as `PRUN_SCRATCH_CWD=`. Never allow the `grok` binary itself, and never put either setting in the shared `user/settings.json`.
+- Without the entry, auto mode may refuse the launch; other permission modes apply the user's ordinary rules.
+
+An entry of this shape works on the maintainer's machine. Describe only what the dispatchers enforce: the spend check runs only when `GROK_WEEKLY_BUDGET_USD` is set, and `dispatch-task-grok.py` does not check that a `PRUN_SCRATCH_CWD` path is disposable.
+
+```json
+"autoMode": {
+  "allow": [
+    "$defaults",
+    "Running the anywhere-agents Grok dispatchers with python or python3 is allowed: dispatch-grok.py (a /vet review) and dispatch-task-grok.py (a prun unit), from a source repository's skills/ directory or any project's .claude/skills or .agent-config/repo/skills copy, including with leading PRUN_SCRATCH_CWD= or IMPLEMENT_REVIEW_ORCHESTRATOR= assignments. dispatch-grok.py keeps grok inside an exported index snapshot; dispatch-task-grok.py runs it in a temporary work directory, or in PRUN_SCRATCH_CWD when the caller sets one. Both switch off the user's hooks and MCP servers, and both refuse to launch once the last 7 days' Grok spend reaches GROK_WEEKLY_BUDGET_USD when that variable is set."
+  ]
+}
+```
