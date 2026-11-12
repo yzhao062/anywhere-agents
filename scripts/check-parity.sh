@@ -228,7 +228,9 @@ strict_test_files=(
   tests/_quiet_spawn.py
   tests/test_dispatch_codex.py
   tests/test_dispatch_gemini.py
+  tests/test_dispatch_grok.py
   tests/test_dispatch_task_agy.py
+  tests/test_dispatch_task_grok.py
   # The Codex worker restored for units the user names Codex for. Both scripts
   # sit under the recursive prun tree, so their contract test is gated too.
   tests/test_dispatch_task.py

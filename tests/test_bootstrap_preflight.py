@@ -129,7 +129,7 @@ def powershell_editions_or_fail(case: unittest.TestCase) -> list[str]:
 _POSIX_SANDBOX_TOOLS = (
     "sed", "uname", "printf", "tr", "grep", "cat", "mkdir", "echo", "rm",
     "dirname", "basename", "test", "ls", "head", "tail", "sh", "mv", "cp",
-    "chmod", "mktemp", "sleep", "ln",
+    "chmod", "mktemp", "sleep", "ln", "date", "nohup", "stat", "kill", "pkill",
 )
 
 
@@ -224,6 +224,16 @@ def _stripped_env(stub_dir: Path | None) -> dict[str, str]:
     env.pop("AGENT_CONFIG_UPSTREAM", None)
     env.pop("AGENT_CONFIG_SKIP_GIT_PREFLIGHT", None)
     env.pop("AGENT_CONFIG_PREFLIGHT_TEST", None)
+    env.pop("GROK_BIN", None)
+    env.pop("GROK_HOME", None)
+    env.pop("ANYWHERE_AGENTS_GROK_AUTO_UPDATE", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_DIR", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_STAMP", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_LOCK", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_LOG", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_TTL_SECONDS", None)
+    env.pop("ANYWHERE_AGENTS_GROK_CHECK_TIMEOUT_SECONDS", None)
+    env.pop("ANYWHERE_AGENTS_GROK_UPDATE_TIMEOUT_SECONDS", None)
     return env
 
 
@@ -614,6 +624,7 @@ def _run_full_bootstrap_with_ledger(
         env["AGENT_CONFIG_UPSTREAM"] = "example/repo"
         env["ANYWHERE_AGENTS_PYTHON"] = python_command
         env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "off"
         env["PYTHONPATH"] = str(python_path)
         if not yaml_available:
             env["PIP_NO_INDEX"] = "1"
@@ -818,6 +829,7 @@ def _run_no_python_bootstrap_with_ledger(
         env["AGENT_CONFIG_UPSTREAM"] = "example/repo"
         env["ANYWHERE_AGENTS_PYTHON"] = override
         env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "off"
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         # Point the user-level config layer at the fixture home. Without
@@ -966,6 +978,7 @@ def _run_atomic_helper_deployment(
         env["AGENT_CONFIG_UPSTREAM"] = "example/repo"
         env["ANYWHERE_AGENTS_PYTHON"] = str(Path(sys.executable)).replace("\\", "/") if entrypoint == "bash" else sys.executable
         env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "off"
         env["PYTHONPATH"] = str(python_path)
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
@@ -1026,6 +1039,7 @@ def _run_bash_self_update() -> tuple[subprocess.CompletedProcess, bytes, bytes, 
         env["AGENT_CONFIG_UPSTREAM"] = "example/repo"
         env["ANYWHERE_AGENTS_PYTHON"] = str(Path(sys.executable)).replace("\\", "/")
         env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "off"
         env["PYTHONPATH"] = str(python_path)
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
@@ -5347,6 +5361,436 @@ class GitignoreWriterEmptyArrayTests(unittest.TestCase):
                                 f"{writer} produced the wrong bytes under {name} "
                                 f"from the {label} state",
                             )
+
+
+class GrokAutoUpdateTests(unittest.TestCase):
+    """Detached Grok CLI auto-updater (`maybe_update_grok_cli` / `Invoke-GrokAutoUpdate`)."""
+
+    def _setup_workspace(self, tmp: Path) -> tuple[Path, Path, Path, Path]:
+        work, python_path, home = _prepare_full_bootstrap_fixture(
+            tmp,
+            composer_rc=0,
+            generator_rc=None,
+        )
+        stub_dir = tmp / "stub_path"
+        _make_stub_git(stub_dir, "git version 2.50.0")
+        _write_executable(stub_dir / "curl", "#!/bin/sh\nexit 0\n")
+        return work, python_path, home, stub_dir
+
+    def _run_bootstrap(
+        self,
+        work: Path,
+        python_path: Path,
+        home: Path,
+        stub_dir: Path,
+        *,
+        grok_bin: Path | str | None,
+        env_extra: dict[str, str] | None = None,
+        timeout: float = 15.0,
+    ) -> tuple[subprocess.CompletedProcess, dict, float]:
+        if not BASH:
+            self.skipTest("bash not available")
+        env = _stripped_env(stub_dir)
+        env["AGENT_CONFIG_UPSTREAM"] = "example/repo"
+        env["ANYWHERE_AGENTS_PYTHON"] = str(Path(sys.executable)).replace("\\", "/")
+        env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "on"
+        env["PYTHONPATH"] = str(python_path)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["APPDATA"] = str(home / "AppData" / "Roaming")
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        state_dir = home / ".claude"
+        env["ANYWHERE_AGENTS_GROK_UPDATE_DIR"] = str(state_dir)
+        if grok_bin is not None:
+            env["GROK_BIN"] = str(grok_bin)
+        else:
+            env.pop("GROK_BIN", None)
+        if env_extra:
+            env.update(env_extra)
+
+        t0 = time.monotonic()
+        proc = subprocess.Popen(
+            [BASH, str(BOOTSTRAP_SH)],
+            cwd=str(work),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        elapsed = time.monotonic() - t0
+        result = subprocess.CompletedProcess(
+            [BASH, str(BOOTSTRAP_SH)], proc.returncode, stdout, stderr
+        )
+        ledger_path = work / ".agent-config" / "last-run.json"
+        ledger = (
+            json.loads(ledger_path.read_text(encoding="utf-8"))
+            if ledger_path.is_file()
+            else {}
+        )
+        return result, ledger, elapsed
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.02) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return bool(predicate())
+
+    @staticmethod
+    def _read_lines(path: Path) -> list[str]:
+        if not path.is_file():
+            return []
+        return [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    @staticmethod
+    def _write_fake_grok(path: Path, body: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_executable(path, body)
+        return path
+
+    def test_missing_grok_is_silent_noop_and_writes_no_stamp(self) -> None:
+        for grok_bin_override in (None, "nonexistent-grok-binary"):
+            with self.subTest(grok_bin=grok_bin_override):
+                with tempfile.TemporaryDirectory(prefix="aa-grok-missing-") as td:
+                    tmp = Path(td)
+                    work, python_path, home, stub_dir = self._setup_workspace(tmp)
+                    result, ledger, _ = self._run_bootstrap(
+                        work,
+                        python_path,
+                        home,
+                        stub_dir,
+                        grok_bin=grok_bin_override,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIs(ledger.get("completed"), True, ledger)
+                    state_dir = home / ".claude"
+                    self.assertFalse((state_dir / "grok-update-stamp").exists())
+                    self.assertFalse((state_dir / "grok-update.lock").exists())
+                    self.assertFalse((state_dir / "grok-update.log").exists())
+                    self.assertNotIn("grok", result.stderr.lower())
+
+    def test_disabled_by_env_skips_update_and_writes_no_stamp(self) -> None:
+        for spelling in ("off", "0", "disabled", "false", "no", " OFF ", "False"):
+            with self.subTest(spelling=spelling):
+                with tempfile.TemporaryDirectory(prefix="aa-grok-disabled-") as td:
+                    tmp = Path(td)
+                    work, python_path, home, stub_dir = self._setup_workspace(tmp)
+                    invocations = tmp / "grok-invocations.log"
+                    fake_grok = self._write_fake_grok(
+                        stub_dir / "grok",
+                        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{invocations.as_posix()}"\nexit 0\n',
+                    )
+                    result, ledger, _ = self._run_bootstrap(
+                        work,
+                        python_path,
+                        home,
+                        stub_dir,
+                        grok_bin=fake_grok,
+                        env_extra={"ANYWHERE_AGENTS_GROK_AUTO_UPDATE": spelling},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIs(ledger.get("completed"), True, ledger)
+                    state_dir = home / ".claude"
+                    self.assertFalse((state_dir / "grok-update-stamp").exists())
+                    self.assertFalse(invocations.exists())
+
+    def test_failed_update_check_throttles_until_next_stamp_and_keeps_bootstrap_green(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aa-grok-fail-") as td:
+            tmp = Path(td)
+            work, python_path, home, stub_dir = self._setup_workspace(tmp)
+            invocations = tmp / "grok-invocations.log"
+            fake_grok = self._write_fake_grok(
+                stub_dir / "grok",
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
+                'printf \'{"error":"network down"}\\n\' >&2\n'
+                "exit 1\n",
+            )
+            state_dir = home / ".claude"
+            stamp_path = state_dir / "grok-update-stamp"
+            lock_dir = state_dir / "grok-update.lock"
+
+            result1, ledger1, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result1.returncode, 0, result1.stderr)
+            self.assertIs(ledger1.get("completed"), True, ledger1)
+            self.assertTrue(stamp_path.is_file())
+            self.assertTrue(
+                self._wait_until(
+                    lambda: len(self._read_lines(invocations)) >= 1 and not lock_dir.exists()
+                ),
+                f"invocations={self._read_lines(invocations)} lock={lock_dir.exists()}",
+            )
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+            # Immediate second run is throttled by the 24h stamp despite the check failure.
+            result2, ledger2, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            self.assertIs(ledger2.get("completed"), True, ledger2)
+            time.sleep(0.15)
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+            # Expiring the 24h stamp allows the next bootstrap run to retry.
+            expired = int(time.time()) - 90000
+            stamp_path.write_text(f"{expired}\n", encoding="utf-8")
+            os.utime(stamp_path, (expired, expired))
+            result3, ledger3, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result3.returncode, 0, result3.stderr)
+            self.assertIs(ledger3.get("completed"), True, ledger3)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: len(self._read_lines(invocations)) >= 2 and not lock_dir.exists()
+                )
+            )
+            self.assertEqual(
+                self._read_lines(invocations),
+                ["update --check --json", "update --check --json"],
+            )
+
+    def test_hanging_grok_detaches_closes_pipes_promptly_and_enforces_single_flight(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aa-grok-hang-") as td:
+            tmp = Path(td)
+            work, python_path, home, stub_dir = self._setup_workspace(tmp)
+            invocations = tmp / "grok-invocations.log"
+            started_marker = tmp / "grok-started"
+            fake_grok = self._write_fake_grok(
+                stub_dir / "grok",
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
+                f'printf "1\\n" > "{started_marker.as_posix()}"\n'
+                "/bin/sleep 30 2>/dev/null || sleep 30\n"
+                "exit 0\n",
+            )
+            state_dir = home / ".claude"
+            stamp_path = state_dir / "grok-update-stamp"
+            lock_dir = state_dir / "grok-update.lock"
+
+            # Check timeout is 2s, while fake grok sleeps for 30s.
+            # _run_bootstrap uses Popen(... stdout=PIPE, stderr=PIPE).communicate(),
+            # which blocks until every process holding the stdout/stderr pipe closes it.
+            result1, ledger1, elapsed = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+                env_extra={
+                    "ANYWHERE_AGENTS_GROK_CHECK_TIMEOUT_SECONDS": "2",
+                    "ANYWHERE_AGENTS_GROK_UPDATE_TIMEOUT_SECONDS": "2",
+                },
+                timeout=10.0,
+            )
+            self.assertEqual(result1.returncode, 0, result1.stderr)
+            self.assertIs(ledger1.get("completed"), True, ledger1)
+            self.assertLess(
+                elapsed,
+                4.5,
+                f"bootstrap blocked on detached grok updater (elapsed={elapsed:.2f}s)",
+            )
+            self.assertTrue(
+                self._wait_until(lambda: started_marker.is_file(), timeout=2.0),
+                "detached grok check did not start",
+            )
+            self.assertTrue(lock_dir.is_dir(), "single-flight lock directory should be held")
+
+            # While the first job holds the single-flight lock, even removing the stamp
+            # must not start a second concurrent grok job.
+            stamp_path.unlink(missing_ok=True)
+            result2, ledger2, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+                env_extra={
+                    "ANYWHERE_AGENTS_GROK_CHECK_TIMEOUT_SECONDS": "2",
+                    "ANYWHERE_AGENTS_GROK_UPDATE_TIMEOUT_SECONDS": "2",
+                },
+                timeout=10.0,
+            )
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            self.assertIs(ledger2.get("completed"), True, ledger2)
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+            # Bounded check timeout terminates the hung check and releases the lock.
+            self.assertTrue(
+                self._wait_until(lambda: not lock_dir.exists(), timeout=8.0),
+                "bounded check timeout did not release single-flight lock",
+            )
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+    def test_update_available_invokes_update_once_and_false_skips_update(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aa-grok-avail-true-") as td:
+            tmp = Path(td)
+            work, python_path, home, stub_dir = self._setup_workspace(tmp)
+            invocations = tmp / "grok-invocations.log"
+            fake_grok = self._write_fake_grok(
+                stub_dir / "grok",
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
+                'if [ "$1" = "update" ] && [ "$2" = "--check" ]; then\n'
+                '  printf \'{"currentVersion":"1.0.0","latestVersion":"1.1.0","updateAvailable":true}\\n\'\n'
+                "  exit 0\n"
+                "fi\n"
+                'if [ "$1" = "update" ] && [ $# -eq 1 ]; then\n'
+                '  printf "Updated grok to 1.1.0\\n"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 2\n",
+            )
+            lock_dir = home / ".claude" / "grok-update.lock"
+            log_file = home / ".claude" / "grok-update.log"
+
+            result1, ledger1, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result1.returncode, 0, result1.stderr)
+            self.assertIs(ledger1.get("completed"), True, ledger1)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: len(self._read_lines(invocations)) >= 2 and not lock_dir.exists()
+                ),
+                f"invocations={self._read_lines(invocations)} lock={lock_dir.exists()}",
+            )
+            self.assertEqual(
+                self._read_lines(invocations),
+                ["update --check --json", "update"],
+            )
+            self.assertTrue(log_file.is_file())
+            self.assertIn("Updated grok to 1.1.0", log_file.read_text(encoding="utf-8"))
+
+            # Subsequent bootstrap within 24h does not invoke grok again.
+            result2, _, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            time.sleep(0.15)
+            self.assertEqual(
+                self._read_lines(invocations),
+                ["update --check --json", "update"],
+            )
+
+        with tempfile.TemporaryDirectory(prefix="aa-grok-avail-false-") as td:
+            tmp = Path(td)
+            work, python_path, home, stub_dir = self._setup_workspace(tmp)
+            invocations = tmp / "grok-invocations.log"
+            fake_grok = self._write_fake_grok(
+                stub_dir / "grok",
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
+                'printf \'{"currentVersion":"1.1.0","latestVersion":"1.1.0","updateAvailable":false}\\n\'\n'
+                "exit 0\n",
+            )
+            lock_dir = home / ".claude" / "grok-update.lock"
+            result, ledger, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=fake_grok,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIs(ledger.get("completed"), True, ledger)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: len(self._read_lines(invocations)) >= 1 and not lock_dir.exists()
+                )
+            )
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+    def test_discovers_grok_under_home_dot_grok_bin_when_not_on_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aa-grok-homebin-") as td:
+            tmp = Path(td)
+            work, python_path, home, stub_dir = self._setup_workspace(tmp)
+            invocations = tmp / "grok-invocations.log"
+            home_grok = self._write_fake_grok(
+                home / ".grok" / "bin" / "grok",
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$*" >> "{invocations.as_posix()}"\n'
+                'printf \'{"updateAvailable":false}\\n\'\n'
+                "exit 0\n",
+            )
+            self.assertTrue(home_grok.is_file())
+            lock_dir = home / ".claude" / "grok-update.lock"
+            result, ledger, _ = self._run_bootstrap(
+                work,
+                python_path,
+                home,
+                stub_dir,
+                grok_bin=None,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIs(ledger.get("completed"), True, ledger)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: len(self._read_lines(invocations)) >= 1 and not lock_dir.exists()
+                )
+            )
+            self.assertEqual(self._read_lines(invocations), ["update --check --json"])
+
+    def test_powershell_mechanical_twin_contract(self) -> None:
+        ps1 = BOOTSTRAP_PS1.read_text(encoding="utf-8")
+        sh = BOOTSTRAP_SH.read_text(encoding="utf-8")
+
+        for token in (
+            "function Invoke-GrokAutoUpdate",
+            "ANYWHERE_AGENTS_GROK_AUTO_UPDATE",
+            "grok-update-stamp",
+            "grok-update.lock",
+            "grok-update.log",
+            "update --check --json",
+            "updateAvailable",
+            "Start-Process",
+            "-WindowStyle Hidden",
+        ):
+            self.assertIn(token, ps1)
+
+        # Placed outside the bootstrap ledger finalize path and before banner rendering.
+        ledger_pos = ps1.rfind("Write-Ledger 'finalize'")
+        grok_call_pos = ps1.rfind("Invoke-GrokAutoUpdate")
+        banner_pos = ps1.rfind("Invoke-BannerRender 0")
+        self.assertGreater(ledger_pos, 0)
+        self.assertGreater(grok_call_pos, ledger_pos)
+        self.assertGreater(banner_pos, grok_call_pos)
+
+        sh_ledger_pos = sh.rfind("_ledger_write finalize true")
+        sh_grok_pos = sh.rfind("maybe_update_grok_cli")
+        self.assertGreater(sh_ledger_pos, 0)
+        self.assertGreater(sh_grok_pos, sh_ledger_pos)
 
 
 if __name__ == "__main__":

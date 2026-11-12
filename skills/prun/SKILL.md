@@ -1,6 +1,6 @@
 ---
 name: prun
-description: Parallel delegation fan-out on Agy. The coordinating session decomposes and integrates while task units run in parallel as Agy processes (Gemini through the Antigravity CLI), never on the coordinator and never on Claude-side workers such as Sonnet subagents. Each unit runs unattended in a scratch dir or throwaway clone and gets follow-up turns while slower units finish. A unit runs on Codex only when the user names Codex for it. Unit count follows the dependency graph rather than a small fixed cap. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
+description: Parallel delegation fan-out on Agy. The coordinating session decomposes and integrates while task units run in parallel as Agy processes (Gemini through the Antigravity CLI), never on the coordinator and never on Claude-side workers such as Sonnet subagents. Each unit runs unattended in a scratch dir or throwaway clone and gets follow-up turns while slower units finish. A unit runs on Codex only when the user names Codex for it, or on Grok only when the user names Grok for it. Unit count follows the dependency graph rather than a small fixed cap. Units may read or write code; workers never commit or push, and the session plus the user are the final integration gate.
 ---
 
 # prun (parallel run)
@@ -10,7 +10,7 @@ description: Parallel delegation fan-out on Agy. The coordinating session decomp
 `prun` fans a task out into independent units that run in parallel while the current session only
 coordinates. **Every unit runs on Agy by default**: an Agy process running Gemini through the
 Antigravity CLI, on the Google AI plan authenticated in `agy`. A unit runs on Codex only when the
-user names Codex for it (see Executors). The coordinator decomposes the task, dispatches the units,
+user names Codex for it, or on Grok only when the user names Grok for it (see Executors). The coordinator decomposes the task, dispatches the units,
 gathers their results, reviews their diffs, and integrates. It never runs a unit itself.
 
 **No Claude-side workers.** A Sonnet subagent, a Workflow agent, or any other Agent-tool worker draws
@@ -50,6 +50,7 @@ or a unit's result cannot be checked without redoing it.
 |---|---|---|
 | Agy (`agy`) | Google AI plan authenticated in Antigravity | **The default worker.** Runs the registry's `prun-worker` model and effort for Agy; fast, separately funded, and dispatched with full unattended tool permission inside a scratch dir or throwaway clone. |
 | Codex (`codex`) | Codex plan, the pool `/vet` reviewers use | **Only when the user names Codex** for a unit or a batch. Runs the registry's `prun-worker` model and effort for Codex through `dispatch-task.sh` (`.ps1` on Windows). |
+| Grok (`grok`) | Grok plan authenticated in the Grok CLI | **Only when the user names Grok** for a unit or a batch. Runs the registry's `prun-worker` model and effort for Grok through `dispatch-task-grok.py`. |
 | Claude session (this session) | Current Claude account; check Settings > Usage for the applicable limits or credits | Coordinator and integrator only, on whatever model is selected. Never a unit. |
 
 Rules:
@@ -73,6 +74,15 @@ Rules:
   units or tell the user. A Codex unit runs through `dispatch-task.sh` (`.ps1` on Windows), never a
   hand-typed `codex exec`, and its model and effort come from the registry's `prun-worker` row for
   Codex, not from the command line or the interactive Codex config.
+- **Grok only when the user names it.** A unit goes to Grok only when the user's request names
+  Grok for that unit or for a batch. The coordinator never picks Grok on its own, and never moves
+  units to Grok as a fallback when Agy is short: queue the units or tell the user. When Agy fails
+  on a network or login error (`FALLBACK` with `preflight timed out after 60s` or
+  `Antigravity preflight failed`, exit 124 or 70), report the failure and offer Grok to the user
+  rather than switching automatically. A Grok unit runs through `dispatch-task-grok.py` with its
+  model and effort from the registry's `prun-worker` row for Grok; see
+  `skills/prun/references/grok-executor.md` for flags, child environment, the weekly budget guard,
+  and the automatic launch route.
 - **Session-internal tools stay outside the fan-out.** An Agy process cannot use the coordinator's
   MCP, email connectors, or Artifact tool. Gather what a unit needs from those tools in the
   coordinating session before dispatch, and put it in the unit prompt; leave a small action that
@@ -152,11 +162,11 @@ accident; it is not a sandbox, and a worker can still read any file the user can
 2. **Decompose**: write one prompt per unit. State the task; for a code-writing unit, that the
    working dir is a throwaway clone to edit freely but **not** commit or push; that the unit writes
    a result summary to its result file (a fresh path, in one write).
-3. **Assign**: every unit goes to Agy, except a unit the user named for Codex. Gather anything a unit
+3. **Assign**: every unit goes to Agy, except a unit the user named for Codex or Grok. Gather anything a unit
    needs from session-internal tools first and write it into that unit's prompt. Pick read-only
    (scratch) or code-writing (clone) mode, and record the mode in the ledger.
 4. **Dispatch in parallel**: run `<python> scripts/dispatch-task-agy.py` in the background for each
-   unit (`scripts/dispatch-task.sh` for a Codex unit). With no `--mode` it runs `accept-edits` with `--dangerously-skip-permissions` in a scratch
+   unit (`scripts/dispatch-task.sh` for a Codex unit, `<python> scripts/dispatch-task-grok.py` for a Grok unit). With no `--mode` it runs `accept-edits` with `--dangerously-skip-permissions` in a scratch
    directory it creates. A caller-supplied workspace, meaning `PRUN_SCRATCH_CWD` (a throwaway clone
    for a code-writing unit) or `--add-dir` (a clone or snapshot the unit should see), requires an
    explicit `--mode accept-edits` or `--mode plan`, so the write-capable mode is a named choice for

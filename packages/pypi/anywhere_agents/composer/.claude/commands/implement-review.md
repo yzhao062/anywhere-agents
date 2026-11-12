@@ -1,6 +1,6 @@
 ---
 description: Run the implement-review staged-change review loop
-argument-hint: "[both|agy|claude|copilot|codex] [auto|cli|auto-terminal|manual|plugin] [focus...]"
+argument-hint: "[both|agy|claude|copilot|codex|grok] [auto|cli|auto-terminal|manual|plugin] [focus...]"
 ---
 
 Read and follow the skill definition. Look for it at `skills/implement-review/SKILL.md` first, then `.claude/skills/implement-review/SKILL.md`, then `.agent-config/repo/skills/implement-review/SKILL.md`.

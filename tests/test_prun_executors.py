@@ -57,13 +57,22 @@ class PrunExecutorContractTests(unittest.TestCase):
         rows = executors_table(SKILL.read_text(encoding="utf-8"))
         names = [row[0] for row in rows]
         self.assertEqual(
-            names, ["Agy (`agy`)", "Codex (`codex`)", "Claude session (this session)"]
+            names,
+            [
+                "Agy (`agy`)",
+                "Codex (`codex`)",
+                "Grok (`grok`)",
+                "Claude session (this session)",
+            ],
         )
         self.assertIn("default worker", rows[0][2])
         self.assertIn("Only when the user names Codex", rows[1][2])
         self.assertIn("prun-worker", rows[1][2])
+        self.assertIn("Only when the user names Grok", rows[2][2])
+        self.assertIn("prun-worker", rows[2][2])
+        self.assertIn("dispatch-task-grok.py", rows[2][2])
         # The coordinator's row stays, and it is never a unit.
-        self.assertIn("Never a unit", rows[2][2])
+        self.assertIn("Never a unit", rows[3][2])
 
     def test_every_surface_states_the_codex_policy(self) -> None:
         # Same policy in the skill, the command pointer, and the OpenAI wrapper:
@@ -82,6 +91,18 @@ class PrunExecutorContractTests(unittest.TestCase):
                 self.assertNotRegex(text, r"Codex (?:is|are) (?:not|excluded)|not a prun executor")
                 self.assertNotIn("reserved for `/vet`", text)
 
+    def test_every_surface_states_the_grok_policy(self) -> None:
+        for path in (SKILL, POINTER, OPENAI):
+            with self.subTest(path.name):
+                text = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertRegex(text, r"only when the (?:user|user's request) names Grok")
+                self.assertRegex(text, r"never picks Grok on its own")
+                self.assertIn("dispatch-task-grok.py", text)
+                self.assertIn("prun-worker", text)
+                self.assertIn("preflight timed out after 60s", text)
+                self.assertIn("Antigravity preflight failed", text)
+                self.assertIn("grok-executor.md", text)
+
     def test_the_router_row_follows_the_executor_policy(self) -> None:
         # The router's one-line summary is read before the skill is, so a row
         # that still reserves Codex for review sends a user who names it away.
@@ -93,6 +114,7 @@ class PrunExecutorContractTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn("Agy workers by default", rows[0])
         self.assertIn("when the user names Codex", rows[0])
+        self.assertIn("Grok", rows[0])
         self.assertNotIn("reserved for", rows[0])
 
     def test_no_surface_spawns_a_claude_subagent(self) -> None:
@@ -116,7 +138,7 @@ class PrunExecutorContractTests(unittest.TestCase):
     def test_the_prohibition_is_stated_where_units_are_assigned(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertIn("**Never a Claude-side worker.**", text)
-        self.assertIn("3. **Assign**: every unit goes to Agy, except a unit the user named for Codex.", text)
+        self.assertIn("3. **Assign**: every unit goes to Agy, except a unit the user named for Codex or Grok.", text)
 
     def test_the_public_docs_do_not_route_units_to_sonnet(self) -> None:
         # anywhere-agents publishes a docs site whose prun page puts its own

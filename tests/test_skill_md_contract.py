@@ -610,10 +610,11 @@ class StoppedTaskRuleTests(unittest.TestCase):
         watch a file its reviewer never writes.
         """
         index = _unique_unfenced_index(self.masked, "Resolve the round from state-dir evidence")
-        para = self.text[index:index + 700]
+        para = self.text[index:index + 750]
         self.assertIn("Review-<Reviewer>.md", para)
         for name in ("Review-Codex.md", "Review-GitHub-Copilot.md",
-                     "Review-Claude-Code.md", "Review-Antigravity.md"):
+                     "Review-Claude-Code.md", "Review-Antigravity.md",
+                     "Review-Grok.md"):
             with self.subTest(name):
                 self.assertIn(name, para)
 
@@ -696,6 +697,77 @@ class StoppedTaskRuleTests(unittest.TestCase):
         item = _unique_line_containing(self.text, "The dispatch subprocess exited 0")
         self.assertIn("await-review", item)
         self.assertIn("REVIEW-READY", item)
+
+
+class TestReviewerSelectionInvariants(unittest.TestCase):
+    """Pin reviewer selection rules so adding an opt-in backend never shifts defaults."""
+
+    def setUp(self) -> None:
+        self.text = _skill_text()
+        self.masked, _ = _markdown_regions(self.text)
+
+    def test_both_under_claude_and_codex_coordinators_is_unchanged(self) -> None:
+        index = _unique_unfenced_index(
+            self.masked, "Reviewer-backend selection (two reviewers in one invocation)"
+        )
+        para = self.text[index:index + 2000]
+        self.assertIn("selects the two backends from `claude`, `codex`, and `agy`", para)
+        self.assertIn("Under Claude Code it is `codex agy`", para)
+        self.assertIn("under Codex\n     `claude agy`", para)
+        self.assertIn("under Agy `codex claude`", para)
+        self.assertIn("`Codex,Antigravity` under Claude Code", para)
+        self.assertIn("`Claude-Code,Antigravity` under Codex", para)
+        self.assertIn("`Codex,Claude-Code` under\n     Agy", para)
+        self.assertIn("so Copilot and Grok are never part of it", para)
+
+    def test_no_token_default_and_default_reviewer_env_contract(self) -> None:
+        default_line = _unique_line_containing(
+            self.text, "IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way"
+        )
+        for token in ("`both`", "`codex`", "`claude`", "`agy`", "`copilot`", "`grok`"):
+            with self.subTest(token=token):
+                self.assertIn(token, default_line)
+        self.assertIn("Unset, empty, or unrecognized keeps Codex", default_line)
+        self.assertIn("`both` resolves against the coordinator", default_line)
+
+        example_line = _unique_line_containing(
+            self.text, "IMPLEMENT_REVIEW_DEFAULT_REVIEWER=both"
+        )
+        self.assertIn("both → codex agy (coordinator: claude; IMPLEMENT_REVIEW_DEFAULT_REVIEWER=both)", example_line)
+
+        codex_line = _unique_line_containing(
+            self.text, "Reviewer-backend selection (explicit Codex)"
+        )
+        self.assertIn("When Codex coordinates this skill, a `codex` token or the Codex no-token default is rewritten to the Claude backend before dispatch.", codex_line)
+        self.assertIn("If the Claude probe fails, try Agy and then Copilot", codex_line)
+
+    def test_failover_order_excludes_grok(self) -> None:
+        line = _unique_line_containing(self.text, "Maintain a **failover queue**")
+        c_pos = line.index("`Codex`")
+        a_pos = line.index("`Antigravity`")
+        g_pos = line.index("`GitHub-Copilot`")
+        cl_pos = line.index("`Claude-Code`")
+        self.assertTrue(c_pos < a_pos < g_pos < cl_pos)
+        self.assertIn("`Grok` is opt-in only and is never in the failover queue", line)
+        self.assertIn("never fails over to another backend", line)
+
+    def test_named_grok_token_and_normalization_contract(self) -> None:
+        grok_line = _unique_line_containing(
+            self.text, "Reviewer-backend selection (Grok cross-vendor backend, opt-in)"
+        )
+        self.assertIn("/vet grok", grok_line)
+        self.assertIn("dispatch-grok.py", grok_line)
+        self.assertIn("Review-Grok.md", grok_line)
+        self.assertIn("IMPLEMENT_REVIEW_ORCHESTRATOR=grok", grok_line)
+        self.assertIn("references/grok-backend.md", grok_line)
+
+        ref_path = SKILL_MD.parent / "references" / "grok-backend.md"
+        self.assertTrue(ref_path.is_file(), "references/grok-backend.md must exist")
+
+        save_line = _unique_line_containing(
+            self.text, "Save your complete review to `Review-<YourAgentName>.md`"
+        )
+        self.assertIn("`Grok` or `Grok Build` → `Review-Grok.md`", save_line)
 
 
 if __name__ == "__main__":

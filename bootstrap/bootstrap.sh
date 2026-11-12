@@ -744,6 +744,235 @@ maybe_update_codex_cli() {
   fi
 }
 
+_grok_auto_update_disabled() {
+  _v=$(printf '%s' "${ANYWHERE_AGENTS_GROK_AUTO_UPDATE:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  case "$_v" in
+    off|0|disabled|false|no) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_find_grok_bin() {
+  if [ -n "${GROK_BIN:-}" ]; then
+    if [ -x "$GROK_BIN" ] && [ ! -d "$GROK_BIN" ]; then
+      printf '%s\n' "$GROK_BIN"
+      return 0
+    fi
+    if command -v "$GROK_BIN" >/dev/null 2>&1; then
+      command -v "$GROK_BIN"
+      return 0
+    fi
+    return 1
+  fi
+  if command -v grok >/dev/null 2>&1; then
+    command -v grok
+    return 0
+  fi
+  for _cand in "${GROK_HOME:-${HOME:-}/.grok}/bin/grok" "${HOME:-}/.grok/bin/grok"; do
+    if [ -n "$_cand" ] && [ -x "$_cand" ] && [ ! -d "$_cand" ]; then
+      printf '%s\n' "$_cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_grok_pos_int() {
+  case "$1" in
+    ''|*[!0-9]*|0) printf '%s\n' "$2" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+_grok_epoch_now() {
+  _now=$(date +%s 2>/dev/null || /bin/date +%s 2>/dev/null || true)
+  case "$_now" in
+    ''|*[!0-9]*)
+      if [ -n "${_py:-}" ]; then
+        _now=$("$_py" -c "import time; print(int(time.time()))" 2>/dev/null || true)
+      fi
+      ;;
+  esac
+  case "$_now" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$_now"; return 0 ;;
+  esac
+}
+
+_grok_file_mtime() {
+  [ -e "$1" ] || return 1
+  _m=$(stat -c %Y "$1" 2>/dev/null || /usr/bin/stat -f %m "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)
+  case "$_m" in
+    ''|*[!0-9]*)
+      if [ -n "${_py:-}" ]; then
+        _m=$("$_py" -c "import os, sys; print(int(os.path.getmtime(sys.argv[1])))" "$1" 2>/dev/null || true)
+      fi
+      ;;
+  esac
+  case "$_m" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$_m"; return 0 ;;
+  esac
+}
+
+_grok_stamp_epoch() {
+  [ -f "$1" ] || return 1
+  _s_val=""
+  _raw=$(tr -d '\r\n\t ' < "$1" 2>/dev/null || true)
+  case "$_raw" in
+    ''|*[!0-9]*) ;;
+    *) _s_val="$_raw" ;;
+  esac
+  _s_mtime=$(_grok_file_mtime "$1" 2>/dev/null || true)
+  case "$_s_mtime" in
+    ''|*[!0-9]*) _s_mtime="" ;;
+  esac
+  if [ -n "$_s_val" ] && [ -n "$_s_mtime" ]; then
+    if [ "$_s_mtime" -lt "$_s_val" ]; then
+      printf '%s\n' "$_s_mtime"
+    else
+      printf '%s\n' "$_s_val"
+    fi
+    return 0
+  elif [ -n "$_s_val" ]; then
+    printf '%s\n' "$_s_val"
+    return 0
+  elif [ -n "$_s_mtime" ]; then
+    printf '%s\n' "$_s_mtime"
+    return 0
+  fi
+  return 1
+}
+
+maybe_update_grok_cli() {
+  _grok_auto_update_disabled && return 0
+  _grok_bin=$(_find_grok_bin 2>/dev/null || true)
+  [ -n "$_grok_bin" ] || return 0
+
+  _grok_state_dir="${ANYWHERE_AGENTS_GROK_UPDATE_DIR:-${HOME:-.}/.claude}"
+  _stamp="${ANYWHERE_AGENTS_GROK_UPDATE_STAMP:-$_grok_state_dir/grok-update-stamp}"
+  _lock_dir="${ANYWHERE_AGENTS_GROK_UPDATE_LOCK:-$_grok_state_dir/grok-update.lock}"
+  _grok_log="${ANYWHERE_AGENTS_GROK_UPDATE_LOG:-$_grok_state_dir/grok-update.log}"
+
+  _ttl=$(_grok_pos_int "${ANYWHERE_AGENTS_GROK_UPDATE_TTL_SECONDS:-}" 86400)
+  _check_timeout=$(_grok_pos_int "${ANYWHERE_AGENTS_GROK_CHECK_TIMEOUT_SECONDS:-}" 15)
+  _update_timeout=$(_grok_pos_int "${ANYWHERE_AGENTS_GROK_UPDATE_TIMEOUT_SECONDS:-}" 120)
+
+  _now=$(_grok_epoch_now || true)
+  [ -n "$_now" ] || return 0
+
+  if [ -f "$_stamp" ]; then
+    _stamp_epoch=$(_grok_stamp_epoch "$_stamp" || true)
+    if [ -n "$_stamp_epoch" ] && [ $((_now - _stamp_epoch)) -lt "$_ttl" ]; then
+      return 0
+    fi
+  fi
+
+  mkdir -p "$_grok_state_dir" 2>/dev/null || return 0
+  mkdir -p "$(dirname "$_stamp")" 2>/dev/null || return 0
+  mkdir -p "$(dirname "$_grok_log")" 2>/dev/null || return 0
+
+  if ! mkdir "$_lock_dir" 2>/dev/null; then
+    _stale=false
+    if [ -f "$_lock_dir/pid" ]; then
+      _lock_pid=$(tr -d '\r\n\t ' < "$_lock_dir/pid" 2>/dev/null || true)
+      case "$_lock_pid" in
+        ''|*[!0-9]*) _stale=true ;;
+        *)
+          if ! kill -0 "$_lock_pid" 2>/dev/null; then
+            _stale=true
+          fi
+          ;;
+      esac
+    fi
+    if [ "$_stale" = false ]; then
+      _lock_mtime=""
+      if [ -f "$_lock_dir/ts" ]; then
+        _lock_mtime=$(tr -d '\r\n\t ' < "$_lock_dir/ts" 2>/dev/null || true)
+      fi
+      case "$_lock_mtime" in
+        ''|*[!0-9]*) _lock_mtime=$(_grok_file_mtime "$_lock_dir" || true) ;;
+      esac
+      _max_lock_age=$((_check_timeout + _update_timeout + 30))
+      if [ -n "$_lock_mtime" ] && [ $((_now - _lock_mtime)) -ge "$_max_lock_age" ]; then
+        _stale=true
+      fi
+    fi
+    if [ "$_stale" = true ]; then
+      rm -rf "$_lock_dir" 2>/dev/null || true
+      mkdir "$_lock_dir" 2>/dev/null || return 0
+    else
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$_now" > "$_lock_dir/ts" 2>/dev/null || true
+  printf '%s\n' "$_now" > "$_stamp" 2>/dev/null || {
+    rm -rf "$_lock_dir" 2>/dev/null || true
+    return 0
+  }
+
+  _grok_job='
+    _bin=$1
+    _lock=$2
+    _log=$3
+    _check_to=$4
+    _update_to=$5
+    [ -d "$_lock" ] || exit 0
+    printf "%s\n" "$$" > "$_lock/pid" 2>/dev/null || true
+    _check_out="$_lock/check.json"
+    trap '\''rm -f "$_check_out" 2>/dev/null || true; rm -rf "$_lock" 2>/dev/null || true'\'' EXIT
+    _run_bounded() {
+      _to=$1
+      _out=$2
+      shift 2
+      "$@" </dev/null >"$_out" 2>&1 &
+      _cmd_pid=$!
+      (
+        _elapsed=0
+        while [ "$_elapsed" -lt "$_to" ]; do
+          kill -0 "$_cmd_pid" 2>/dev/null || exit 0
+          /bin/sleep 1 2>/dev/null || sleep 1 2>/dev/null || exit 0
+          _elapsed=$((_elapsed + 1))
+        done
+        if kill -0 "$_cmd_pid" 2>/dev/null; then
+          pkill -TERM -P "$_cmd_pid" 2>/dev/null || true
+          kill -TERM "$_cmd_pid" 2>/dev/null || true
+          /bin/sleep 1 2>/dev/null || sleep 1 2>/dev/null || true
+          pkill -KILL -P "$_cmd_pid" 2>/dev/null || true
+          kill -KILL "$_cmd_pid" 2>/dev/null || true
+        fi
+      ) </dev/null >/dev/null 2>&1 &
+      _wd_pid=$!
+      wait "$_cmd_pid" 2>/dev/null
+      _rc=$?
+      kill "$_wd_pid" 2>/dev/null || true
+      return "$_rc"
+    }
+    if _run_bounded "$_check_to" "$_check_out" "$_bin" update --check --json; then
+      cat "$_check_out" >> "$_log" 2>/dev/null || true
+      if grep -qE '\''"updateAvailable"[[:space:]]*:[[:space:]]*true([^[:alnum:]_]|$)'\'' "$_check_out" 2>/dev/null; then
+        _run_bounded "$_update_to" "$_lock/update.out" "$_bin" update || true
+        cat "$_lock/update.out" >> "$_log" 2>/dev/null || true
+      fi
+    else
+      cat "$_check_out" >> "$_log" 2>/dev/null || true
+    fi
+  '
+
+  _shell_bin="${BASH:-sh}"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$_shell_bin" -c "$_grok_job" _ "$_grok_bin" "$_lock_dir" "$_grok_log" "$_check_timeout" "$_update_timeout" </dev/null >>"$_grok_log" 2>&1 &
+  elif command -v nohup >/dev/null 2>&1; then
+    nohup "$_shell_bin" -c "$_grok_job" _ "$_grok_bin" "$_lock_dir" "$_grok_log" "$_check_timeout" "$_update_timeout" </dev/null >>"$_grok_log" 2>&1 &
+  elif [ -x /usr/bin/nohup ]; then
+    /usr/bin/nohup "$_shell_bin" -c "$_grok_job" _ "$_grok_bin" "$_lock_dir" "$_grok_log" "$_check_timeout" "$_update_timeout" </dev/null >>"$_grok_log" 2>&1 &
+  else
+    "$_shell_bin" -c "$_grok_job" _ "$_grok_bin" "$_lock_dir" "$_grok_log" "$_check_timeout" "$_update_timeout" </dev/null >>"$_grok_log" 2>&1 &
+  fi
+  return 0
+}
+
 # Legacy AC -> AA migration for direct shell-bootstrap runs. If the
 # persisted upstream or cached repo origin still points at agent-config
 # and the caller did not pass an explicit upstream, delete the old cache
@@ -1276,3 +1505,5 @@ if [ "${_LEDGER_INCOMPLETE:-false}" = true ]; then
 else
   _ledger_write finalize true
 fi
+
+maybe_update_grok_cli || true

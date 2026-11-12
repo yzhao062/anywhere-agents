@@ -20,10 +20,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Bytes, measured 2026-10-19 after dropping the "Validation notes" clause
-# from the implement-review save instruction.
+# from the implement-review save instruction. Raised 2026-11-11 for the opt-in
+# Grok backend: implement-review by 1,549 bytes (154,500 -> 156,049; file
+# 154,443 -> 155,992) for the grok token and the references/grok-backend.md
+# pointer, and prun by 1,147 bytes (39,629 -> 40,776; file 39,562 -> 40,709)
+# for the Grok executor row and policy, each keeping its earlier headroom.
 CEILINGS: dict[str, int] = {
-    "skills/implement-review/SKILL.md": 154_500,
-    "skills/prun/SKILL.md": 39_629,
+    "skills/implement-review/SKILL.md": 156_049,
+    "skills/prun/SKILL.md": 40_776,
 }
 
 RATCHET_SLACK = 4_096

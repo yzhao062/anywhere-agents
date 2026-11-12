@@ -1079,6 +1079,276 @@ function Invoke-CodexAutoUpdate {
     # Do not let a local npm or registry problem block project bootstrap.
   }
 }
+
+function Get-GrokPositiveInt([string]$Raw, [int]$DefaultValue) {
+  if ([string]::IsNullOrWhiteSpace($Raw)) { return $DefaultValue }
+  $parsed = 0
+  if ([int]::TryParse($Raw.Trim(), [ref]$parsed) -and $parsed -gt 0) {
+    return $parsed
+  }
+  return $DefaultValue
+}
+
+function Find-GrokCli {
+  if (-not [string]::IsNullOrWhiteSpace($env:GROK_BIN)) {
+    if (Test-Path -LiteralPath $env:GROK_BIN -PathType Leaf) {
+      return $env:GROK_BIN
+    }
+    $cmd = Get-Command $env:GROK_BIN -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    return $null
+  }
+  $grokCmd = Get-Command grok -ErrorAction SilentlyContinue
+  if ($grokCmd -and $grokCmd.Source) { return $grokCmd.Source }
+  $homeDir = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } else { $HOME }
+  $grokHome = if (-not [string]::IsNullOrWhiteSpace($env:GROK_HOME)) { $env:GROK_HOME } elseif ($homeDir) { Join-Path $homeDir '.grok' } else { $null }
+  $candidates = @()
+  if ($grokHome) {
+    $candidates += (Join-Path (Join-Path $grokHome 'bin') 'grok.exe')
+    $candidates += (Join-Path (Join-Path $grokHome 'bin') 'grok.cmd')
+    $candidates += (Join-Path (Join-Path $grokHome 'bin') 'grok')
+  }
+  if ($homeDir) {
+    $defaultGrokBin = Join-Path (Join-Path $homeDir '.grok') 'bin'
+    $candidates += (Join-Path $defaultGrokBin 'grok.exe')
+    $candidates += (Join-Path $defaultGrokBin 'grok.cmd')
+    $candidates += (Join-Path $defaultGrokBin 'grok')
+  }
+  foreach ($cand in $candidates) {
+    if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
+      return $cand
+    }
+  }
+  return $null
+}
+
+function Get-GrokStampEpoch([string]$StampPath) {
+  if (-not (Test-Path -LiteralPath $StampPath -PathType Leaf)) { return $null }
+  $valEpoch = $null
+  try {
+    $raw = [System.IO.File]::ReadAllText($StampPath).Trim()
+    $parsed = [long]0
+    if ([long]::TryParse($raw, [ref]$parsed) -and $parsed -gt 0) {
+      $valEpoch = $parsed
+    }
+  } catch {}
+  $mtimeEpoch = $null
+  try {
+    $item = Get-Item -LiteralPath $StampPath -ErrorAction Stop
+    $mtimeEpoch = [DateTimeOffset]::new($item.LastWriteTimeUtc).ToUnixTimeSeconds()
+  } catch {}
+  if ($null -ne $valEpoch -and $null -ne $mtimeEpoch) {
+    if ($mtimeEpoch -lt $valEpoch) { return $mtimeEpoch }
+    return $valEpoch
+  }
+  if ($null -ne $valEpoch) { return $valEpoch }
+  if ($null -ne $mtimeEpoch) { return $mtimeEpoch }
+  return $null
+}
+
+function Acquire-GrokUpdateLock([string]$LockDir, [long]$NowEpoch, [int]$MaxAgeSeconds) {
+  if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) {
+    try {
+      [void](New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop)
+      return $true
+    } catch {
+      return $false
+    }
+  }
+  $pidFile = Join-Path $LockDir 'pid'
+  $tsFile = Join-Path $LockDir 'ts'
+  $stale = $false
+  if (Test-Path -LiteralPath $pidFile -PathType Leaf) {
+    try {
+      $rawPid = [System.IO.File]::ReadAllText($pidFile).Trim()
+      $lockPid = 0
+      if ([int]::TryParse($rawPid, [ref]$lockPid) -and $lockPid -gt 0) {
+        $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+        if (-not $proc) { $stale = $true }
+      } else {
+        $stale = $true
+      }
+    } catch {
+      $stale = $true
+    }
+  }
+  if (-not $stale) {
+    $lockEpoch = $null
+    if (Test-Path -LiteralPath $tsFile -PathType Leaf) {
+      try {
+        $rawTs = [System.IO.File]::ReadAllText($tsFile).Trim()
+        $parsedTs = [long]0
+        if ([long]::TryParse($rawTs, [ref]$parsedTs) -and $parsedTs -gt 0) {
+          $lockEpoch = $parsedTs
+        }
+      } catch {}
+    }
+    if ($null -eq $lockEpoch) {
+      try {
+        $item = Get-Item -LiteralPath $LockDir -ErrorAction Stop
+        $lockEpoch = [DateTimeOffset]::new($item.LastWriteTimeUtc).ToUnixTimeSeconds()
+      } catch {}
+    }
+    if ($null -ne $lockEpoch -and ($NowEpoch - $lockEpoch) -ge $MaxAgeSeconds) {
+      $stale = $true
+    }
+  }
+  if (-not $stale) { return $false }
+  try {
+    Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction Stop
+    [void](New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop)
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-GrokAutoUpdate {
+  if (Test-DisabledValue $env:ANYWHERE_AGENTS_GROK_AUTO_UPDATE) { return }
+  $grokBin = Find-GrokCli
+  if ([string]::IsNullOrWhiteSpace($grokBin)) { return }
+
+  $homeDir = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } elseif ($HOME) { $HOME } else { '.' }
+  $stateDir = if (-not [string]::IsNullOrWhiteSpace($env:ANYWHERE_AGENTS_GROK_UPDATE_DIR)) {
+    $env:ANYWHERE_AGENTS_GROK_UPDATE_DIR
+  } else {
+    Join-Path $homeDir '.claude'
+  }
+  $stampPath = if (-not [string]::IsNullOrWhiteSpace($env:ANYWHERE_AGENTS_GROK_UPDATE_STAMP)) {
+    $env:ANYWHERE_AGENTS_GROK_UPDATE_STAMP
+  } else {
+    Join-Path $stateDir 'grok-update-stamp'
+  }
+  $lockDir = if (-not [string]::IsNullOrWhiteSpace($env:ANYWHERE_AGENTS_GROK_UPDATE_LOCK)) {
+    $env:ANYWHERE_AGENTS_GROK_UPDATE_LOCK
+  } else {
+    Join-Path $stateDir 'grok-update.lock'
+  }
+  $logPath = if (-not [string]::IsNullOrWhiteSpace($env:ANYWHERE_AGENTS_GROK_UPDATE_LOG)) {
+    $env:ANYWHERE_AGENTS_GROK_UPDATE_LOG
+  } else {
+    Join-Path $stateDir 'grok-update.log'
+  }
+
+  $ttl = Get-GrokPositiveInt $env:ANYWHERE_AGENTS_GROK_UPDATE_TTL_SECONDS 86400
+  $checkTimeout = Get-GrokPositiveInt $env:ANYWHERE_AGENTS_GROK_CHECK_TIMEOUT_SECONDS 15
+  $updateTimeout = Get-GrokPositiveInt $env:ANYWHERE_AGENTS_GROK_UPDATE_TIMEOUT_SECONDS 120
+
+  $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $stampEpoch = Get-GrokStampEpoch $stampPath
+  if ($null -ne $stampEpoch -and ($nowEpoch - $stampEpoch) -lt $ttl) {
+    return
+  }
+
+  try {
+    [void][System.IO.Directory]::CreateDirectory($stateDir)
+    $stampParent = Split-Path -Parent $stampPath
+    if ($stampParent) { [void][System.IO.Directory]::CreateDirectory($stampParent) }
+    $logParent = Split-Path -Parent $logPath
+    if ($logParent) { [void][System.IO.Directory]::CreateDirectory($logParent) }
+  } catch {
+    return
+  }
+
+  if (Test-Path -LiteralPath $lockDir -PathType Container) {
+    if (-not (Acquire-GrokUpdateLock $lockDir $nowEpoch ($checkTimeout + $updateTimeout + 30))) {
+      return
+    }
+  } else {
+    try {
+      [void](New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop)
+    } catch {
+      return
+    }
+  }
+
+  try {
+    [System.IO.File]::WriteAllText((Join-Path $lockDir 'ts'), "$nowEpoch`n")
+    [System.IO.File]::WriteAllText($stampPath, "$nowEpoch`n")
+  } catch {
+    Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
+    return
+  }
+
+  $runnerPath = Join-Path $lockDir 'run-update.ps1'
+  $runnerBody = @'
+param(
+  [string]$GrokBin,
+  [string]$LockDir,
+  [string]$LogPath,
+  [int]$CheckTimeout,
+  [int]$UpdateTimeout
+)
+$ErrorActionPreference = 'SilentlyContinue'
+function Invoke-BoundedGrok([string]$Bin, [string]$ArgLine, [int]$TimeoutSec, [string]$LogFile) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $Bin
+  $psi.Arguments = $ArgLine
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $p = [System.Diagnostics.Process]::Start($psi)
+  if (-not $p) { return $null }
+  try { $p.StandardInput.Close() } catch {}
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    try { $p.Kill() } catch {}
+    return $null
+  }
+  $p.WaitForExit()
+  $combined = ($outTask.GetAwaiter().GetResult()) + ($errTask.GetAwaiter().GetResult())
+  if (-not [string]::IsNullOrEmpty($combined)) {
+    try { [System.IO.File]::AppendAllText($LogFile, $combined) } catch {}
+  }
+  return [PSCustomObject]@{ ExitCode = $p.ExitCode; Output = $combined }
+}
+try {
+  if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) { return }
+  [System.IO.File]::WriteAllText((Join-Path $LockDir 'pid'), "$PID`n")
+  $res = Invoke-BoundedGrok $GrokBin 'update --check --json' $CheckTimeout $LogPath
+  if ($null -ne $res -and $res.ExitCode -eq 0 -and $res.Output -match '"updateAvailable"\s*:\s*true(?![A-Za-z0-9_])') {
+    [void](Invoke-BoundedGrok $GrokBin 'update' $UpdateTimeout $LogPath)
+  }
+} finally {
+  Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+'@
+  try {
+    [System.IO.File]::WriteAllText($runnerPath, $runnerBody)
+    $pwshExe = (Get-Process -Id $PID).Path
+    if ([string]::IsNullOrWhiteSpace($pwshExe)) {
+      $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+      if (-not $pwshCmd) { $pwshCmd = Get-Command powershell -ErrorAction SilentlyContinue }
+      if ($pwshCmd) { $pwshExe = $pwshCmd.Source }
+    }
+    if ([string]::IsNullOrWhiteSpace($pwshExe)) {
+      Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
+      return
+    }
+    $argList = @(
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy', 'Bypass',
+      '-File', $runnerPath,
+      $grokBin,
+      $lockDir,
+      $logPath,
+      [string]$checkTimeout,
+      [string]$updateTimeout
+    )
+    $isWin = ($env:OS -eq 'Windows_NT') -or ([System.Environment]::OSVersion.Platform -eq 'Win32NT')
+    if ($isWin) {
+      [void](Start-Process -FilePath $pwshExe -ArgumentList $argList -WindowStyle Hidden -PassThru)
+    } else {
+      [void](Start-Process -FilePath $pwshExe -ArgumentList $argList -PassThru)
+    }
+  } catch {
+    Remove-Item -LiteralPath $lockDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 New-Item -ItemType Directory -Force -Path .agent-config, .claude, .claude/commands | Out-Null
 Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$Upstream/main/AGENTS.md" -OutFile .agent-config/AGENTS.md
 
@@ -1516,4 +1786,5 @@ try {
   Add-LedgerStep 'finalize' 'repo' 'ok'
   Write-Ledger 'finalize' (-not $script:LedgerIncomplete)
 } catch {}
+try { Invoke-GrokAutoUpdate } catch {}
 Invoke-BannerRender 0

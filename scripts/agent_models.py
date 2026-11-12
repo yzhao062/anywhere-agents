@@ -30,7 +30,7 @@ Commands:
         list model literals in the given trees. Exit 1 on a mismatch.
     scan PATH ...
         List model and effort literals outside the registry. Exit 1 on a hit.
-    actual --family F (--session-id ID | --stderr-file F | --log-file F)
+    actual --family F (--session-id ID | --stderr-file F | --log-file F | --json-file F)
            [--expect-model M --expect-effort E]
         Read what a finished run actually used from the CLI's own report and
         print `actual=<model> <effort> status=ok|mismatch|unknown`. Exit 0.
@@ -53,12 +53,15 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, Iterator
 
-FAMILIES = ("claude", "codex", "agy")
+REQUIRED_FAMILIES = ("claude", "codex", "agy")
+OPTIONAL_FAMILIES = ("grok",)
+FAMILIES = REQUIRED_FAMILIES + OPTIONAL_FAMILIES
 ROLES = ("interactive", "reviewer", "premium", "worker", "prun-worker")
 EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
     "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
     "agy": ("low", "medium", "high"),
+    "grok": ("low", "medium", "high", "xhigh"),
 }
 AGY_TIERS = ("low", "medium", "high", "xhigh", "max", "thinking")
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -97,16 +100,24 @@ def validate(data: dict) -> None:
         raise RegistryError("registry schema must be 1")
     families = data.get("families")
     roles = data.get("roles", {})
-    if not isinstance(families, dict) or set(families) != set(FAMILIES):
-        raise RegistryError(f"registry families must be exactly {', '.join(FAMILIES)}")
+    if (
+        not isinstance(families, dict)
+        or not set(REQUIRED_FAMILIES) <= set(families)
+        or not set(families) <= set(FAMILIES)
+    ):
+        raise RegistryError(
+            f"registry families must be exactly {', '.join(REQUIRED_FAMILIES)} "
+            f"(optional: {', '.join(OPTIONAL_FAMILIES)})"
+        )
     if not isinstance(roles, dict) or not set(roles) <= set(ROLES):
         unknown = sorted(set(roles) - set(ROLES)) if isinstance(roles, dict) else roles
         raise RegistryError(f"unknown registry roles: {unknown}")
     for family, row in families.items():
         _check_row(family, row, family_row=True)
+    present_families = tuple(f for f in FAMILIES if f in families)
     for role, rows in roles.items():
-        if not isinstance(rows, dict) or not set(rows) <= set(FAMILIES):
-            raise RegistryError(f"role {role} may only list {', '.join(FAMILIES)}")
+        if not isinstance(rows, dict) or not set(rows) <= set(families):
+            raise RegistryError(f"role {role} may only list {', '.join(present_families)}")
         for family, row in rows.items():
             _check_row(family, row, family_row=False, where=f"role {role}")
 
@@ -141,6 +152,8 @@ def resolve(family: str, role: str = "interactive", data: dict | None = None) ->
     if role not in ROLES:
         raise RegistryError(f"unknown role {role!r}; expected one of {', '.join(ROLES)}")
     data = data if data is not None else load()
+    if family not in data["families"]:
+        raise RegistryError(f"registry has no families.{family} row")
     row = dict(data["families"][family])
     row.update(data.get("roles", {}).get(role, {}).get(family, {}))
     result = {"family": family, "role": role, "model": row["model"], "effort": row["effort"]}
@@ -508,6 +521,8 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 2
     path = registry_path()
     data = load(path)
+    if args.family not in data["families"]:
+        raise RegistryError(f"registry has no families.{args.family} row")
     if args.role in (None, "interactive", "reviewer") and not args.role_only:
         row = data["families"][args.family]
     else:
@@ -674,6 +689,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 EFFORT_WORDS = r"(?:minimal|low|medium|high|xhigh|max|ultra)"
 LITERAL_PATTERNS = [
     re.compile(r"\bgpt-\d[\w.\-]*"),
+    re.compile(r"\bgrok-\d[\w.\-]*"),
     # A model slug has a family word after the version; `gemini-5h` is a quota
     # bucket id, not a model.
     re.compile(r"\bgemini-\d+(?:\.\d+)*-[a-z][\w.\-]*"),
@@ -779,6 +795,87 @@ def agy_actual(log_text: str) -> tuple | None:
     return (slug, key[2] if key else None)
 
 
+def grok_home_path() -> Path:
+    home = os.environ.get("GROK_HOME", "").strip()
+    return Path(home) if home else Path.home() / ".grok"
+
+
+def _grok_model_from_record(record: dict) -> str | None:
+    for node in (record, record.get("session")):
+        if not isinstance(node, dict):
+            continue
+        usage = node.get("modelUsage")
+        primary = node.get("primaryModelId")
+        if isinstance(usage, dict) and usage:
+            if isinstance(primary, str) and primary in usage:
+                return primary
+            first = next(iter(usage))
+            if isinstance(first, str) and first:
+                return first
+        if isinstance(primary, str) and primary:
+            return primary
+    return None
+
+
+def grok_actual(json_text: str | None = None, session_id: str | None = None) -> tuple | None:
+    """(model id, reasoning effort) from a Grok JSON report and/or session directory."""
+    model = effort = None
+    sid = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+    if isinstance(json_text, str) and json_text.strip():
+        raw = json_text.strip()
+        records = []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                records.append(parsed)
+        except ValueError:
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    records.append(parsed)
+        if not records and not sid and re.fullmatch(r"[A-Za-z0-9._-]+", raw):
+            sid = raw
+        for record in records:
+            found_model = _grok_model_from_record(record)
+            if found_model:
+                model = found_model
+            found_sid = record.get("sessionId") or record.get("session_id")
+            if not found_sid and isinstance(record.get("info"), dict):
+                found_sid = record["info"].get("id")
+            if isinstance(found_sid, str) and found_sid.strip():
+                sid = sid or found_sid.strip()
+            if isinstance(record.get("reasoning_effort"), str) and record["reasoning_effort"].strip():
+                effort = record["reasoning_effort"].strip()
+    if sid and re.fullmatch(r"[A-Za-z0-9._-]+", sid):
+        sessions = grok_home_path() / "sessions"
+        for session_dir in sorted(sessions.glob(f"*/{sid}")):
+            if not model:
+                usage_path = session_dir / "usage.json"
+                try:
+                    usage_data = json.loads(usage_path.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(usage_data, dict):
+                        model = _grok_model_from_record(usage_data) or model
+                except (OSError, ValueError):
+                    pass
+            if not effort:
+                summary_path = session_dir / "summary.json"
+                try:
+                    summary_data = json.loads(summary_path.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(summary_data, dict):
+                        raw_effort = summary_data.get("reasoning_effort")
+                        if isinstance(raw_effort, str) and raw_effort.strip():
+                            effort = raw_effort.strip()
+                except (OSError, ValueError):
+                    pass
+    return (model, effort) if model else None
+
+
 def compare(family: str, expected_model: str, expected_effort: str | None,
             actual_model: str, actual_effort: str | None) -> str:
     """ok, mismatch, or unknown.
@@ -802,6 +899,11 @@ def compare(family: str, expected_model: str, expected_effort: str | None,
         else:
             model_ok = have[:2] == want[:2] and (None in (want[2], have[2]) or have[2] == want[2])
             tier_missing = want[2] is not None and have[2] is None
+    elif family == "grok":
+        model_ok = actual_model == expected_model or (
+            not expected_model.endswith(("-build", "-fast"))
+            and actual_model == f"{expected_model}-build"
+        )
     else:
         model_ok = actual_model == expected_model
     if not model_ok:
@@ -828,6 +930,13 @@ def cmd_actual(args: argparse.Namespace) -> int:
             result = codex_actual(Path(args.stderr_file).read_text(encoding="utf-8", errors="replace"))
         elif args.family == "agy" and args.log_file:
             result = agy_actual(Path(args.log_file).read_text(encoding="utf-8", errors="replace"))
+        elif args.family == "grok":
+            json_file = getattr(args, "json_file", None) or getattr(args, "log_file", None)
+            json_text = (
+                Path(json_file).read_text(encoding="utf-8", errors="replace")
+                if json_file else None
+            )
+            result = grok_actual(json_text, session_id=getattr(args, "session_id", None))
     except OSError:
         result = None
     if not result:
@@ -860,7 +969,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     import uuid
 
     data = load()
-    families = [args.family] if args.family else list(FAMILIES)
+    families = [args.family] if args.family else list(REQUIRED_FAMILIES)
     prompt = "Reply with the single word OK."
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE",
@@ -891,6 +1000,27 @@ def cmd_verify(args: argparse.Namespace) -> int:
                                    stdin=subprocess.DEVNULL)
                     result = agy_actual(log.read_text(encoding="utf-8", errors="replace")
                                         if log.exists() else "")
+                elif family == "grok" and shutil.which(os.environ.get("GROK_BIN", "grok")):
+                    grok_env = dict(
+                        env,
+                        GROK_FOLDER_TRUST="0",
+                        GROK_CLAUDE_HOOKS_ENABLED="false",
+                        GROK_CLAUDE_MCPS_ENABLED="false",
+                        GROK_CLAUDE_SKILLS_ENABLED="false",
+                        GROK_CURSOR_HOOKS_ENABLED="false",
+                        GROK_CURSOR_MCPS_ENABLED="false",
+                        GROK_DISABLE_AUTOUPDATER="1",
+                    )
+                    run = subprocess.run(
+                        [
+                            os.environ.get("GROK_BIN", "grok"), "-p", "Reply OK",
+                            "--output-format", "json", "--no-auto-update",
+                            "-m", want["model"], "--effort", want["effort"],
+                        ],
+                        cwd=scratch, env=grok_env, capture_output=True, text=True,
+                        timeout=300, stdin=subprocess.DEVNULL,
+                    )
+                    result = grok_actual(run.stdout)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 print(f"[skip] {family}: {exc}")
                 continue
@@ -937,7 +1067,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 def cmd_show(args: argparse.Namespace) -> int:
     data = load()
-    rows = [resolve(f, r, data) for f in FAMILIES for r in ROLES]
+    present = [f for f in FAMILIES if f in data["families"]]
+    rows = [resolve(f, r, data) for f in present for r in ROLES]
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -1072,9 +1203,10 @@ def main(argv: list | None = None) -> int:
     p.set_defaults(func=cmd_scan)
     p = sub.add_parser("actual")
     p.add_argument("--family", required=True, choices=FAMILIES)
-    p.add_argument("--session-id", help="claude: the --session-id the run was given")
+    p.add_argument("--session-id", help="claude or grok: the session id the run used")
     p.add_argument("--stderr-file", help="codex: captured stderr of codex exec")
     p.add_argument("--log-file", help="agy: the --log-file the run wrote")
+    p.add_argument("--json-file", help="grok: JSON result or streaming-json file")
     p.add_argument("--expect-model", help="requested model (agy: slug or stem)")
     p.add_argument("--expect-effort")
     p.set_defaults(func=cmd_actual)

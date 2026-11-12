@@ -14,6 +14,10 @@
       "model": "gemini-4-argon",
       "effort": "high",
       "fallback_model": "gemini-3.8-flash"
+    },
+    "grok": {
+      "model": "grok-4.7",
+      "effort": "high"
     }
   },
   "roles": {
@@ -38,6 +42,10 @@
         "fallback_model": null
       },
       "codex": {
+        "effort": "high"
+      },
+      "grok": {
+        "model": "grok-4.7",
         "effort": "high"
       }
     }

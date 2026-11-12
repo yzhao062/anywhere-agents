@@ -83,6 +83,15 @@ def fixture(mutate=None) -> dict:
     return data
 
 
+def fixture_with_grok(mutate=None) -> dict:
+    data = copy.deepcopy(FIXTURE)
+    data["families"]["grok"] = {"model": "grok-9-test", "effort": "high"}
+    data["roles"]["prun-worker"]["grok"] = {"model": "grok-9-test", "effort": "high"}
+    if mutate:
+        mutate(data)
+    return data
+
+
 def run_main(argv: list, env: dict) -> tuple:
     """Call agent_models.main in-process; return (exit code, stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
@@ -197,7 +206,32 @@ class ResolveTests(TempRegistryCase):
         code, out, _ = run_main(["show", "--json"], self.env)
         self.assertEqual(code, 0)
         rows = json.loads(out)
+        self.assertEqual(len(rows), len(FIXTURE["families"]) * len(agent_models.ROLES))
+
+    def test_show_lists_only_present_families_with_and_without_grok(self) -> None:
+        code, out, _ = run_main(["show", "--json"], self.env)
+        self.assertEqual(code, 0)
+        rows = json.loads(out)
+        self.assertEqual({r["family"] for r in rows}, {"claude", "codex", "agy"})
+        self.write_registry(fixture_with_grok())
+        code, out, _ = run_main(["show", "--json"], self.env)
+        self.assertEqual(code, 0)
+        rows = json.loads(out)
         self.assertEqual(len(rows), len(agent_models.FAMILIES) * len(agent_models.ROLES))
+        self.assertEqual({r["family"] for r in rows}, {"claude", "codex", "agy", "grok"})
+
+    def test_resolve_grok_when_present_and_absent(self) -> None:
+        with self.assertRaises(agent_models.RegistryError) as raised:
+            agent_models.resolve("grok", "interactive", fixture())
+        self.assertIn("families.grok", str(raised.exception))
+        code, out, err = run_main(["resolve", "--family", "grok"], self.env)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("families.grok", err)
+        self.write_registry(fixture_with_grok(lambda d: d["roles"]["prun-worker"]["grok"].update(effort="medium")))
+        code, out, _ = run_main(["resolve", "--family", "grok", "--role", "reviewer"], self.env)
+        self.assertEqual((code, out.strip()), (0, "grok-9-test high"))
+        code, out, _ = run_main(["resolve", "--family", "grok", "--role", "prun-worker"], self.env)
+        self.assertEqual((code, out.strip()), (0, "grok-9-test medium"))
 
 
 class ValidateTests(unittest.TestCase):
@@ -215,6 +249,28 @@ class ValidateTests(unittest.TestCase):
         self.assert_rejected(
             lambda d: d["roles"]["worker"]["claude"].update(effort="turbo"), "role worker"
         )
+        for bad_effort in ("minimal", "max", "ultra"):
+            with self.assertRaises(agent_models.RegistryError) as raised:
+                agent_models.validate(
+                    fixture_with_grok(lambda d, e=bad_effort: d["families"]["grok"].update(effort=e))
+                )
+            self.assertIn("effort", str(raised.exception))
+        with self.assertRaises(agent_models.RegistryError) as raised:
+            agent_models.validate(
+                fixture_with_grok(lambda d: d["roles"]["prun-worker"]["grok"].update(effort="ultra"))
+            )
+        self.assertIn("role prun-worker", str(raised.exception))
+
+    def test_rejects_a_role_override_naming_an_absent_family(self) -> None:
+        self.assert_rejected(
+            lambda d: d["roles"]["worker"].update(grok={"effort": "high"}), "may only list"
+        )
+        agent_models.validate(fixture_with_grok())
+        with self.assertRaises(agent_models.RegistryError) as raised:
+            agent_models.validate(
+                fixture_with_grok(lambda d: d["families"].update(gemini={"model": "x", "effort": "low"}))
+            )
+        self.assertIn("families must be exactly", str(raised.exception))
 
     def test_rejects_an_unknown_role_or_family(self) -> None:
         self.assert_rejected(lambda d: d["roles"].update(judge={}), "unknown registry roles")
@@ -338,6 +394,31 @@ class SetTests(TempRegistryCase):
         self.assertEqual(code, 2)
         self.assertIn("effort", err)
         self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_set_grok_without_family_row_raises_registry_error_and_with_row_updates(self) -> None:
+        before = self.registry.read_bytes()
+        args = agent_models.argparse.Namespace(
+            family="grok", role=None, role_only=False, model="grok-9-test", effort="high"
+        )
+        with mock.patch.dict(os.environ, self.env):
+            with self.assertRaises(agent_models.RegistryError) as raised:
+                agent_models.cmd_set(args)
+        self.assertIn("families.grok", str(raised.exception))
+        code, _, err = run_main(["set", "--family", "grok", "--effort", "low"], self.env)
+        self.assertEqual(code, 2)
+        self.assertIn("families.grok", err)
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.write_registry(fixture_with_grok())
+        code, _, _ = run_main(["set", "--family", "grok", "--effort", "xhigh"], self.env)
+        self.assertEqual(code, 0)
+        data = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(data["families"]["grok"]["effort"], "xhigh")
+        code, _, _ = run_main(
+            ["set", "--family", "grok", "--role", "prun-worker", "--effort", "medium"], self.env
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(data["roles"]["prun-worker"]["grok"]["effort"], "medium")
 
 
 class TomlTests(unittest.TestCase):
@@ -478,6 +559,18 @@ class MatchesTests(unittest.TestCase):
         self.assertFalse(agent_models.matches("agy", "gemini-9-test", "high", "gemini-9-test-low", "low"))
         self.assertFalse(agent_models.matches("agy", "gemini-9-test", "high", "not-a-slug", "high"))
 
+    def test_grok_matches_build_variant_and_rejects_build_fast_in_either_direction(self) -> None:
+        compare = agent_models.compare
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.7", "high"), "ok")
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.7-build", "high"), "ok")
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.7-build-fast", "high"), "mismatch")
+        self.assertEqual(compare("grok", "grok-4.7-build-fast", "high", "grok-4.7-build", "high"), "mismatch")
+        self.assertEqual(compare("grok", "grok-4.7-build-fast", "high", "grok-4.7", "high"), "mismatch")
+        self.assertEqual(compare("grok", "grok-4.7-build-fast", "high", "grok-4.7-build-fast", "high"), "ok")
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.6-build", "high"), "mismatch")
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.7-build", "low"), "mismatch")
+        self.assertEqual(compare("grok", "grok-4.7", "high", "grok-4.7-build", None), "unknown")
+
 
 class ActualReaderTests(unittest.TestCase):
     def test_claude_actual_reads_the_last_assistant_record(self) -> None:
@@ -563,6 +656,57 @@ class ActualReaderTests(unittest.TestCase):
             )
             self.assertEqual((code, out.strip(), err), (0, "actual=gemini-9.2-test-high high status=ok", ""))
 
+    def test_grok_actual_reads_end_event_and_session_files_in_grok_home(self) -> None:
+        sid = "01a1ccb0-fc1a-7703-9a57-1c45f1840ec3"
+        with tempfile.TemporaryDirectory() as tmp:
+            grok_home = Path(tmp) / "grok-home"
+            session_dir = grok_home / "sessions" / "%2Ftmp%2F hashed-cwd" / sid
+            session_dir.mkdir(parents=True)
+            end_event = json.dumps({
+                "type": "end",
+                "stopReason": "end_turn",
+                "sessionId": sid,
+                "modelUsage": {"grok-4.7-build": {"inputTokens": 100, "outputTokens": 10, "modelCalls": 1}},
+            })
+            with mock.patch.dict(os.environ, {"GROK_HOME": str(grok_home)}):
+                self.assertEqual(agent_models.grok_actual(end_event), ("grok-4.7-build", None))
+                (session_dir / "summary.json").write_text(
+                    json.dumps({
+                        "info": {"id": sid},
+                        "current_model_id": "grok-4.7",
+                        "reasoning_effort": "high",
+                    }),
+                    encoding="utf-8",
+                )
+                self.assertEqual(agent_models.grok_actual(end_event), ("grok-4.7-build", "high"))
+                (session_dir / "usage.json").write_text(
+                    json.dumps({
+                        "sessionId": sid,
+                        "session": {
+                            "primaryModelId": "grok-4.7-build",
+                            "modelUsage": {"grok-4.7-build": {"modelCalls": 1}},
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                self.assertEqual(agent_models.grok_actual(session_id=sid), ("grok-4.7-build", "high"))
+                json_file = Path(tmp) / "grok-result.json"
+                json_file.write_text('{"type":"text","data":"OK"}\n' + end_event + "\n", encoding="utf-8")
+                code, out, err = run_main(
+                    ["actual", "--family", "grok", "--json-file", str(json_file),
+                     "--expect-model", "grok-4.7", "--expect-effort", "high"],
+                    {"GROK_HOME": str(grok_home)},
+                )
+                self.assertEqual((code, out.strip(), err), (0, "actual=grok-4.7-build high status=ok", ""))
+                code, out, err = run_main(
+                    ["actual", "--family", "grok", "--session-id", sid,
+                     "--expect-model", "grok-4.7-build-fast", "--expect-effort", "high"],
+                    {"GROK_HOME": str(grok_home)},
+                )
+                self.assertEqual(code, 0)
+                self.assertIn("status=mismatch", out)
+                self.assertIn("MODEL-MISMATCH", err)
+
 
 class ScanTests(unittest.TestCase):
     def hits(self, text: str) -> list:
@@ -571,6 +715,7 @@ class ScanTests(unittest.TestCase):
     def test_flags_model_and_effort_literals(self) -> None:
         samples = [
             "use gpt-9-test here",
+            "use grok-4.7-build here",
             "slug gemini-9-test-high",
             "id claude-sonnet-9 ran",
             "claude -p --model sonnet",
@@ -732,6 +877,80 @@ class DoctorTests(TempRegistryCase):
         self.assertIn("env.CLAUDE_CODE_EFFORT_LEVEL='high'", drift[0])
         self.assertTrue(any(s == "ok" and "codex" in m for m, s in by_text.items()))
         self.assertTrue(any(s == "ok" and "agy" in m for m, s in by_text.items()))
+
+    def test_sync_and_doctor_are_unchanged_with_and_without_grok(self) -> None:
+        grok_home = self.dir / "grok-home"
+        grok_home.mkdir()
+        env = dict(self.env, GROK_HOME=str(grok_home))
+        for reg in (fixture(), fixture_with_grok()):
+            self.write_registry(reg)
+            code, out, _ = run_main(["sync", "--dry-run"], env)
+            self.assertEqual(code, 0)
+            self.assertNotIn("grok", out.lower())
+            self.assertFalse((grok_home / "config.toml").exists())
+            with mock.patch.dict(os.environ, env):
+                checks = agent_models.doctor_checks(reg)
+            self.assertFalse(any("grok" in m.lower() for _, m in checks))
+
+    def test_default_verify_never_launches_grok_and_named_verify_checks_dispatcher_route(self) -> None:
+        grok_home = self.dir / "grok-home"
+        sid = "sid-verify-grok"
+        session_dir = grok_home / "sessions" / "cwd-hash" / sid
+        session_dir.mkdir(parents=True)
+        (session_dir / "summary.json").write_text(
+            json.dumps({"reasoning_effort": "high"}), encoding="utf-8"
+        )
+        env = dict(self.env, GROK_HOME=str(grok_home))
+        for reg in (fixture(), fixture_with_grok()):
+            self.write_registry(reg)
+            calls = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(agent_models.shutil, "which", return_value="/usr/bin/fake"), \
+                    mock.patch.object(agent_models.subprocess, "run", side_effect=fake_run):
+                code, out, _ = run_main(["verify"], env)
+            self.assertEqual(code, 0)
+            launched = [cmd[0] for cmd, _ in calls]
+            self.assertEqual(launched, ["claude", "codex", "agy"])
+            self.assertNotIn("grok", out.lower())
+
+        self.write_registry(fixture_with_grok())
+        grok_calls = []
+
+        def fake_grok_run(cmd, **kwargs):
+            grok_calls.append((cmd, kwargs))
+            payload = json.dumps({
+                "stopReason": "end_turn",
+                "sessionId": sid,
+                "modelUsage": {"grok-9-test-build": {"modelCalls": 1}},
+            })
+            return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+        with mock.patch.object(agent_models.shutil, "which", return_value="/usr/bin/grok"), \
+                mock.patch.object(agent_models.subprocess, "run", side_effect=fake_grok_run):
+            code, out, _ = run_main(["verify", "--family", "grok"], env)
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ok] grok interactive: actual grok-9-test-build high", out)
+        self.assertEqual(len(grok_calls), 1)
+        cmd, kwargs = grok_calls[0]
+        self.assertEqual(
+            cmd,
+            ["grok", "-p", "Reply OK", "--output-format", "json", "--no-auto-update",
+             "-m", "grok-9-test", "--effort", "high"],
+        )
+        for key, expected in (
+            ("GROK_FOLDER_TRUST", "0"),
+            ("GROK_CLAUDE_HOOKS_ENABLED", "false"),
+            ("GROK_CLAUDE_MCPS_ENABLED", "false"),
+            ("GROK_CLAUDE_SKILLS_ENABLED", "false"),
+            ("GROK_CURSOR_HOOKS_ENABLED", "false"),
+            ("GROK_CURSOR_MCPS_ENABLED", "false"),
+            ("GROK_DISABLE_AUTOUPDATER", "1"),
+        ):
+            self.assertEqual(kwargs["env"].get(key), expected, key)
 
 
 # --------------------------------------------------------------------------

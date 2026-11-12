@@ -346,6 +346,7 @@ class RepoValidationTests(unittest.TestCase):
         env = os.environ.copy()
         env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
         env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["ANYWHERE_AGENTS_GROK_AUTO_UPDATE"] = "off"
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         # Keep the user-level config layer in the fixture home too, so the run

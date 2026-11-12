@@ -49,7 +49,9 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -858,6 +860,12 @@ def _agy_payload(five=0.75, weekly=0.40, third_five=0.90, third_weekly=0.80):
 
 
 class TestAgyQuota(unittest.TestCase):
+    def setUp(self):
+        for mod in (statusline, agent_quota):
+            patcher = mock.patch.object(mod, "_grok_binary", return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _paths(self, tmp):
         cache = os.path.join(tmp, "agy-quota-cache.json")
         return cache, cache + ".last-attempt", cache + ".refresh.lock"
@@ -1098,6 +1106,626 @@ class TestClaudeWindows(unittest.TestCase):
             self.assertEqual(compact, "cc —")
             self.assertEqual(full, "🤖 Opus 5.5 · —")
             self.assertIn("(no windows)", self._row(rate_limits))
+
+
+class TestGrokUsage(unittest.TestCase):
+    """Tests for Grok 7-day local list-price usage in statusline and agent-quota."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self._tmp.name
+        self.grok_home = os.path.join(self.tmp, ".grok")
+        self.grok_cache = os.path.join(self.tmp, ".claude", "grok-usage-cache.json")
+        self.agy_cache = os.path.join(self.tmp, ".claude", "agy-quota-cache.json")
+        self.claude_cache = os.path.join(self.tmp, ".claude", "rate-limits-cache.json")
+
+        p_home = mock.patch("os.path.expanduser", _fake_home(self.tmp))
+        p_home.start()
+        self.addCleanup(p_home.stop)
+
+        env_overrides = {
+            "GROK_HOME": self.grok_home,
+            "GROK_USAGE_CACHE": self.grok_cache,
+        }
+        p_env = mock.patch.dict(os.environ, env_overrides, clear=False)
+        p_env.start()
+        self.addCleanup(p_env.stop)
+
+        for mod in (statusline, agent_quota):
+            for attr, val in (
+                ("CLAUDE_RL_CACHE", self.claude_cache),
+                ("AGY_QUOTA_CACHE", self.agy_cache),
+                ("AGY_QUOTA_ATTEMPT", self.agy_cache + ".last-attempt"),
+            ):
+                if hasattr(mod, attr):
+                    p = mock.patch.object(mod, attr, val)
+                    p.start()
+                    self.addCleanup(p.stop)
+        p_lock = mock.patch.object(
+            agent_quota, "AGY_QUOTA_LOCK", self.agy_cache + ".refresh.lock"
+        )
+        p_lock.start()
+        self.addCleanup(p_lock.stop)
+
+    def _write_session(self, proj, sid, payload, mtime=None):
+        sess_dir = pathlib.Path(self.grok_home) / "sessions" / proj / sid
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        usage_file = sess_dir / "usage.json"
+        if isinstance(payload, str):
+            usage_file.write_text(payload, encoding="utf-8")
+        else:
+            usage_file.write_text(json.dumps(payload), encoding="utf-8")
+        if mtime is not None:
+            os.utime(usage_file, (mtime, mtime))
+        return usage_file
+
+    def _populate_other_agents(self):
+        os.makedirs(os.path.dirname(self.claude_cache), exist_ok=True)
+        now = time.time()
+        pathlib.Path(self.claude_cache).write_text(
+            json.dumps({
+                "model": "Opus 5.5",
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 18},
+                    "seven_day": {"used_percentage": 62},
+                },
+                "ts": now - 60,
+            }),
+            encoding="utf-8",
+        )
+        pathlib.Path(self.agy_cache).write_text(
+            json.dumps({
+                "cached_at": now - 120,
+                "plan_tier": "ULTRA",
+                "usage": _agy_payload()["command"]["data"],
+            }),
+            encoding="utf-8",
+        )
+        sess = pathlib.Path(self.tmp) / ".codex" / "sessions" / "s"
+        sess.mkdir(parents=True, exist_ok=True)
+        (sess / "rollout-1.jsonl").write_text(
+            json.dumps({
+                "timestamp": _ts(120),
+                "payload": {"rate_limits": PLAN},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_resumed_session_counts_only_recent_turns_and_ignores_session_total(self):
+        now = time.time()
+        # Resumed session: recent file mtime, inflated session.costUsdTicks,
+        # one turn older than 7d, and two turns inside the 7d window ($1.25 + $2.97 = $4.22).
+        self._write_session(
+            "proj-a",
+            "sess-resumed",
+            {
+                "sessionId": "sess-resumed",
+                "session": {"costUsdTicks": 999 * 10_000_000_000, "turnCount": 3},
+                "turns": [
+                    {
+                        "turnNumber": 1,
+                        "endedAt": _ts(9 * 86400),
+                        "costUsdTicks": 50 * 10_000_000_000,
+                    },
+                    {
+                        "turnNumber": 2,
+                        "endedAt": _ts(2 * 86400),
+                        "costUsdTicks": 12_500_000_000,
+                    },
+                    {
+                        "turnNumber": 3,
+                        "endedAt": _ts(3600),
+                        "costUsdTicks": 29_700_000_000,
+                    },
+                ],
+            },
+            mtime=now - 60,
+        )
+        # File older than 7 days by mtime: skipped without opening even if a
+        # turn inside claims a recent endedAt.
+        old_file = self._write_session(
+            "proj-a",
+            "sess-old-mtime",
+            {
+                "sessionId": "sess-old-mtime",
+                "session": {"costUsdTicks": 100 * 10_000_000_000},
+                "turns": [
+                    {
+                        "turnNumber": 1,
+                        "endedAt": _ts(60),
+                        "costUsdTicks": 100 * 10_000_000_000,
+                    }
+                ],
+            },
+            mtime=now - 10 * 86400,
+        )
+        # Recent file mtime but all turns older than 7 days: 0 counted turns,
+        # so it must not increment the session count.
+        self._write_session(
+            "proj-b",
+            "sess-touched-only",
+            {
+                "sessionId": "sess-touched-only",
+                "session": {"costUsdTicks": 20 * 10_000_000_000},
+                "turns": [
+                    {
+                        "turnNumber": 1,
+                        "endedAt": _ts(8 * 86400),
+                        "costUsdTicks": 20 * 10_000_000_000,
+                    }
+                ],
+            },
+            mtime=now - 30,
+        )
+
+        real_open = open
+
+        def guarded_open(path, *args, **kwargs):
+            if os.path.abspath(str(path)) == os.path.abspath(str(old_file)):
+                raise AssertionError("mtime filter failed to skip >7d usage.json")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch("builtins.open", side_effect=guarded_open):
+            self.assertEqual(agent_quota._refresh_grok_cache(), 0)
+            seg = statusline.grok_segment(compact=True)
+            row = agent_quota.grok_row()
+
+        cached = json.loads(pathlib.Path(self.grok_cache).read_text(encoding="utf-8"))
+        self.assertAlmostEqual(cached["cost_usd"], 4.22, places=6)
+        self.assertEqual(cached["cost_usd_ticks"], 42_200_000_000)
+        self.assertEqual(cached["sessions"], 1)
+        self.assertFalse(cached["partial"])
+        self.assertEqual(seg, "gk $4.2/7d")
+        self.assertEqual(
+            row, "Grok     7d $4.22 local list-price usage (1 sessions)  [just now]"
+        )
+
+    def test_partial_cost_flags_full_row_only_and_ignores_uncounted_turns(self):
+        now = time.time()
+        # Session 1: old turn (>7d) lacked cost, recent turn has full cost.
+        # Uncounted old turn must not mark the 7d window partial.
+        self._write_session(
+            "proj-a",
+            "sess-1",
+            {
+                "turns": [
+                    {"turnNumber": 1, "endedAt": _ts(9 * 86400)},
+                    {
+                        "turnNumber": 2,
+                        "endedAt": _ts(1800),
+                        "costUsdTicks": 42_200_000_000,
+                    },
+                ]
+            },
+            mtime=now - 60,
+        )
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"):
+            self.assertEqual(agent_quota._refresh_grok_cache(force=True), 0)
+            self.assertNotIn("partial", agent_quota.grok_row())
+
+        # Session 2: recent counted turn lacks costUsdTicks -> partial=True.
+        self._write_session(
+            "proj-a",
+            "sess-2",
+            {
+                "turns": [
+                    {"turnNumber": 1, "endedAt": _ts(600), "costUsdTicks": None},
+                ]
+            },
+            mtime=now - 30,
+        )
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"):
+            self.assertEqual(agent_quota._refresh_grok_cache(force=True), 0)
+            seg = statusline.grok_segment(compact=True)
+            row = agent_quota.grok_row()
+
+        cached = json.loads(pathlib.Path(self.grok_cache).read_text(encoding="utf-8"))
+        self.assertTrue(cached["partial"])
+        self.assertEqual(cached["sessions"], 2)
+        self.assertAlmostEqual(cached["cost_usd"], 4.22, places=6)
+        self.assertEqual(seg, "gk $4.2/7d")
+        self.assertEqual(
+            row,
+            "Grok     7d $4.22 local list-price usage (2 sessions, partial)  [just now]",
+        )
+
+    def test_unreadable_and_corrupt_files_are_skipped(self):
+        now = time.time()
+        self._write_session(
+            "proj-ok",
+            "sess-ok",
+            {
+                "turns": [
+                    {
+                        "turnNumber": 1,
+                        "endedAt": _ts(300),
+                        "costUsdTicks": 30_000_000_000,
+                    }
+                ]
+            },
+            mtime=now - 20,
+        )
+        self._write_session("proj-bad", "sess-corrupt", "{not-json", mtime=now - 20)
+        self._write_session("proj-bad", "sess-list", "[]", mtime=now - 20)
+        self._write_session(
+            "proj-bad", "sess-bad-turns", {"turns": "nope"}, mtime=now - 20
+        )
+        locked_file = self._write_session(
+            "proj-bad",
+            "sess-unreadable",
+            {"turns": [{"endedAt": _ts(100), "costUsdTicks": 90_000_000_000}]},
+            mtime=now - 20,
+        )
+
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if os.path.abspath(str(path)) == os.path.abspath(str(locked_file)):
+                raise PermissionError(str(path))
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch("builtins.open", side_effect=failing_open):
+            self.assertEqual(agent_quota._refresh_grok_cache(force=True), 0)
+            self.assertEqual(statusline.grok_segment(compact=True), "gk $3.0/7d")
+            self.assertIn("7d $3.00 local list-price usage (1 sessions)", agent_quota.grok_row())
+
+        # Corrupt cache file on disk -> segment and row return None cleanly.
+        pathlib.Path(self.grok_cache).write_text("{corrupt", encoding="utf-8")
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"):
+            self.assertIsNone(statusline.grok_segment(compact=True))
+            self.assertIsNone(agent_quota.grok_row())
+
+    def test_without_grok_output_is_byte_identical_even_with_stale_grok_cache(self):
+        self._populate_other_agents()
+        stdin_payload = json.dumps({
+            "model": {"display_name": "Opus 5.5"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 18},
+                "seven_day": {"used_percentage": 62},
+            },
+        })
+
+        def run_both():
+            sl_out = io.StringIO()
+            aq_out = io.StringIO()
+            with mock.patch.object(statusline, "_grok_binary", return_value=None), \
+                    mock.patch.object(statusline, "persist_claude"), \
+                    mock.patch.object(statusline, "start_agy_refresh"), \
+                    mock.patch.object(statusline.subprocess, "Popen") as sl_popen, \
+                    mock.patch("sys.stdin", io.StringIO(stdin_payload)), \
+                    mock.patch("sys.stdout", sl_out):
+                statusline.main()
+            sl_popen.assert_not_called()
+
+            with mock.patch.object(agent_quota, "_grok_binary", return_value=None), \
+                    mock.patch.object(agent_quota, "_agy_binary", return_value="/bin/agy"), \
+                    mock.patch.object(agent_quota, "_start_agy_refresh", return_value=False), \
+                    mock.patch.object(agent_quota.subprocess, "Popen") as aq_popen, \
+                    mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]), \
+                    mock.patch("sys.stdout", aq_out):
+                self.assertEqual(agent_quota.main(), 0)
+            aq_popen.assert_not_called()
+            return sl_out.getvalue(), aq_out.getvalue()
+
+        sl_without_cache, aq_without_cache = run_both()
+
+        # Write a stale Grok cache on disk and re-run without grok installed.
+        pathlib.Path(self.grok_cache).write_text(
+            json.dumps({
+                "cached_at": time.time() - 3600,
+                "cost_usd": 19.85,
+                "cost_usd_ticks": 198_500_000_000,
+                "sessions": 5,
+                "partial": False,
+            }),
+            encoding="utf-8",
+        )
+        os.utime(self.grok_cache, (time.time() - 3600, time.time() - 3600))
+        sl_with_stale_cache, aq_with_stale_cache = run_both()
+
+        self.assertEqual(sl_without_cache, sl_with_stale_cache)
+        self.assertEqual(aq_without_cache, aq_with_stale_cache)
+        self.assertNotIn("gk", sl_with_stale_cache)
+        self.assertNotIn("Grok", aq_with_stale_cache)
+
+    def test_no_helper_launch_without_grok(self):
+        with mock.patch.object(statusline, "_grok_binary", return_value=None), \
+                mock.patch.object(statusline.subprocess, "Popen") as sl_popen:
+            self.assertFalse(statusline.start_grok_refresh())
+            sl_popen.assert_not_called()
+
+        with mock.patch.object(agent_quota, "_grok_binary", return_value=None), \
+                mock.patch.object(agent_quota.subprocess, "Popen") as aq_popen:
+            self.assertFalse(agent_quota._start_grok_refresh())
+            aq_popen.assert_not_called()
+
+    def test_hanging_or_failing_refresh_leaves_other_segments_unchanged(self):
+        self._populate_other_agents()
+        stdin_payload = json.dumps({
+            "model": {"display_name": "Opus 5.5"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 18},
+                "seven_day": {"used_percentage": 62},
+            },
+        })
+
+        # Baseline without Grok.
+        base_sl = io.StringIO()
+        base_aq = io.StringIO()
+        with mock.patch.object(statusline, "_grok_binary", return_value=None), \
+                mock.patch.object(statusline, "persist_claude"), \
+                mock.patch.object(statusline, "start_agy_refresh"), \
+                mock.patch("sys.stdin", io.StringIO(stdin_payload)), \
+                mock.patch("sys.stdout", base_sl):
+            statusline.main()
+        with mock.patch.object(agent_quota, "_grok_binary", return_value=None), \
+                mock.patch.object(agent_quota, "_agy_binary", return_value="/bin/agy"), \
+                mock.patch.object(agent_quota, "_start_agy_refresh", return_value=False), \
+                mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]), \
+                mock.patch("sys.stdout", base_aq):
+            agent_quota.main()
+
+        # Grok installed, refresh spawns detached (simulated hanging helper holding lock
+        # and producing no cache yet): Claude, Codex, and Agy output must be identical.
+        hang_sl = io.StringIO()
+        hang_aq = io.StringIO()
+        with mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline, "persist_claude"), \
+                mock.patch.object(statusline, "start_agy_refresh"), \
+                mock.patch.object(statusline.subprocess, "Popen") as sl_popen, \
+                mock.patch("sys.stdin", io.StringIO(stdin_payload)), \
+                mock.patch("sys.stdout", hang_sl):
+            statusline.main()
+        sl_popen.assert_called_once()
+        self.assertEqual(sl_popen.call_args.args[0][2], "--refresh-grok")
+
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(agent_quota, "_agy_binary", return_value="/bin/agy"), \
+                mock.patch.object(agent_quota, "_start_agy_refresh", return_value=False), \
+                mock.patch.object(agent_quota.subprocess, "Popen") as aq_popen, \
+                mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]), \
+                mock.patch("sys.stdout", hang_aq):
+            agent_quota.main()
+        aq_popen.assert_called_once()
+
+        self.assertEqual(hang_sl.getvalue(), base_sl.getvalue())
+        self.assertEqual(hang_aq.getvalue(), base_aq.getvalue())
+
+        # Failing/timed-out synchronous refresh writes .last-attempt, releases
+        # the lock, and throttles subsequent attempts within the TTL.
+        with mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(agent_quota, "_scan_grok_usage", return_value=None) as scan:
+            self.assertEqual(agent_quota._refresh_grok_cache(), 1)
+            self.assertEqual(agent_quota._refresh_grok_cache(), 0)
+            self.assertEqual(scan.call_count, 1)
+            self.assertTrue(os.path.isfile(agent_quota._grok_attempt_path()))
+            self.assertFalse(os.path.exists(agent_quota._grok_lock_path()))
+
+        with mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(statusline.subprocess, "Popen") as throttled_popen:
+            self.assertFalse(statusline.start_grok_refresh())
+            throttled_popen.assert_not_called()
+
+    def test_compact_and_full_rendering_with_grok_present(self):
+        self._populate_other_agents()
+        now = time.time()
+        pathlib.Path(self.grok_cache).write_text(
+            json.dumps({
+                "cached_at": now - 120,
+                "cost_usd": 4.22,
+                "cost_usd_ticks": 42_200_000_000,
+                "sessions": 3,
+                "partial": False,
+            }),
+            encoding="utf-8",
+        )
+        stdin_payload = json.dumps({
+            "model": {"display_name": "Opus 5.5"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 18},
+                "seven_day": {"used_percentage": 62},
+            },
+        })
+
+        with mock.patch.object(statusline, "_grok_binary", return_value="/bin/grok"), \
+                mock.patch.object(agent_quota, "_grok_binary", return_value="/bin/grok"):
+            compact_seg = statusline.grok_segment(compact=True)
+            full_seg = statusline.grok_segment(compact=False)
+            row = agent_quota.grok_row()
+
+            sl_out = io.StringIO()
+            with mock.patch.object(statusline, "persist_claude"), \
+                    mock.patch.object(statusline, "start_agy_refresh"), \
+                    mock.patch.object(statusline.subprocess, "Popen") as sl_popen, \
+                    mock.patch("sys.stdin", io.StringIO(stdin_payload)), \
+                    mock.patch("sys.stdout", sl_out):
+                statusline.main()
+            sl_popen.assert_not_called()
+
+            aq_out = io.StringIO()
+            with mock.patch.object(agent_quota, "_agy_binary", return_value="/bin/agy"), \
+                    mock.patch.object(agent_quota, "_start_agy_refresh", return_value=False), \
+                    mock.patch.object(agent_quota.subprocess, "Popen") as aq_popen, \
+                    mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]), \
+                    mock.patch("sys.stdout", aq_out):
+                self.assertEqual(agent_quota.main(), 0)
+            aq_popen.assert_not_called()
+
+        self.assertEqual(compact_seg, "gk $4.2/7d")
+        self.assertEqual(
+            full_seg, "Grok · 7d $4.22 local list-price usage (3 sessions) · 2m ago"
+        )
+        self.assertEqual(
+            row, "Grok     7d $4.22 local list-price usage (3 sessions)  [2m ago]"
+        )
+        self.assertTrue(sl_out.getvalue().rstrip("\n").endswith(" | gk $4.2/7d"))
+        aq_lines = aq_out.getvalue().rstrip("\n").splitlines()
+        self.assertEqual(
+            aq_lines[-1],
+            "Grok     7d $4.22 local list-price usage (3 sessions)  [2m ago]",
+        )
+
+    def test_binary_resolution_lazy_cache_path_and_cli_refresh(self):
+        # 1. Lazy cache path follows os.path.expanduser("~") when GROK_USAGE_CACHE is unset.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GROK_USAGE_CACHE", None)
+            os.environ.pop("GROK_HOME", None)
+            self.assertEqual(
+                statusline._grok_cache_path(),
+                os.path.join(self.tmp, ".claude", "grok-usage-cache.json"),
+            )
+            self.assertEqual(
+                agent_quota._grok_cache_path(),
+                os.path.join(self.tmp, ".claude", "grok-usage-cache.json"),
+            )
+            self.assertEqual(
+                agent_quota._grok_home(),
+                os.path.join(self.tmp, ".grok"),
+            )
+
+        # 2. Binary resolution: GROK_BIN -> PATH -> ~/.grok/bin/grok.
+        fallback_bin = pathlib.Path(self.grok_home) / "bin" / (
+            "grok.exe" if os.name == "nt" else "grok"
+        )
+        fallback_bin.parent.mkdir(parents=True, exist_ok=True)
+        fallback_bin.write_text("", encoding="utf-8")
+        custom_bin = pathlib.Path(self.tmp) / "custom-grok"
+        custom_bin.write_text("", encoding="utf-8")
+
+        for mod in (statusline, agent_quota):
+            with mock.patch.dict(os.environ, {"GROK_BIN": str(custom_bin)}, clear=False):
+                self.assertEqual(mod._grok_binary(), os.path.abspath(str(custom_bin)))
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch.object(mod.shutil, "which", return_value="/opt/bin/grok"):
+                os.environ.pop("GROK_BIN", None)
+                self.assertEqual(mod._grok_binary(), "/opt/bin/grok")
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch.object(mod.shutil, "which", return_value=None):
+                os.environ.pop("GROK_BIN", None)
+                self.assertEqual(mod._grok_binary(), str(fallback_bin))
+
+        # 3. CLI --refresh-grok entry point.
+        self._write_session(
+            "proj-cli",
+            "sess-cli",
+            {"turns": [{"endedAt": _ts(60), "costUsdTicks": 15_000_000_000}]},
+            mtime=time.time() - 10,
+        )
+        # The real watchdog ends its process; in-process it would end pytest,
+        # so a stand-in records that the CLI armed it and that it was cancelled.
+        armed = threading.Event()
+        with mock.patch.object(agent_quota, "_grok_binary", return_value=str(custom_bin)), \
+                mock.patch.object(agent_quota, "_arm_grok_watchdog", return_value=armed) as arm, \
+                mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py", "--refresh-grok"]):
+            self.assertEqual(agent_quota.main(), 0)
+        arm.assert_called_once()
+        self.assertTrue(armed.is_set())
+        cached = json.loads(pathlib.Path(self.grok_cache).read_text(encoding="utf-8"))
+        self.assertAlmostEqual(cached["cost_usd"], 1.5, places=6)
+        self.assertEqual(cached["sessions"], 1)
+
+
+class TestGrokRefreshHardTimeout(unittest.TestCase):
+    """The detached --refresh-grok helper must end even when the scan blocks."""
+
+    def test_blocked_scan_is_ended_by_the_watchdog_and_the_lock_released(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            fake_grok = tmp / "grok"
+            fake_grok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_grok.chmod(0o755)
+            cache = tmp / "grok-usage-cache.json"
+            env = dict(
+                os.environ,
+                HOME=str(tmp),
+                USERPROFILE=str(tmp),
+                GROK_HOME=str(tmp / ".grok"),
+                GROK_BIN=str(fake_grok),
+                GROK_USAGE_CACHE=str(cache),
+                GROK_USAGE_TIMEOUT_SECONDS="1",
+            )
+            # A scan that blocks far past its deadline stands in for a stuck
+            # open or read, which the in-loop deadline checks cannot interrupt.
+            driver = (
+                "import importlib.util, sys, time\n"
+                "spec = importlib.util.spec_from_file_location('aq', sys.argv[1])\n"
+                "aq = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(aq)\n"
+                "aq._scan_grok_usage = lambda **kw: time.sleep(60)\n"
+                "sys.exit(aq._refresh_grok_cache(force=True, hard_timeout=True))\n"
+            )
+            started = time.monotonic()
+            proc = subprocess.run(
+                [sys.executable, "-c", driver, str(REPO / "scripts" / "agent-quota.py")],
+                env=env, capture_output=True, text=True, timeout=45,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 124, msg=proc.stderr)
+            self.assertLess(elapsed, 30)
+            self.assertFalse(pathlib.Path(str(cache) + ".refresh.lock").exists())
+            self.assertFalse(cache.exists())
+
+    def test_a_finished_refresh_cancels_its_watchdog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            fake_grok = tmp / "grok"
+            fake_grok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_grok.chmod(0o755)
+            cache = tmp / "grok-usage-cache.json"
+            env = dict(
+                os.environ,
+                HOME=str(tmp),
+                USERPROFILE=str(tmp),
+                GROK_HOME=str(tmp / ".grok"),
+                GROK_BIN=str(fake_grok),
+                GROK_USAGE_CACHE=str(cache),
+                GROK_USAGE_TIMEOUT_SECONDS="1",
+            )
+            # After a normal refresh the watchdog thread must end at once; a
+            # live one would end any longer-lived process that ran the refresh.
+            driver = (
+                "import importlib.util, sys, threading\n"
+                "spec = importlib.util.spec_from_file_location('aq', sys.argv[1])\n"
+                "aq = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(aq)\n"
+                "rc = aq._refresh_grok_cache(force=True, hard_timeout=True)\n"
+                "for t in threading.enumerate():\n"
+                "    if t.name == 'grok-refresh-watchdog':\n"
+                "        t.join(2)\n"
+                "        if t.is_alive():\n"
+                "            print('watchdog alive')\n"
+                "            sys.exit(3)\n"
+                "sys.exit(rc)\n"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", driver, str(REPO / "scripts" / "agent-quota.py")],
+                env=env, capture_output=True, text=True, timeout=45,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+            self.assertTrue(cache.exists())
+            self.assertFalse(pathlib.Path(str(cache) + ".refresh.lock").exists())
+
+    def test_a_fifo_named_usage_json_is_skipped_not_opened(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no FIFOs on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            session = pathlib.Path(tmp) / "sessions" / "proj" / "s1"
+            session.mkdir(parents=True)
+            os.mkfifo(session / "usage.json")
+            with mock.patch.dict(os.environ, {"GROK_HOME": tmp}):
+                started = time.monotonic()
+                result = agent_quota._scan_grok_usage(deadline=time.monotonic() + 5)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["sessions"], 0)
 
 
 if __name__ == "__main__":

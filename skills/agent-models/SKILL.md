@@ -15,7 +15,7 @@ Find the resolver at `scripts/agent_models.py` in a source repository (`agent-co
 
 ## The rules
 
-1. **One row per family.** The registry has a row for `claude`, `codex`, and `agy`. Every role of a family runs on that row unless the registry lists an override for the role.
+1. **One row per family.** The registry has a row for `claude`, `codex`, and `agy`, and an optional row for `grok`. Every role of a family runs on that row unless the registry lists an override for the role.
 2. **Roles.** `interactive` is the session a person types into. `reviewer` covers every review: a `/vet` reviewer, a venue or proposal review panel, an internal-review audit. `worker` is a Claude subagent or Workflow agent that does fan-out work. `prun-worker` is a unit `prun` runs. `premium` is optional: a model whose plan allowance is small, for a writing task or another task the user decides is worth it. Nothing dispatches to it automatically, and every task works without it. A role with no override equals the family row, so a review runs on the same model and effort as the interactive session by default.
 3. **Exceptions are listed, never implied.** An override exists only as an entry under `roles` in the registry. If a role should differ from its family, add the entry there; do not put a value in a script, a skill, or a rule file.
 4. **No literal outside the registry.** Code resolves at run time. Prose states the rule and points here. `tests/test_agent_models.py` scans the tracked files and fails on a concrete model name or effort value outside the registry, the changelog, archived records, and test fixtures. A line that must quote one (a past measurement, a parser example) carries the marker `agent-models: allow`.
@@ -33,7 +33,8 @@ Find the resolver at `scripts/agent_models.py` in a source repository (`agent-co
 | Codex reviewer | `dispatch-codex` passes `-c model=` and `-c model_reasoning_effort=`. |
 | Agy interactive | `sync` sets `model` in `~/.gemini/antigravity-cli/settings.json` to the display name `agy models` lists. |
 | Agy reviewer | `dispatch-gemini.py` takes the family stem and effort and floats to the newest version Agy lists. |
-| prun worker | `dispatch-task-agy.py` takes the Agy `prun-worker` row. `dispatch-task.sh` and `.ps1`, used only when the user names Codex for a unit, take the Codex one. |
+| Grok reviewer / prun worker | No interactive config sync (`~/.grok/config.toml` is untouched). `dispatch-grok.py` and `dispatch-task-grok.py` pass `-m` and `--effort` from the `reviewer` and `prun-worker` rows; `verify --family grok` checks this dispatcher route. |
+| prun worker | `dispatch-task-agy.py` takes the Agy `prun-worker` row. `dispatch-task.sh` and `.ps1`, used only when the user names Codex for a unit, take the Codex one. `dispatch-task-grok.py`, used only when the user names Grok, takes the Grok one. |
 
 Facts that explain most surprises:
 
@@ -57,7 +58,7 @@ agent_models.py verify                    # launch each CLI once and read back w
 agent_models.py sync [--dry-run]          # write the Codex and Agy interactive values
 agent_models.py render [--check]          # keep user/settings.json equal to the registry
 agent_models.py set --family <family> [--role <role>] [--model <name>] [--effort <level>]
-agent_models.py actual --family <family> (--session-id ID | --stderr-file F | --log-file F)
+agent_models.py actual --family <family> (--session-id ID | --stderr-file F | --log-file F | --json-file F)
 ```
 
 ## Use the premium row

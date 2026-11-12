@@ -1,6 +1,6 @@
 ---
 description: "Vet the staged change: run the implement-review review loop (short alias)"
-argument-hint: "[both|agy|claude|copilot|codex] [auto|cli|auto-terminal|manual|plugin] [focus...]"
+argument-hint: "[both|agy|claude|copilot|codex|grok] [auto|cli|auto-terminal|manual|plugin] [focus...]"
 alias-of: implement-review
 ---
 
