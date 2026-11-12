@@ -44,7 +44,6 @@ Facts that explain most surprises:
 - An Agy slug is a stem plus an effort tier. The registry holds the stem; the version floats.
 - Claude settings cannot persist the top effort level; the env entry carries it.
 - `sync` leaves the Codex model alone when `config.toml` sets a `model_provider` other than `openai`. It leaves the whole file alone, and says so, when it cannot check its own edit: a layout its line editor does not handle, or a Python before 3.11, which has no TOML parser. `doctor` still reports the drift. `AGENT_MODELS_SYNC=off` in the environment skips `sync`.
-- Copilot takes no model or effort argument, so the registry has no row for it.
 
 ## Commands
 

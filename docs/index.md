@@ -16,7 +16,7 @@ Four problems this fixes:
 
 - **You use more than one agent.** Claude Code at work, Codex on personal projects, Cursor on the side. One `AGENTS.md` drives all three.
 - **You work across many repos.** Every new project repeats the same setup ritual. `bootstrap` pulls shared defaults and layers repo-local overrides on top.
-- **You want a review loop before you push.** `/implement-review`, or its short alias `/vet`, hands your staged diff to Codex by default or to Agy, Copilot, or headless Claude Code when named. The loop converges on feedback and revises.
+- **You want a review loop before you push.** `/implement-review`, or its short alias `/vet`, hands your staged diff to Codex by default or to Agy or headless Claude Code when named. The loop converges on feedback and revises.
 - **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one.
 
 As of v0.6.0, bare `anywhere-agents` is the canonical apply command. One verb runs bootstrap, deploys declared state, applies prompt-policy drift on mutable refs, and regenerates `CLAUDE.md` / `agents/codex.md`. Direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback) handles public and private repos.
@@ -33,7 +33,7 @@ The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest 
 
 ## Review With a Second Model Family
 
-With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest model of the registry's Agy reviewer family that the account lists, through the official Antigravity CLI. Under the default model selection, an account that lists no member of that family falls back to the registry's fallback family. The registry (`user/agent-models.json`, see the `agent-models` skill) names the model and effort of the Claude, Codex, and Agy reviewers, and each of their dispatchers records what the CLI reported it ran on next to what it asked for. The Copilot dispatcher uses Copilot's own defaults and keeps no such record. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
+With `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto`, `/vet` uses Codex and `/vet agy` uses the newest model of the registry's Agy reviewer family that the account lists, through the official Antigravity CLI. Under the default model selection, an account that lists no member of that family falls back to the registry's fallback family. The registry (`user/agent-models.json`, see the `agent-models` skill) names the model and effort of the Claude, Codex, and Agy reviewers, and each of their dispatchers records what the CLI reported it ran on next to what it asked for. `gemini` and `antigravity` remain aliases for `agy`. Without that user-level default, use `/vet auto agy`.
 
 The Agy dispatcher reviews an isolated export of the staged Git index with unattended execution permission, then atomically publishes `Review-Antigravity.md`. It can run tests and experiments, including generated-file writes inside the disposable snapshot, without touching the original worktree. The same validation-capability contract applies to every automated `/vet` backend. See [implement-review](skills/implement-review.md) for backend selection, preflight, model overrides, self-review guards, and failure handling.
 

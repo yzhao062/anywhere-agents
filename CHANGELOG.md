@@ -33,6 +33,12 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 - **`/vet` Codex reviews are no longer pinned above the interactive effort.** A review runs at the registry's reviewer effort, which equals the interactive effort unless the registry lists an override. The Codex dispatcher keeps no floor of its own and the Claude reviewer no longer passes a fixed top effort. A dispatching agent may still raise a single round above the registry's effort and never lower it. `AGENTS.md` § Environment, `README.md`, and the pages under `docs/` now state the rule and point at the registry, where they used to name models and effort levels.
 
+### Removed
+
+- **The Copilot reviewer backend of `/vet`.** The `copilot` reviewer token, `dispatch-copilot.{sh,ps1}`, and their tests are gone, and the failover queue is now Codex, Antigravity, Claude Code. Where a rule fell back to Copilot, it now falls back to Agy. This breaks `/vet copilot` for anyone who ran it; a Copilot review can still be pasted by hand through Terminal-relay.
+
+- **The Plugin path of `/vet`.** The channel that had the user paste the review prompt into the Codex IDE sidebar is removed, with the `plugin` argument hint. Terminal-relay still takes a review from any tool that honors the `Review-<AgentName>.md` save contract.
+
 ### Fixed
 
 - **A quoted Windows path survives the shell-write gate.** Inside double quotes the gate dropped every backslash, so `cat > "C:\Users\me\AppData\Local\Temp\x\agent-io\prompt.txt"` was read as a relative path and a scratch prompt was denied. A backslash there now escapes only `$`, a backtick, `"`, or `\`, as in bash. CI runs the Python 3.9 floor on `ubuntu-24.04`, because `ubuntu-latest` (26.04) has no 3.9 build, and the PDF recovery test accepts PyMuPDF 2.0, which no longer prints MuPDF messages by default.

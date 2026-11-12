@@ -4,7 +4,7 @@
 # Cross-vendor reviewer path: when Codex (or the user) is the primary
 # implementer and Claude is preferred as the reviewer voice, this dispatches
 # headless Claude Code (`claude -p`) as the reviewer. Mirrors the
-# dispatch-codex.ps1 / dispatch-copilot.ps1 state-dir / STATE-DIR / stall-watch
+# dispatch-codex.ps1 state-dir / STATE-DIR / stall-watch
 # contract so the same auto-watch, health-check, and Phase 2.0 machinery ingest
 # the review with only the expected-review-file name swapped.
 #
@@ -106,7 +106,7 @@ $sourceScriptDir = if ($env:IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR) {
 }
 
 # Resolve an Application command to a runnable, extension-bearing path.
-# Mirrors dispatch-codex.ps1 / dispatch-copilot.ps1's resolution: skip Microsoft
+# Mirrors dispatch-codex.ps1's resolution: skip Microsoft
 # Store App Execution Aliases under \WindowsApps\, and prefer the FIRST
 # extension-bearing candidate in PATH order.
 function Resolve-AppPath {

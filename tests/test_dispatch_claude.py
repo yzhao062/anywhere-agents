@@ -5,7 +5,7 @@ skills/implement-review/SKILL.md > Auto-terminal Claude backend. The Claude
 backend is the cross-vendor reviewer path used when Codex (or the user) is the
 primary implementer and Claude is preferred as the reviewer voice.
 
-Strategy mirrors test_dispatch_copilot.py / test_dispatch_codex.py: replace the
+Strategy mirrors test_dispatch_codex.py: replace the
 real claude binary with a mock Python stub (via the CLAUDE_BIN env override
 that dispatch-claude honors). The mock logs args + cwd + stdin to a per-test
 directory and returns a configurable exit code, so we verify the dispatch

@@ -46,7 +46,7 @@
 
 **你在好几个 repo 之间跳。** 每开一个新项目都得重复同一套仪式：写作规则、权限策略、自定义 skill。手动复制粘贴以后看着它们一点一点走样，累积起来很烦人。`bootstrap` 把共享默认拉下来，再在上面叠你这个项目自己的改动。
 
-**你想在 push 之前先让另一个模型家族看一眼。** `anywhere-agents` 自带 `/implement-review` 和短别名 `/vet`。不加 reviewer token 时仍由 Codex 审；`/vet agy` 走官方 Antigravity CLI 调 Gemini，另外也支持 GitHub Copilot 和无头 Claude Code。所有自动 backend 都能在无需交互批准的情况下运行测试、实验、shell 命令和网络核验。它们看 staged diff、给反馈、再迭代，不需要每个项目各接一套 reviewer API。
+**你想在 push 之前先让另一个模型家族看一眼。** `anywhere-agents` 自带 `/implement-review` 和短别名 `/vet`。不加 reviewer token 时仍由 Codex 审；`/vet agy` 走官方 Antigravity CLI 调 Gemini，另外也支持无头 Claude Code。所有自动 backend 都能在无需交互批准的情况下运行测试、实验、shell 命令和网络核验。它们看 staged diff、给反馈、再迭代，不需要每个项目各接一套 reviewer API。
 
 **你想 agent 写东西自动不带 AI 味儿。** 默认的 `agent-style` rule pack 禁了 ~45 个典型 AI-tell 词和格式（em-dash 当随手用、散文被切成 bullet 之类），再加一个 PreToolUse `guard`，任何 `.md` / `.tex` / `.rst` 的 tool 调用只要 outgoing 里撞上这些词，`guard` 直接 deny。没它，那些词就进你文件了；有它，写入在落盘前就被拦下来。
 
@@ -111,12 +111,11 @@ cc 5h82% (3h4m) 7d38% (2d17h) | gpt 7d75% (6d3h) @now | agy 5h100% (4h59m) 7d100
 | `/vet` | Codex，不加 token 时的默认 reviewer |
 | `/vet agy` | Antigravity 账号列出的、属于 registry 里 Agy reviewer 模型系列的最新版本；账号没有该系列时退回 registry 里的 fallback 系列 |
 | `/vet gemini` 或 `/vet antigravity` | `/vet agy` 的兼容别名 |
-| `/vet copilot` | GitHub Copilot CLI |
 | `/vet claude` | 无头 Claude Code；如果主 agent 本来就是 Claude Code，自审 guard 会改走别家 |
 
 如果没有设置用户级 Auto-terminal 默认，就显式写一次 channel：`/vet auto agy`。Agy backend 使用已安装 `agy` CLI 上登录的 Google AI plan，不另要 Gemini API key。它在 staged Git index 的隔离导出中以 `accept-edits` 加自动批准工具权限运行，因此能实际跑实验，同时不会把生成物写进原工作树。完成后原子发布 `Review-Antigravity.md`。需要临时换模型时设 `ANTIGRAVITY_DISPATCH_MODEL`，需要换 effort 时设 `ANTIGRAVITY_DISPATCH_EFFORT`。
 
-Claude、Codex 和 Agy 这三个 reviewer 的模型和 effort 都来自同一个 registry，`user/agent-models.json`，由 `scripts/agent_models.py` 读取（`agent-models` skill 用来查看、检查和修改它）。review 默认使用与交互 session 相同的 effort，不再有单独的下限。这三者的 dispatcher 都会写一份记录，把请求的模型和 effort 与 CLI 自己报告的实际值并列（review 写 `<state-dir>/review-model`，`prun` 单元写 `<state-dir>/model-actual`），报告的值与请求不一致时打印 `MODEL-MISMATCH`，报告缺失或不完整时打印 `MODEL-UNVERIFIED`。Copilot dispatcher 使用 Copilot 自己的默认值，不写这份记录。Bootstrap 会运行 `agent_models.py sync`，把交互用的 Codex 和 Agy 取值写进 `~/.codex/config.toml` 与 Antigravity 设置；设 `AGENT_MODELS_SYNC=off` 可跳过。
+Claude、Codex 和 Agy 这三个 reviewer 的模型和 effort 都来自同一个 registry，`user/agent-models.json`，由 `scripts/agent_models.py` 读取（`agent-models` skill 用来查看、检查和修改它）。review 默认使用与交互 session 相同的 effort，不再有单独的下限。这三者的 dispatcher 都会写一份记录，把请求的模型和 effort 与 CLI 自己报告的实际值并列（review 写 `<state-dir>/review-model`，`prun` 单元写 `<state-dir>/model-actual`），报告的值与请求不一致时打印 `MODEL-MISMATCH`，报告缺失或不完整时打印 `MODEL-UNVERIFIED`。Bootstrap 会运行 `agent_models.py sync`，把交互用的 Codex 和 Agy 取值写进 `~/.codex/config.toml` 与 Antigravity 设置；设 `AGENT_MODELS_SYNC=off` 可跳过。
 
 `/prun` 采用另一套成本分工：每个单元都交给 Agy，在临时目录或一次性 clone 里无人值守运行，慢的单元还在跑时可以继续追加 turn。它不启动 Claude subagent，因为这些 subagent 消耗的是协调 session 所在的同一个 Claude 账户额度。只有你明确指定某个单元用 Codex 时，它才会在 Codex worker 上运行（通过 `dispatch-task.sh` 或 `dispatch-task.ps1`）；协调器不会自己选 Codex，默认仍是 Agy。worker 的模型和 effort 由 registry 的 `prun-worker` 行决定。在一次实测对比中，同一单元用 reviewer 系列模型跑，在 Agy 五小时额度上的消耗约为较小 worker 系列的四倍；协调器按任务真正可独立拆分的数量决定并行宽度，不设两个或三个 worker 的人为上限。
 

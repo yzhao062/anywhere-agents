@@ -8,7 +8,7 @@
 
     ---
 
-    Structured cross-model review loop with content-type lenses. Codex is the default reviewer; Agy, Copilot, and headless Claude Code are selectable backends.
+    Structured cross-model review loop with content-type lenses. Codex is the default reviewer; Agy and headless Claude Code are selectable backends.
 
     [:octicons-arrow-right-24: Deep docs](implement-review.md)
 

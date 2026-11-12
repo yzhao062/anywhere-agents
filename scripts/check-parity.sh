@@ -29,7 +29,7 @@
 #               ac/AGENTS.local.md),
 #               skills/{implement-review,ci-mockup-figure,readme-polish,
 #               prun,editable-figure,agent-models} as recursive trees, and the shared-contract test files
-#               tests/test_{dispatch_codex,dispatch_copilot,dispatch_claude,
+#               tests/test_{dispatch_codex,dispatch_claude,
 #               health_check,guard,session_bootstrap,pointer_files,
 #               prompt_byte_parity,bootstrap_preflight,
 #               dispatch_path_resolution,codex_usage}.py (added
@@ -208,7 +208,7 @@ done
 
 # ---- STRICT: shared-contract test files (pin runtime behavior of shared scripts) ----
 # These tests assert the public contract of shared scripts that are themselves
-# in STRICT (dispatch-codex, dispatch-copilot, prun monitor and gather,
+# in STRICT (dispatch-codex, prun monitor and gather,
 # health-check, guard, session
 # bootstrap event/banner state, on-disk shape of every committed
 # .claude/commands/*.md pointer, prompt body byte preservation, bootstrap
@@ -236,7 +236,6 @@ strict_test_files=(
   tests/test_dispatch_task.py
   # The resolver's own tests and the drift guard: both repos carry the registry.
   tests/test_agent_models.py
-  tests/test_dispatch_copilot.py
   tests/test_dispatch_claude.py
   tests/test_prun_deployed_path.py
   tests/test_health_check.py

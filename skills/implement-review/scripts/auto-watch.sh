@@ -23,7 +23,7 @@
 #                       trailing ``\r`` and whitespace.
 #   EXPECTED_REVIEWERS  comma-separated normalized reviewer names from
 #                       SKILL.md Phase 1c (e.g. ``Codex`` or
-#                       ``Codex,GitHub-Copilot``). The watcher only fires
+#                       ``Codex,Antigravity``). The watcher only fires
 #                       on a file whose name (after stripping ``Review-``
 #                       and ``.md``) is in this set.
 #

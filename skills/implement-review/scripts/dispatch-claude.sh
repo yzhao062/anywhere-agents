@@ -5,7 +5,7 @@
 # Cross-vendor reviewer path: when Codex (or the user) is the primary
 # implementer and Claude is preferred as the reviewer voice, this dispatches
 # headless Claude Code (`claude -p`) as the reviewer. Mirrors the
-# dispatch-codex.sh / dispatch-copilot.sh state-dir / STATE-DIR / stall-watch
+# dispatch-codex.sh state-dir / STATE-DIR / stall-watch
 # contract so the same auto-watch, health-check, and Phase 2.0 machinery ingest
 # the review with only the expected-review-file name swapped.
 #

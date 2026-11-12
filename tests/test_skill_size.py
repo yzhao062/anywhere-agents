@@ -25,8 +25,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # 154,443 -> 155,992) for the grok token and the references/grok-backend.md
 # pointer, and prun by 1,147 bytes (39,629 -> 40,776; file 39,562 -> 40,709)
 # for the Grok executor row and policy, each keeping its earlier headroom.
+# Lowered 2026-11-12 to the measured size after the Copilot reviewer backend
+# and the Plugin path left implement-review (156,049 -> 147,798).
 CEILINGS: dict[str, int] = {
-    "skills/implement-review/SKILL.md": 156_049,
+    "skills/implement-review/SKILL.md": 147_798,
     "skills/prun/SKILL.md": 40_776,
 }
 

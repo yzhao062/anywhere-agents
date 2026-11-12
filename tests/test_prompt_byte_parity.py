@@ -1,8 +1,7 @@
 """Byte-parity invariant for the Auto-terminal Codex channel.
 
-SKILL.md > Phase 1c declares the prompt sent through Terminal-relay,
-Auto-terminal, and Plugin channels must be byte-identical (Plugin may
-strip the surrounding Markdown fence). These tests verify:
+SKILL.md > Phase 1c declares the prompt sent through the Terminal-relay
+and Auto-terminal channels must be byte-identical. These tests verify:
 
 1. SKILL.md explicitly documents the invariant (regression guard against
    future edits silently weakening the claim).
@@ -134,13 +133,6 @@ class ByteParityContract(unittest.TestCase):
             "byte-identical", self.skill_text,
             "SKILL.md must state Auto-terminal prompt is byte-identical to "
             "Terminal-relay (Phase 1c invariant)",
-        )
-
-    def test_skill_md_states_byte_for_byte_for_plugin(self) -> None:
-        self.assertIn(
-            "byte-for-byte", self.skill_text,
-            "SKILL.md must state Plugin prompt matches Terminal-relay "
-            "byte-for-byte (Phase 1c invariant, allowing optional fence-strip)",
         )
 
     def test_skill_md_warns_against_arg_max_substitution(self) -> None:

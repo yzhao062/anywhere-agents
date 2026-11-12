@@ -371,8 +371,8 @@ def _put_info_string_before_round_history(text: str) -> str:
 
 def _second_section_end_marker(text: str) -> str:
     return _replace_unique(
-        text, "**Plugin path**:",
-        TERMINAL_PATH_END_MARKER + " decoy\n\n**Plugin path**:")
+        text, "### 1d. Auto-watch",
+        TERMINAL_PATH_END_MARKER + " decoy\n\n### 1d. Auto-watch")
 
 
 def _decoy_prompt_fence_above_the_real_one(text: str) -> str:
@@ -606,13 +606,13 @@ class StoppedTaskRuleTests(unittest.TestCase):
     def test_the_procedure_carries_the_backend_review_filename(self):
         """The rule claims to be reviewer-agnostic; the command has to be too.
 
-        A hard-coded Review-Codex.md sends a stopped Copilot or Claude round to
+        A hard-coded Review-Codex.md sends a stopped Claude or Agy round to
         watch a file its reviewer never writes.
         """
         index = _unique_unfenced_index(self.masked, "Resolve the round from state-dir evidence")
         para = self.text[index:index + 750]
         self.assertIn("Review-<Reviewer>.md", para)
-        for name in ("Review-Codex.md", "Review-GitHub-Copilot.md",
+        for name in ("Review-Codex.md",
                      "Review-Claude-Code.md", "Review-Antigravity.md",
                      "Review-Grok.md"):
             with self.subTest(name):
@@ -718,13 +718,13 @@ class TestReviewerSelectionInvariants(unittest.TestCase):
         self.assertIn("`Codex,Antigravity` under Claude Code", para)
         self.assertIn("`Claude-Code,Antigravity` under Codex", para)
         self.assertIn("`Codex,Claude-Code` under\n     Agy", para)
-        self.assertIn("so Copilot and Grok are never part of it", para)
+        self.assertIn("so Grok is never part of it", para)
 
     def test_no_token_default_and_default_reviewer_env_contract(self) -> None:
         default_line = _unique_line_containing(
             self.text, "IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way"
         )
-        for token in ("`both`", "`codex`", "`claude`", "`agy`", "`copilot`", "`grok`"):
+        for token in ("`both`", "`codex`", "`claude`", "`agy`", "`grok`"):
             with self.subTest(token=token):
                 self.assertIn(token, default_line)
         self.assertIn("Unset, empty, or unrecognized keeps Codex", default_line)
@@ -739,15 +739,14 @@ class TestReviewerSelectionInvariants(unittest.TestCase):
             self.text, "Reviewer-backend selection (explicit Codex)"
         )
         self.assertIn("When Codex coordinates this skill, a `codex` token or the Codex no-token default is rewritten to the Claude backend before dispatch.", codex_line)
-        self.assertIn("If the Claude probe fails, try Agy and then Copilot", codex_line)
+        self.assertIn("If the Claude probe fails, try Agy.", codex_line)
 
     def test_failover_order_excludes_grok(self) -> None:
         line = _unique_line_containing(self.text, "Maintain a **failover queue**")
         c_pos = line.index("`Codex`")
         a_pos = line.index("`Antigravity`")
-        g_pos = line.index("`GitHub-Copilot`")
         cl_pos = line.index("`Claude-Code`")
-        self.assertTrue(c_pos < a_pos < g_pos < cl_pos)
+        self.assertTrue(c_pos < a_pos < cl_pos)
         self.assertIn("`Grok` is opt-in only and is never in the failover queue", line)
         self.assertIn("never fails over to another backend", line)
 
@@ -786,7 +785,7 @@ class TestReviewerSelectionInvariants(unittest.TestCase):
         self.assertIn("Resolve `both` and `all` using the coordinator identity", para)
         self.assertIn("The resolved set excludes the\n     coordinator", para)
         # `both` keeps its meaning: the pair, without Grok.
-        self.assertIn("so Copilot and Grok are never part of it", para)
+        self.assertIn("so Grok is never part of it", para)
 
         default_line = _unique_line_containing(
             self.text, "IMPLEMENT_REVIEW_DEFAULT_REVIEWER`, read and set the same way"
@@ -829,7 +828,7 @@ class TestReviewerSelectionInvariants(unittest.TestCase):
         for name in ("vet.md", "implement-review.md"):
             with self.subTest(pointer=name):
                 pointer = (SKILL_MD.parents[2] / ".claude" / "commands" / name).read_text(encoding="utf-8")
-                self.assertIn("[both|all|agy|claude|copilot|codex|grok]", pointer)
+                self.assertIn("[both|all|agy|claude|codex|grok] [auto|cli|auto-terminal|manual]", pointer)
                 self.assertIn("such as `both` or `all`.", pointer)
 
 

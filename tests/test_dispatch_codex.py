@@ -1995,15 +1995,14 @@ class ReexecFailureCleanupReachable(unittest.TestCase):
     same fix first in ac d067c0c / aa 9f873d5).
 
     Checked by position rather than by presence, because the options only do
-    their job immediately before the exec they guard. One test covers all five
-    scripts because the guard is one shared shape, copied five times.
+    their job immediately before the exec they guard. One test covers all four
+    scripts because the guard is one shared shape, copied four times.
     """
 
     GUARDED = (
         "auto-watch.sh",
         "dispatch-claude.sh",
         "dispatch-codex.sh",
-        "dispatch-copilot.sh",
         "stall-watch.sh",
     )
 
