@@ -146,7 +146,7 @@ if "--model" in argv and "--effort" in argv:
     slug = argv[argv.index("--model") + 1]
     effort = argv[argv.index("--effort") + 1]
     tier = slug.rsplit("-", 1)[-1]
-    if tier in ("low", "medium", "high") and tier != effort:
+    if tier in ("low", "medium", "high", "xhigh") and tier != effort:
         print(f"error: --model {slug} conflicts with --effort={effort}", file=sys.stderr)
         raise SystemExit(2)
 (log / "cwd.txt").write_text(os.getcwd(), encoding="utf-8")
@@ -1589,14 +1589,20 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
 
     def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
         # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
-        result, target = self._run(
-            extra_env={"MOCK_AGY_MODELS": "gemini-3.9-flash-medium\ngemini-3.9-flash-low"}
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-3.9-flash-medium", argv)
-        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
-        self.assertTrue(target.is_file())
+        for listing, tier in (
+            ("gemini-3.9-flash-medium\ngemini-3.9-flash-low", "medium"),
+            ("gemini-3.9-flash-xhigh", "xhigh"),
+        ):
+            with self.subTest(tier=tier):
+                result, target = self._run(
+                    result_path=self.root / f"unit-result-{tier}.md",
+                    extra_env={"MOCK_AGY_MODELS": listing},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+                self.assertIn(f"gemini-3.9-flash-{tier}", argv)
+                self.assertEqual(argv[argv.index("--effort") + 1], tier)
+                self.assertTrue(target.is_file())
 
     def test_newest_in_family_copies_have_the_same_code(self) -> None:
         # The two skills deploy separately, so each carries its own copy. The

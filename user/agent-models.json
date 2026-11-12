@@ -13,7 +13,7 @@
     "agy": {
       "model": "gemini-4-argon",
       "effort": "high",
-      "fallback_model": "gemini-3.8-flash"
+      "fallback_model": "gemini-4-hydrogen"
     },
     "grok": {
       "model": "grok-4.7",
@@ -41,7 +41,7 @@
         "model": "sonnet"
       },
       "agy": {
-        "model": "gemini-3.8-flash",
+        "model": "gemini-4-hydrogen",
         "fallback_model": null
       },
       "grok": {
@@ -50,7 +50,7 @@
     },
     "prun-worker": {
       "agy": {
-        "model": "gemini-3.8-flash",
+        "model": "gemini-4-hydrogen",
         "effort": "high",
         "second_model": "claude-sonnet-5-5",
         "fallback_model": null

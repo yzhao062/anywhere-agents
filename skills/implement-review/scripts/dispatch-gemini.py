@@ -373,7 +373,7 @@ def effort_for(model: str, effort: str) -> str:
     # rejects a conflicting --effort, so an unset effort follows the slug.
     if "ANTIGRAVITY_DISPATCH_EFFORT" not in os.environ:
         slug_tier = model.rsplit("-", 1)[-1]
-        if slug_tier in ("low", "medium", "high", "max"):
+        if slug_tier in ("low", "medium", "high", "xhigh", "max"):
             return slug_tier
     return effort
 

@@ -87,7 +87,7 @@ if "--model" in argv and "--effort" in argv:
     slug = argv[argv.index("--model") + 1]
     effort = argv[argv.index("--effort") + 1]
     tier = slug.rsplit("-", 1)[-1]
-    if tier in ("low", "medium", "high") and tier != effort:
+    if tier in ("low", "medium", "high", "xhigh") and tier != effort:
         print(f"error: --model {slug} conflicts with --effort={effort}", file=sys.stderr)
         raise SystemExit(2)
 
@@ -109,7 +109,7 @@ if "--log-file" in argv and not os.environ.get("MOCK_AGY_NO_LOG"):
     label = os.environ.get("MOCK_AGY_ACTUAL_LABEL")
     if label is None:
         parts = argv[argv.index("--model") + 1].split("-")
-        tier = parts.pop() if parts[-1] in ("low", "medium", "high") else None
+        tier = parts.pop() if parts[-1] in ("low", "medium", "high", "xhigh") else None
         label = " ".join(part.capitalize() for part in parts)
         if tier:
             label += f" ({tier.capitalize()})"
@@ -1226,11 +1226,16 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
 
     def test_effort_follows_a_resolved_tier_other_than_high(self) -> None:
         # The strict mock rejects a conflicting --effort, as Agy 1.2.16 does.
-        result = self._run({"MOCK_AGY_MODELS": "gemini-4-argon-medium\ngemini-4-argon-low"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
-        self.assertIn("gemini-4-argon-medium", args)
-        self.assertEqual(args[args.index("--effort") + 1], "medium")
+        for listing, tier in (
+            ("gemini-4-argon-medium\ngemini-4-argon-low", "medium"),
+            ("gemini-4-argon-xhigh", "xhigh"),
+        ):
+            with self.subTest(tier=tier):
+                result = self._run({"MOCK_AGY_MODELS": listing})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+                self.assertIn(f"gemini-4-argon-{tier}", args)
+                self.assertEqual(args[args.index("--effort") + 1], tier)
 
     def test_blank_named_model_is_still_refused(self) -> None:
         # A blank override is a mistake to report, not a request for the
