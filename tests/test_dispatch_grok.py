@@ -916,8 +916,9 @@ class TestDispatchGrokBudgetRegistryAndGuards(DispatchGrokHarness):
 
     @unittest.skipIf(
         os.name == "nt",
-        "Grok is not exercised on Windows yet: a missing GROK_BIN there "
-        "surfaces as exit 1, not the POSIX 127 this test pins",
+        "Grok is not exercised on Windows yet: this test sets PATH to "
+        "/usr/bin:/bin, git is not found there, and the drift check exits 1 "
+        "before dispatch-grok.py can return the 127 this test pins",
     )
     def test_preflight_missing_binary_and_missing_login(self) -> None:
         proc_bin, _ = self._run_dispatch(

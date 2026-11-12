@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code statusLine: show Claude, Codex, and Agy quota.
+"""Claude Code statusLine: show Claude, Codex, Agy, and Grok quota.
 
 Claude data: v2.1.80+ injects `rate_limits` into statusLine stdin JSON for
 Pro/Max subscribers. Field is absent for API-key sessions and before first
@@ -45,9 +45,17 @@ Agy data comes from ~/.claude/agy-quota-cache.json. When it is stale, the
 status line starts the sibling agent-quota.py in a hidden helper process.
 That helper performs one lock-protected, bounded, zero-turn `/usage` query;
 the current render never waits on the network.
+
+Grok data, shown only when grok is installed on macOS or Linux, comes from
+~/.claude/grok-plan-cache.json (override via GROK_PLAN_CACHE), resolved when
+used. When it is stale, the same helper runs `agent-quota.py --refresh-grok`,
+which asks `grok agent --no-leader stdio` for the plan meter the Grok TUI's
+/usage panel shows. A reading whose period has ended is left out.
 """
 import json
+import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -84,6 +92,13 @@ def _positive_env(name, default):
 
 AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
 AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
+GROK_PLAN_TTL_SECONDS = _positive_env("GROK_PLAN_TTL_SECONDS", 300)
+GROK_PLAN_CACHE_VERSION = 1
+GROK_PERIOD_LABELS = {
+    "USAGE_PERIOD_TYPE_DAILY": "1d",
+    "USAGE_PERIOD_TYPE_WEEKLY": "7d",
+    "USAGE_PERIOD_TYPE_MONTHLY": "mo",
+}
 
 
 def fmt_window(window, pct_field):
@@ -367,6 +382,109 @@ def agy_segment(compact=False):
     return f"{head} · 5h {five} · 7d {week} · {shown_age}"
 
 
+def _grok_plan_cache_path():
+    return os.environ.get("GROK_PLAN_CACHE") or os.path.join(
+        os.path.expanduser("~"), ".claude", "grok-plan-cache.json"
+    )
+
+
+def _grok_binary():
+    """The grok executable, or None; matches agent-quota.py, including the
+    POSIX-only rule for the plan meter."""
+    if os.name == "nt":
+        return None
+    configured = os.environ.get("GROK_BIN")
+    if configured:
+        direct = os.path.expandvars(os.path.expanduser(configured))
+        if os.path.isfile(direct):
+            return os.path.abspath(direct)
+        return shutil.which(configured)
+    found = shutil.which("grok")
+    if found:
+        return found
+    home = os.environ.get("GROK_HOME") or os.path.join(os.path.expanduser("~"), ".grok")
+    fallback = os.path.join(os.path.expanduser(home), "bin", "grok")
+    return fallback if os.path.isfile(fallback) else None
+
+
+def start_grok_refresh():
+    """Start a bounded Grok plan refresh when grok is installed and the cache
+    is stale; the render never waits on it."""
+    if _grok_binary() is None:
+        return False
+    cache = _grok_plan_cache_path()
+    cache_age = _path_age(cache)
+    if cache_age is not None and cache_age < GROK_PLAN_TTL_SECONDS:
+        return False
+    attempt_age = _path_age(cache + ".last-attempt")
+    if attempt_age is not None and attempt_age < GROK_PLAN_TTL_SECONDS:
+        return False
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-quota.py")
+    if not os.path.isfile(helper):
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, helper, "--refresh-grok"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.expanduser("~"),
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def _read_grok_cache():
+    """The cached plan meter with every field checked; matches agent-quota.py.
+    A damaged cache hides the Grok segment but never breaks the line."""
+    try:
+        with open(_grok_plan_cache_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("version") != GROK_PLAN_CACHE_VERSION:
+        return None
+    plan = {}
+    for key in ("used_percent", "period_end", "cached_at"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value):
+            return None
+        plan[key] = float(value)
+    if plan["used_percent"] < 0:
+        return None
+    period_type = data.get("period_type")
+    plan["period_type"] = period_type if isinstance(period_type, str) else ""
+    tier = data.get("tier")
+    plan["tier"] = tier if isinstance(tier, str) and tier.isprintable() and tier else None
+    return plan
+
+
+def grok_segment(compact=False):
+    """The Grok plan meter in the agy segment's shape, or None when grok is
+    not installed, nothing usable is cached, or the cached period has ended."""
+    if _grok_binary() is None:
+        return None
+    data = _read_grok_cache()
+    if data is None or time.time() >= data["period_end"]:
+        return None
+    window = {CLAUDE_PCT_FIELD: data["used_percent"], "resets_at": data["period_end"]}
+    label = GROK_PERIOD_LABELS.get(data["period_type"], "")
+    formatter = fmt_window_compact if compact else fmt_window
+    shown = formatter(window, CLAUDE_PCT_FIELD)
+    age_seconds = max(0, int(time.time() - data["cached_at"]))
+    if compact:
+        return f"gk {label}{shown} @{fmt_age_compact(age_seconds)}"
+    shown_age = fmt_age(age_seconds)
+    tier = data["tier"]
+    head = f"Grok [{tier}]" if tier else "Grok"
+    period = f"{label} " if label else ""
+    return f"{head} · {period}{shown} · {shown_age}"
+
+
 def codex_is_main_meter(rate_limits):
     """True when a snapshot belongs to the account plan meter.
 
@@ -559,6 +677,11 @@ def main():
         return
     persist_claude(data)
     start_agy_refresh()
+    # Grok is optional: a fault in its part must not cost the other segments.
+    try:
+        start_grok_refresh()
+    except Exception:
+        pass
     line = claude_segment(data, compact=True)
     cx = codex_segment(compact=True)
     if cx:
@@ -566,6 +689,12 @@ def main():
     agy = agy_segment(compact=True)
     if agy:
         line += " | " + agy
+    try:
+        gk = grok_segment(compact=True)
+    except Exception:
+        gk = None
+    if gk:
+        line += " | " + gk
     sys.stdout.write(line + "\n")
 
 

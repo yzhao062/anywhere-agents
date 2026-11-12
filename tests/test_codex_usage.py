@@ -48,8 +48,11 @@ import io
 import json
 import os
 import pathlib
+import signal
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest import mock
@@ -867,7 +870,7 @@ class TestAgyQuota(unittest.TestCase):
         # helper exited 1 in the background and nothing said why.
         with tempfile.TemporaryDirectory() as tmp:
             cache, attempt, lock = self._paths(tmp)
-            with mock.patch.object(agent_quota, "AGY_QUOTA_CACHE", cache),                     mock.patch.object(agent_quota, "AGY_QUOTA_ATTEMPT", attempt),                     mock.patch.object(agent_quota, "AGY_QUOTA_LOCK", lock),                     mock.patch.object(agent_quota, "_agy_binary", return_value=None),                     mock.patch.object(agent_quota, "_start_agy_refresh") as start,                     mock.patch.object(agent_quota, "claude_row", return_value="Claude"),                     mock.patch.object(agent_quota, "codex_row", return_value="Codex"),                     mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]),                     mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            with mock.patch.object(agent_quota, "AGY_QUOTA_CACHE", cache),                     mock.patch.object(agent_quota, "AGY_QUOTA_ATTEMPT", attempt),                     mock.patch.object(agent_quota, "AGY_QUOTA_LOCK", lock),                     mock.patch.object(agent_quota, "_agy_binary", return_value=None),                     mock.patch.object(agent_quota, "_grok_binary", return_value=None),                     mock.patch.object(agent_quota, "_start_agy_refresh") as start,                     mock.patch.object(agent_quota, "claude_row", return_value="Claude"),                     mock.patch.object(agent_quota, "codex_row", return_value="Codex"),                     mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]),                     mock.patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(agent_quota.main(), 0)
         start.assert_not_called()
         self.assertIn("agy not installed", out.getvalue())
@@ -1014,6 +1017,7 @@ class TestAgyQuota(unittest.TestCase):
                     mock.patch.object(statusline, "AGY_QUOTA_CACHE", cache), \
                     mock.patch.object(statusline, "persist_claude"), \
                     mock.patch.object(statusline, "start_agy_refresh"), \
+                    mock.patch.object(statusline, "_grok_binary", return_value=None), \
                     mock.patch("sys.stdin", stdin), \
                     mock.patch("sys.stdout", out):
                 statusline.main()
@@ -1098,6 +1102,306 @@ class TestClaudeWindows(unittest.TestCase):
             self.assertEqual(compact, "cc —")
             self.assertEqual(full, "🤖 Opus 5.5 · —")
             self.assertIn("(no windows)", self._row(rate_limits))
+
+
+# A stand-in for `grok agent --no-leader stdio`: it speaks just enough ACP
+# (JSON-RPC over lines) for the billing probe and records how it was started.
+FAKE_GROK_ACP = textwrap.dedent(
+    """\
+    import json, os, signal, sys, time
+    log = os.environ.get("FAKE_GROK_LOG")
+    if log:
+        keys = [k for k in os.environ if k.startswith("GROK_")]
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(),
+                                "env": {k: os.environ[k] for k in keys}}) + "\\n")
+    mode = os.environ.get("FAKE_GROK_MODE", "ok")
+    if mode in ("orphan", "stubborn"):
+        # A child in the probe's process group that ignores SIGTERM. The
+        # disposition is set before the fork so the child has it at once.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        child = os.fork()
+        if child == 0:
+            time.sleep(60)
+            os._exit(0)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"child": child}) + "\\n")
+        # orphan: the leader exits at once and leaves the child behind.
+        # stubborn: the leader hangs and dies on SIGTERM; the child does not.
+        mode = "die" if mode == "orphan" else "hang"
+    if mode == "die":
+        sys.exit(3)
+    if mode == "hang":
+        time.sleep(60)
+    for line in sys.stdin:
+        request = json.loads(line)
+        method, rid = request.get("method"), request.get("id")
+        if method == "initialize":
+            reply = {"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1}}
+        elif method == "_x.ai/billing" and mode == "ok":
+            reply = {"jsonrpc": "2.0", "id": rid, "result": {
+                "config": {
+                    "creditUsagePercent": 2.0,
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": os.environ["FAKE_GROK_START"],
+                        "end": os.environ["FAKE_GROK_END"],
+                    },
+                },
+                "subscription_tier": "SuperGrok",
+            }}
+        elif method == "_x.ai/billing" and mode == "garbage":
+            reply = {"jsonrpc": "2.0", "id": rid,
+                     "result": {"config": {"creditUsagePercent": "lots"}}}
+        else:
+            reply = {"jsonrpc": "2.0", "id": rid,
+                     "error": {"code": -32601, "message": "Method not found"}}
+        sys.stdout.write("not json noise\\n")
+        # A request from the agent that reuses the caller's id: the probe
+        # must keep reading until the actual response arrives.
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid,
+                                     "method": "fake/request", "params": {}}) + "\\n")
+        sys.stdout.write(json.dumps(reply) + "\\n")
+        sys.stdout.flush()
+    """
+)
+
+
+def _iso(epoch):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+@unittest.skipIf(
+    os.name == "nt",
+    "Grok is not exercised on Windows yet: the fake grok is a POSIX script",
+)
+class TestGrokPlan(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="grok-plan-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.fake = self.tmp / "grok"
+        self.fake.write_text(f"#!{sys.executable}\n" + FAKE_GROK_ACP, encoding="utf-8")
+        self.fake.chmod(0o755)
+        self.cache = self.tmp / "grok-plan-cache.json"
+        self.log = self.tmp / "fake-grok.log"
+        now = time.time()
+        self.env = {
+            "GROK_BIN": str(self.fake),
+            "GROK_PLAN_CACHE": str(self.cache),
+            "FAKE_GROK_LOG": str(self.log),
+            "FAKE_GROK_MODE": "ok",
+            "FAKE_GROK_START": _iso(now - 86400),
+            "FAKE_GROK_END": _iso(now + 6 * 86400 + 3600),
+        }
+        patcher = mock.patch.dict(os.environ, self.env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launches(self):
+        if not self.log.is_file():
+            return []
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def test_a_refresh_caches_the_plan_meter_and_both_readouts_show_it(self):
+        self.assertEqual(agent_quota._refresh_grok_cache(force=True), 0)
+        cached = json.loads(self.cache.read_text(encoding="utf-8"))
+        self.assertEqual(cached["version"], 1)
+        self.assertEqual(cached["used_percent"], 2.0)
+        self.assertEqual(cached["period_type"], "USAGE_PERIOD_TYPE_WEEKLY")
+        self.assertEqual(cached["tier"], "SuperGrok")
+        self.assertGreater(cached["period_end"], time.time() + 6 * 86400)
+
+        launch = self._launches()[0]
+        self.assertEqual(launch["argv"], ["agent", "--no-leader", "stdio"])
+        for key, value in agent_quota.GROK_PROBE_ENV.items():
+            self.assertEqual(launch["env"].get(key), value)
+
+        segment = statusline.grok_segment(compact=True)
+        self.assertTrue(segment.startswith("gk 7d98% (6d"), segment)
+        self.assertTrue(segment.endswith("@now"), segment)
+        self.assertIn("Grok [SuperGrok] · 7d 98%", statusline.grok_segment(compact=False))
+        row = agent_quota.grok_row()
+        self.assertIn("SuperGrok", row)
+        self.assertIn("7d 98% left (resets 6d", row)
+        self.assertFalse(self.cache.with_name(self.cache.name + ".refresh.lock").exists())
+
+    def test_a_failed_probe_writes_nothing_and_never_shows_zero(self):
+        for mode in ("error", "garbage", "die"):
+            with self.subTest(mode=mode):
+                os.environ["FAKE_GROK_MODE"] = mode
+                self.assertEqual(agent_quota._refresh_grok_cache(force=True), 1)
+                self.assertFalse(self.cache.exists())
+                self.assertIsNone(statusline.grok_segment(compact=True))
+                self.assertEqual(agent_quota.grok_row(), "Grok     (plan usage unavailable)")
+
+    def test_a_hung_probe_is_killed_at_the_deadline_and_the_lock_released(self):
+        os.environ["FAKE_GROK_MODE"] = "hang"
+        with mock.patch.object(agent_quota, "GROK_PLAN_TIMEOUT_SECONDS", 1):
+            started = time.monotonic()
+            self.assertEqual(agent_quota._refresh_grok_cache(force=True), 1)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 6)
+        pid = self._launches()[0]["pid"]
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertFalse(self.cache.with_name(self.cache.name + ".refresh.lock").exists())
+        self.assertFalse(self.cache.exists())
+
+    @staticmethod
+    def _gone(pid, seconds=3):
+        """True once pid no longer exists; a killed orphan is reaped by init
+        shortly after it dies, so allow a moment for that."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_a_child_the_probe_leaves_is_stopped_even_if_it_ignores_sigterm(self):
+        for mode in ("orphan", "stubborn"):
+            with self.subTest(mode=mode):
+                if self.log.exists():
+                    self.log.unlink()
+                os.environ["FAKE_GROK_MODE"] = mode
+                with mock.patch.object(agent_quota, "GROK_PLAN_TIMEOUT_SECONDS", 1):
+                    started = time.monotonic()
+                    self.assertEqual(agent_quota._refresh_grok_cache(force=True), 1)
+                    elapsed = time.monotonic() - started
+                child = next(e["child"] for e in self._launches() if "child" in e)
+                try:
+                    self.assertLess(elapsed, 8)
+                    self.assertTrue(self._gone(child), f"child {child} survived")
+                finally:
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except OSError:
+                        pass
+
+    def test_a_damaged_cache_hides_grok_or_drops_the_bad_field(self):
+        now = time.time()
+        good = {
+            "version": 1, "source": "x.ai/billing", "cached_at": now,
+            "used_percent": 2.0, "period_end": now + 6 * 86400 + 3600,
+            "period_type": "USAGE_PERIOD_TYPE_WEEKLY", "tier": "SuperGrok",
+        }
+        for field, value in (
+            ("used_percent", -5),
+            ("used_percent", float("nan")),
+            ("period_end", float("inf")),
+            ("cached_at", "invalid"),
+            ("cached_at", None),
+        ):
+            with self.subTest(field=field, value=value):
+                self.cache.write_text(json.dumps(dict(good, **{field: value})), encoding="utf-8")
+                self.assertIsNone(statusline.grok_segment(compact=True))
+                self.assertIsNone(statusline.grok_segment(compact=False))
+                self.assertEqual(agent_quota.grok_row(), "Grok     (plan usage unavailable)")
+        for field, value in (
+            ("period_type", []),
+            ("tier", {}),
+            ("tier", "Super\nGrok"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.cache.write_text(json.dumps(dict(good, **{field: value})), encoding="utf-8")
+                shown = [
+                    statusline.grok_segment(compact=True),
+                    statusline.grok_segment(compact=False),
+                    agent_quota.grok_row(),
+                ]
+                self.assertTrue(shown[0].startswith("gk "), shown[0])
+                self.assertIn("98% left", shown[2])
+                for text in shown:
+                    self.assertNotIn("\n", text)
+
+    def test_a_fault_in_the_grok_segment_keeps_the_rest_of_the_line(self):
+        stdin = io.StringIO(json.dumps({
+            "model": {"display_name": "Opus 5 (1M context)"},
+            "rate_limits": {"five_hour": {"used_percentage": 18}},
+        }))
+        out = io.StringIO()
+        with mock.patch.object(statusline, "persist_claude"), \
+                mock.patch.object(statusline, "start_agy_refresh"), \
+                mock.patch.object(statusline, "start_grok_refresh", side_effect=RuntimeError), \
+                mock.patch.object(statusline, "codex_segment", return_value="gpt X"), \
+                mock.patch.object(statusline, "agy_segment", return_value="agy Y"), \
+                mock.patch.object(statusline, "grok_segment", side_effect=RuntimeError), \
+                mock.patch("sys.stdin", stdin), \
+                mock.patch("sys.stdout", out):
+            statusline.main()
+        line = out.getvalue()
+        self.assertTrue(line.startswith("cc "), line)
+        self.assertIn(" | gpt X | agy Y", line)
+        self.assertNotIn("gk", line)
+
+    def test_period_times_parse_with_any_number_of_fraction_digits(self):
+        # Python 3.9's fromisoformat takes only 3 or 6 fraction digits.
+        base = 1795039931
+        for text, expected in (
+            ("2026-11-18T22:12:11Z", base),
+            ("2026-11-18T22:12:11.8Z", base + 0.8),
+            ("2026-11-18T22:12:11.84Z", base + 0.84),
+            ("2026-11-18T22:12:11.846Z", base + 0.846),
+            ("2026-11-18T22:12:11.846123456Z", base + 0.846123),
+            ("2026-11-18T22:12:11.5+00:00", base + 0.5),
+        ):
+            with self.subTest(text=text):
+                self.assertAlmostEqual(agent_quota._iso_epoch(text), expected, places=5)
+        for text in ("", "soon", None, 5):
+            with self.subTest(text=text):
+                self.assertIsNone(agent_quota._iso_epoch(text))
+
+    def test_a_reading_from_an_ended_period_is_not_shown(self):
+        self.cache.write_text(json.dumps({
+            "version": 1, "source": "x.ai/billing", "cached_at": time.time(),
+            "used_percent": 2.0, "period_end": time.time() - 1,
+            "period_type": "USAGE_PERIOD_TYPE_WEEKLY", "tier": "SuperGrok",
+        }), encoding="utf-8")
+        self.assertIsNone(statusline.grok_segment(compact=True))
+        self.assertEqual(agent_quota.grok_row(), "Grok     (plan usage unavailable)")
+
+    def test_a_cache_of_another_shape_is_ignored(self):
+        for payload in (
+            {"version": 2, "used_percent": 2.0, "period_end": time.time() + 3600},
+            {"version": 1, "used_percent": "2", "period_end": time.time() + 3600},
+            {"cached_at": time.time(), "cost_usd": 5.2, "sessions": 5},
+        ):
+            with self.subTest(payload=payload):
+                self.cache.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(statusline.grok_segment(compact=True))
+
+    def test_a_failed_attempt_throttles_the_next_refresh(self):
+        os.environ["FAKE_GROK_MODE"] = "error"
+        self.assertEqual(agent_quota._refresh_grok_cache(force=True), 1)
+        self.assertEqual(agent_quota._refresh_grok_cache(), 0)
+        self.assertEqual(len(self._launches()), 1)
+        with mock.patch.object(statusline.subprocess, "Popen") as popen:
+            self.assertFalse(statusline.start_grok_refresh())
+        popen.assert_not_called()
+
+    def test_without_grok_installed_nothing_changes(self):
+        self.assertEqual(agent_quota._refresh_grok_cache(force=True), 0)
+        os.environ["GROK_BIN"] = str(self.tmp / "missing-grok")
+        os.unlink(self.cache.with_name(self.cache.name + ".last-attempt"))
+        self.cache.unlink()
+        with mock.patch.object(statusline.subprocess, "Popen") as popen:
+            self.assertFalse(statusline.start_grok_refresh())
+        popen.assert_not_called()
+        self.assertIsNone(statusline.grok_segment(compact=True))
+        with mock.patch.object(agent_quota, "_start_agy_refresh", return_value=False), \
+                mock.patch.object(agent_quota, "_start_grok_refresh") as start_grok, \
+                mock.patch.object(agent_quota, "claude_row", return_value="Claude"), \
+                mock.patch.object(agent_quota, "codex_row", return_value="Codex"), \
+                mock.patch.object(agent_quota, "agy_row", return_value="Agy"), \
+                mock.patch.object(agent_quota.sys, "argv", ["agent-quota.py"]), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(agent_quota.main(), 0)
+        start_grok.assert_not_called()
+        self.assertEqual(out.getvalue(), "Claude\nCodex\nAgy\n")
 
 
 if __name__ == "__main__":

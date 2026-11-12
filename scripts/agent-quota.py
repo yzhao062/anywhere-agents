@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-agent quota: show Claude + Codex + Agy 5h / 7d remaining.
+"""Cross-agent quota: show Claude + Codex + Agy (+ Grok) remaining.
 
 Runs in any terminal, in either agent's session. This is the symmetric,
 agent-independent view of usage that the Claude statusLine already shows
@@ -31,15 +31,28 @@ Data sources:
     CLI's zero-turn `agy -p "/usage" --output-format json` metadata query.
     A lock and attempt timestamp permit at most one bounded background
     refresh per cache interval, including after failures.
+  - Grok (only when grok is installed, on macOS and Linux):
+    ~/.claude/grok-plan-cache.json
+    (override via GROK_PLAN_CACHE), populated by `--refresh-grok`, which runs
+    `grok agent --no-leader stdio` and sends ACP `initialize` and the
+    `_x.ai/billing` extension request: the plan meter the TUI /usage panel
+    shows (credit usage percent and current period), with no session and no
+    model call. The same lock, attempt timestamp, and TTL as Agy apply, and a
+    reading whose period has ended is not shown.
 
 Each side is only as fresh as that agent's last activity; the age is shown
 in brackets so a stale snapshot is obvious.
 """
 import json
+import math
 import os
+import queue
+import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
@@ -75,6 +88,23 @@ def _positive_env(name, default):
 
 AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
 AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
+GROK_PLAN_TTL_SECONDS = _positive_env("GROK_PLAN_TTL_SECONDS", 300)
+GROK_PLAN_TIMEOUT_SECONDS = _positive_env("GROK_PLAN_TIMEOUT_SECONDS", 20)
+GROK_PLAN_CACHE_VERSION = 1
+# Grok's own switches: the billing probe imports nothing from the user's
+# Claude, Codex, or Cursor setup (agents, hooks, MCP servers, rules,
+# sessions, skills) and never updates the CLI.
+GROK_PROBE_ENV = {"GROK_DISABLE_AUTOUPDATER": "1"}
+GROK_PROBE_ENV.update(
+    (f"GROK_{source}_{kind}_ENABLED", "false")
+    for source in ("CLAUDE", "CODEX", "CURSOR")
+    for kind in ("AGENTS", "HOOKS", "MCPS", "RULES", "SESSIONS", "SKILLS")
+)
+GROK_PERIOD_LABELS = {
+    "USAGE_PERIOD_TYPE_DAILY": "1d",
+    "USAGE_PERIOD_TYPE_WEEKLY": "7d",
+    "USAGE_PERIOD_TYPE_MONTHLY": "mo",
+}
 
 
 def _path_age(path):
@@ -289,6 +319,317 @@ def _agy_window(bucket):
         except Exception:
             pass
     return window
+
+
+def _grok_plan_cache_path():
+    """Resolved when used, so a test or caller that redirects the home or sets
+    GROK_PLAN_CACHE never reads the real cache."""
+    return os.environ.get("GROK_PLAN_CACHE") or os.path.join(
+        os.path.expanduser("~"), ".claude", "grok-plan-cache.json"
+    )
+
+
+def _grok_binary():
+    """The grok executable, or None. A GROK_BIN that is set but not found ends
+    the lookup rather than falling back to PATH. The plan meter is POSIX-only
+    for now, because on Windows the probe could not stop grok's whole process
+    tree at its deadline; there it reports no binary."""
+    if os.name == "nt":
+        return None
+    configured = os.environ.get("GROK_BIN")
+    if configured:
+        direct = os.path.expandvars(os.path.expanduser(configured))
+        if os.path.isfile(direct):
+            return os.path.abspath(direct)
+        return shutil.which(configured)
+    found = shutil.which("grok")
+    if found:
+        return found
+    home = os.environ.get("GROK_HOME") or os.path.join(os.path.expanduser("~"), ".grok")
+    fallback = os.path.join(os.path.expanduser(home), "bin", "grok")
+    return fallback if os.path.isfile(fallback) else None
+
+
+def _iso_epoch(value):
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    # RFC 3339 allows any number of fraction digits, but Python 3.9's
+    # fromisoformat takes only 3 or 6, so pad or cut them to microseconds.
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+    try:
+        from datetime import datetime, timezone
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _grok_plan(result):
+    """The plan meter from an `_x.ai/billing` result, or None when it lacks a
+    usable percentage or period end. Without the end, a reading from a past
+    period could not be told apart from a current one."""
+    if not isinstance(result, dict):
+        return None
+    config = result.get("config")
+    if not isinstance(config, dict):
+        return None
+    used = config.get("creditUsagePercent")
+    if isinstance(used, bool) or not isinstance(used, (int, float)):
+        return None
+    if not math.isfinite(used) or used < 0:
+        return None
+    period = config.get("currentPeriod")
+    period = period if isinstance(period, dict) else {}
+    end = _iso_epoch(period.get("end") or config.get("billingPeriodEnd"))
+    if end is None:
+        return None
+    plan = {
+        "used_percent": float(used),
+        "period_end": end,
+        "period_type": str(period.get("type") or ""),
+    }
+    start = _iso_epoch(period.get("start") or config.get("billingPeriodStart"))
+    if start is not None:
+        plan["period_start"] = start
+    tier = result.get("subscription_tier")
+    if isinstance(tier, str) and tier:
+        plan["tier"] = tier
+    return plan
+
+
+def _grok_group_gone(proc, seconds):
+    """True once no process is left in the probe's process group. Each poll
+    reaps the leader, whose zombie would otherwise keep the group alive."""
+    end = time.monotonic() + seconds
+    while True:
+        proc.poll()
+        try:
+            os.killpg(proc.pid, 0)
+        except OSError:
+            # ESRCH: the group is empty. EPERM: what is left is not ours.
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def _stop_grok_probe(proc):
+    """Stop the probe and everything it started. The probe leads its own
+    process group, so the group is signalled whether or not the leader is
+    still running: a child left behind by an exited leader is stopped too,
+    and a member that ignores SIGTERM gets SIGKILL."""
+    try:
+        proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            break
+        if _grok_group_gone(proc, 2):
+            break
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _grok_billing(executable):
+    """Ask Grok's agent for the plan meter that the TUI /usage panel shows.
+
+    `grok agent --no-leader stdio` speaks ACP, JSON-RPC over lines. After
+    `initialize`, the `_x.ai/billing` extension request returns the plan's
+    credit usage and current period without opening a session or calling a
+    model. The whole exchange is bounded: at the deadline the process group
+    is killed. Returns the request's result object, or None.
+    """
+    env = dict(os.environ)
+    env.update(GROK_PROBE_ENV)
+    kwargs = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "cwd": os.path.expanduser("~"),
+        "env": env,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "start_new_session": True,
+    }
+    try:
+        proc = subprocess.Popen([executable, "agent", "--no-leader", "stdio"], **kwargs)
+    except OSError:
+        return None
+    lines = queue.Queue()
+
+    def _pump():
+        try:
+            for line in proc.stdout:
+                lines.put(line)
+        except (OSError, ValueError):
+            pass
+        lines.put(None)
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
+    deadline = time.monotonic() + GROK_PLAN_TIMEOUT_SECONDS
+
+    def _call(request_id, method, params):
+        proc.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": request_id, "method": method, "params": params,
+        }) + "\n")
+        proc.stdin.flush()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if line is None:
+                return None
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            # A request from the agent can reuse the same id; only a
+            # response, which has no method, answers this call.
+            if (
+                isinstance(message, dict)
+                and "method" not in message
+                and message.get("id") == request_id
+            ):
+                result = message.get("result")
+                return result if isinstance(result, dict) else None
+
+    try:
+        if _call(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {}}) is None:
+            return None
+        return _call(2, "_x.ai/billing", {})
+    except (OSError, ValueError):
+        return None
+    finally:
+        _stop_grok_probe(proc)
+        # Close the pipe only once the reader has seen EOF; closing it under
+        # a blocked read could wait on the reader's lock.
+        pump.join(timeout=1)
+        if not pump.is_alive():
+            try:
+                proc.stdout.close()
+            except (OSError, ValueError):
+                pass
+
+
+def _refresh_grok_cache(force=False):
+    """Refresh the Grok plan cache in a bounded helper process, with the same
+    snapshot TTL, attempt marker, and lock as the Agy refresh."""
+    cache = _grok_plan_cache_path()
+    attempt = cache + ".last-attempt"
+    lock = cache + ".refresh.lock"
+    if not force:
+        cache_age = _path_age(cache)
+        if cache_age is not None and cache_age < GROK_PLAN_TTL_SECONDS:
+            return 0
+        attempt_age = _path_age(attempt)
+        if attempt_age is not None and attempt_age < GROK_PLAN_TTL_SECONDS:
+            return 0
+
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    try:
+        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(lock_fd)
+    except FileExistsError:
+        lock_age = _path_age(lock)
+        if lock_age is None or lock_age < GROK_PLAN_TIMEOUT_SECONDS + 30:
+            return 0
+        try:
+            os.unlink(lock)
+        except OSError:
+            return 0
+        try:
+            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+        except OSError:
+            return 0
+    except OSError:
+        return 0
+
+    try:
+        _write_json_atomic(attempt, {"ts": time.time()})
+        executable = _grok_binary()
+        if not executable:
+            return 1
+        plan = _grok_plan(_grok_billing(executable))
+        if plan is None:
+            return 1
+        cached = {
+            "version": GROK_PLAN_CACHE_VERSION,
+            "source": "x.ai/billing",
+            "cached_at": time.time(),
+        }
+        cached.update(plan)
+        _write_json_atomic(cache, cached)
+        return 0
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+def _start_grok_refresh():
+    cache = _grok_plan_cache_path()
+    cache_age = _path_age(cache)
+    if cache_age is not None and cache_age < GROK_PLAN_TTL_SECONDS:
+        return False
+    attempt_age = _path_age(cache + ".last-attempt")
+    if attempt_age is not None and attempt_age < GROK_PLAN_TTL_SECONDS:
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--refresh-grok"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def _read_grok_cache():
+    """The cached plan meter with every field checked, or None when the cache
+    is absent, from another version, or holds no usable reading. Optional
+    fields of the wrong type are dropped, so a damaged cache can hide the
+    Grok row but never break the readout around it."""
+    try:
+        with open(_grok_plan_cache_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("version") != GROK_PLAN_CACHE_VERSION:
+        return None
+    plan = {}
+    for key in ("used_percent", "period_end", "cached_at"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value):
+            return None
+        plan[key] = float(value)
+    if plan["used_percent"] < 0:
+        return None
+    period_type = data.get("period_type")
+    plan["period_type"] = period_type if isinstance(period_type, str) else ""
+    tier = data.get("tier")
+    plan["tier"] = tier if isinstance(tier, str) and tier.isprintable() and tier else None
+    return plan
 
 
 def _fmt_age(secs):
@@ -648,17 +989,45 @@ def agy_row(refresh_started=False, installed=True):
     return "\n".join(rows) if rows else "Agy      (quota groups unavailable)"
 
 
+def grok_row(refresh_started=False):
+    """The plan meter the Grok TUI's /usage panel shows. A reading whose
+    period has ended is not shown: the new period's usage is unknown."""
+    data = _read_grok_cache()
+    if data is None or time.time() >= data["period_end"]:
+        state = "refresh started" if refresh_started else "plan usage unavailable"
+        return f"Grok     ({state})"
+    label = GROK_PERIOD_LABELS.get(data["period_type"], "")
+    window = {CLAUDE_PCT_FIELD: data["used_percent"], "resets_at": data["period_end"]}
+    shown = _fmt(window, CLAUDE_PCT_FIELD)
+    if label:
+        shown = f"{label} {shown}"
+    tier = data["tier"] or "plan"
+    return f"Grok     {tier:<12}  {shown:<23}  [{_age(data['cached_at'])}]"
+
+
 def main():
     if sys.argv[1:] in (["--refresh-agy"], ["--refresh-agy", "--force"]):
         return _refresh_agy_cache(force="--force" in sys.argv[1:])
+    if sys.argv[1:] in (["--refresh-grok"], ["--refresh-grok", "--force"]):
+        return _refresh_grok_cache(force="--force" in sys.argv[1:])
     installed = _agy_binary() is not None
     # Without a binary the helper would only exit 1 in the background, so the
     # plain readout names the missing install instead of a refresh that
     # never lands.
     refresh_started = _start_agy_refresh() if installed else False
+    # Grok is optional: without it installed, the readout is what it was
+    # before Grok existed here.
+    grok_installed = _grok_binary() is not None
+    grok_started = _start_grok_refresh() if grok_installed else False
     print(claude_row())
     print(codex_row())
     print(agy_row(refresh_started, installed=installed))
+    if grok_installed:
+        try:
+            row = grok_row(grok_started)
+        except Exception:
+            row = "Grok     (plan usage unavailable)"
+        print(row)
     return 0
 
 
