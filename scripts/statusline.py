@@ -45,16 +45,9 @@ Agy data comes from ~/.claude/agy-quota-cache.json. When it is stale, the
 status line starts the sibling agent-quota.py in a hidden helper process.
 That helper performs one lock-protected, bounded, zero-turn `/usage` query;
 the current render never waits on the network.
-
-Grok data comes from ~/.claude/grok-usage-cache.json (override via
-GROK_USAGE_CACHE), resolved when used. When grok is installed and the cache
-is older than 300 s, the status line starts agent-quota.py --refresh-grok in
-a detached helper process. The compact segment appears only when grok is
-installed and the cache holds valid data.
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -79,9 +72,6 @@ AGY_QUOTA_CACHE = os.environ.get("AGY_QUOTA_CACHE") or os.path.join(
     os.path.expanduser("~"), ".claude", "agy-quota-cache.json"
 )
 AGY_QUOTA_ATTEMPT = AGY_QUOTA_CACHE + ".last-attempt"
-GROK_USAGE_CACHE = None
-GROK_USAGE_ATTEMPT = None
-GROK_USD_TICKS = 10_000_000_000
 
 
 def _positive_env(name, default):
@@ -94,7 +84,6 @@ def _positive_env(name, default):
 
 AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
 AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
-GROK_USAGE_TTL_SECONDS = _positive_env("GROK_USAGE_TTL_SECONDS", 300)
 
 
 def fmt_window(window, pct_field):
@@ -378,140 +367,6 @@ def agy_segment(compact=False):
     return f"{head} · 5h {five} · 7d {week} · {shown_age}"
 
 
-def _grok_home():
-    configured = os.environ.get("GROK_HOME")
-    if configured:
-        return os.path.expandvars(os.path.expanduser(configured))
-    return os.path.join(os.path.expanduser("~"), ".grok")
-
-
-def _grok_cache_path():
-    if GROK_USAGE_CACHE:
-        return GROK_USAGE_CACHE
-    configured = os.environ.get("GROK_USAGE_CACHE")
-    if configured:
-        return os.path.expandvars(os.path.expanduser(configured))
-    return os.path.join(
-        os.path.expanduser("~"), ".claude", "grok-usage-cache.json"
-    )
-
-
-def _grok_attempt_path():
-    return GROK_USAGE_ATTEMPT or (_grok_cache_path() + ".last-attempt")
-
-
-def _grok_binary():
-    configured = os.environ.get("GROK_BIN") or "grok"
-    direct = os.path.expandvars(os.path.expanduser(configured))
-    if os.path.isfile(direct):
-        return os.path.abspath(direct)
-    found = shutil.which(configured)
-    if found:
-        return found
-    if configured.lower() in {"grok", "grok.exe"}:
-        names = ("grok.exe", "grok") if os.name == "nt" else ("grok",)
-        for name in names:
-            fallback = os.path.join(_grok_home(), "bin", name)
-            if os.path.isfile(fallback):
-                return fallback
-    return None
-
-
-def start_grok_refresh():
-    """Start a bounded Grok usage refresh when grok is installed and the cache is stale."""
-    if _grok_binary() is None:
-        return False
-    cache_age = _path_age(_grok_cache_path())
-    if cache_age is not None and cache_age < GROK_USAGE_TTL_SECONDS:
-        return False
-    attempt_age = _path_age(_grok_attempt_path())
-    if attempt_age is not None and attempt_age < GROK_USAGE_TTL_SECONDS:
-        return False
-    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-quota.py")
-    if not os.path.isfile(helper):
-        return False
-    kwargs = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "cwd": os.path.expanduser("~"),
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        kwargs["start_new_session"] = True
-    try:
-        subprocess.Popen([sys.executable, helper, "--refresh-grok"], **kwargs)
-        return True
-    except OSError:
-        return False
-
-
-def _read_grok_cache():
-    try:
-        with open(_grok_cache_path(), encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    sessions = data.get("sessions")
-    if isinstance(sessions, bool) or not isinstance(sessions, int) or sessions < 0:
-        return None
-    if "cost_usd" in data:
-        raw_cost = data.get("cost_usd")
-        if isinstance(raw_cost, bool):
-            return None
-        try:
-            cost_usd = float(raw_cost)
-        except (TypeError, ValueError):
-            return None
-    elif "cost_usd_ticks" in data:
-        raw_ticks = data.get("cost_usd_ticks")
-        if isinstance(raw_ticks, bool):
-            return None
-        try:
-            cost_usd = float(raw_ticks) / GROK_USD_TICKS
-        except (TypeError, ValueError):
-            return None
-    else:
-        return None
-    if cost_usd != cost_usd or cost_usd in (float("inf"), float("-inf")) or cost_usd < 0:
-        return None
-    return {
-        "cached_at": data.get("cached_at"),
-        "cost_usd": cost_usd,
-        "sessions": sessions,
-        "partial": bool(data.get("partial", False)),
-    }
-
-
-def grok_segment(compact=True):
-    if _grok_binary() is None:
-        return None
-    data = _read_grok_cache()
-    if data is None:
-        return None
-    cost = data["cost_usd"]
-    if compact:
-        return f"gk ${cost:.1f}/7d"
-    sessions = data["sessions"]
-    note = (
-        f"{sessions} sessions, partial"
-        if data.get("partial")
-        else f"{sessions} sessions"
-    )
-    age = data.get("cached_at")
-    shown_age = "age ?"
-    if age not in (None, ""):
-        try:
-            age_seconds = max(0, int(time.time() - float(age)))
-            shown_age = fmt_age(age_seconds)
-        except (TypeError, ValueError):
-            pass
-    return f"Grok · 7d ${cost:.2f} local list-price usage ({note}) · {shown_age}"
-
-
 def codex_is_main_meter(rate_limits):
     """True when a snapshot belongs to the account plan meter.
 
@@ -704,7 +559,6 @@ def main():
         return
     persist_claude(data)
     start_agy_refresh()
-    start_grok_refresh()
     line = claude_segment(data, compact=True)
     cx = codex_segment(compact=True)
     if cx:
@@ -712,9 +566,6 @@ def main():
     agy = agy_segment(compact=True)
     if agy:
         line += " | " + agy
-    gk = grok_segment(compact=True)
-    if gk:
-        line += " | " + gk
     sys.stdout.write(line + "\n")
 
 

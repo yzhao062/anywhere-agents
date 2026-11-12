@@ -31,11 +31,6 @@ Data sources:
     CLI's zero-turn `agy -p "/usage" --output-format json` metadata query.
     A lock and attempt timestamp permit at most one bounded background
     refresh per cache interval, including after failures.
-  - Grok: ~/.claude/grok-usage-cache.json (override via GROK_USAGE_CACHE),
-    populated by `--refresh-grok` from ~/.grok/sessions/*/*/usage.json
-    (override via GROK_HOME). Sums turns[].costUsdTicks (1e10 ticks per USD)
-    over turns whose endedAt falls in the last 7 days, using file mtime only
-    to skip files older than 7 days.
 
 Each side is only as fresh as that agent's last activity; the age is shown
 in brackets so a stale snapshot is obvious.
@@ -43,10 +38,8 @@ in brackets so a stale snapshot is obvious.
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
-import threading
 import time
 
 CLAUDE_PCT_FIELD = "used_percentage"
@@ -70,11 +63,6 @@ AGY_QUOTA_CACHE = os.environ.get("AGY_QUOTA_CACHE") or os.path.join(
 )
 AGY_QUOTA_ATTEMPT = AGY_QUOTA_CACHE + ".last-attempt"
 AGY_QUOTA_LOCK = AGY_QUOTA_CACHE + ".refresh.lock"
-GROK_USAGE_CACHE = None
-GROK_USAGE_ATTEMPT = None
-GROK_USAGE_LOCK = None
-GROK_WINDOW_SECONDS = 7 * 86400
-GROK_USD_TICKS = 10_000_000_000
 
 
 def _positive_env(name, default):
@@ -87,8 +75,6 @@ def _positive_env(name, default):
 
 AGY_QUOTA_TTL_SECONDS = _positive_env("AGY_QUOTA_TTL_SECONDS", 300)
 AGY_QUOTA_TIMEOUT_SECONDS = _positive_env("AGY_QUOTA_TIMEOUT_SECONDS", 30)
-GROK_USAGE_TTL_SECONDS = _positive_env("GROK_USAGE_TTL_SECONDS", 300)
-GROK_USAGE_TIMEOUT_SECONDS = _positive_env("GROK_USAGE_TIMEOUT_SECONDS", 30)
 
 
 def _path_age(path):
@@ -303,304 +289,6 @@ def _agy_window(bucket):
         except Exception:
             pass
     return window
-
-
-def _grok_home():
-    configured = os.environ.get("GROK_HOME")
-    if configured:
-        return os.path.expandvars(os.path.expanduser(configured))
-    return os.path.join(os.path.expanduser("~"), ".grok")
-
-
-def _grok_cache_path():
-    if GROK_USAGE_CACHE:
-        return GROK_USAGE_CACHE
-    configured = os.environ.get("GROK_USAGE_CACHE")
-    if configured:
-        return os.path.expandvars(os.path.expanduser(configured))
-    return os.path.join(
-        os.path.expanduser("~"), ".claude", "grok-usage-cache.json"
-    )
-
-
-def _grok_attempt_path():
-    return GROK_USAGE_ATTEMPT or (_grok_cache_path() + ".last-attempt")
-
-
-def _grok_lock_path():
-    return GROK_USAGE_LOCK or (_grok_cache_path() + ".refresh.lock")
-
-
-def _grok_binary():
-    configured = os.environ.get("GROK_BIN") or "grok"
-    direct = os.path.expandvars(os.path.expanduser(configured))
-    if os.path.isfile(direct):
-        return os.path.abspath(direct)
-    found = shutil.which(configured)
-    if found:
-        return found
-    if configured.lower() in {"grok", "grok.exe"}:
-        names = ("grok.exe", "grok") if os.name == "nt" else ("grok",)
-        for name in names:
-            fallback = os.path.join(_grok_home(), "bin", name)
-            if os.path.isfile(fallback):
-                return fallback
-    return None
-
-
-def _turn_cost_ticks(turn):
-    flag_partial = bool(
-        turn.get("partial")
-        or turn.get("costIsPartial")
-        or turn.get("cost_is_partial")
-    )
-    ticks = turn.get("costUsdTicks")
-    if ticks is None or isinstance(ticks, bool):
-        return 0, True
-    if isinstance(ticks, int):
-        if ticks < 0:
-            return 0, True
-        return ticks, flag_partial
-    try:
-        val = float(ticks)
-    except (TypeError, ValueError):
-        return 0, True
-    if val != val or val in (float("inf"), float("-inf")) or val < 0:
-        return 0, True
-    return int(round(val)), flag_partial
-
-
-def _scan_grok_usage(now=None, deadline=None):
-    """Sum turns[].costUsdTicks over turns whose endedAt falls in the last
-    7 days across <GROK_HOME>/sessions/*/*/usage.json.
-
-    File mtime is used only to skip files older than 7 days; session totals
-    are never added so a resumed session counts only its recent turns.
-    """
-    if now is None:
-        now = time.time()
-    cutoff = now - GROK_WINDOW_SECONDS
-    root = os.path.join(_grok_home(), "sessions")
-    total_ticks = 0
-    sessions = 0
-    partial = False
-
-    try:
-        with os.scandir(root) as outer_listing:
-            outer_entries = list(outer_listing)
-    except FileNotFoundError:
-        outer_entries = []
-    except OSError:
-        return None
-
-    for outer in outer_entries:
-        if deadline is not None and time.monotonic() > deadline:
-            return None
-        try:
-            if not outer.is_dir(follow_symlinks=False):
-                continue
-            with os.scandir(outer.path) as inner_listing:
-                inner_entries = list(inner_listing)
-        except OSError:
-            continue
-        for inner in inner_entries:
-            if deadline is not None and time.monotonic() > deadline:
-                return None
-            try:
-                if not inner.is_dir(follow_symlinks=False):
-                    continue
-                usage_path = os.path.join(inner.path, "usage.json")
-                st = os.stat(usage_path, follow_symlinks=False)
-            except OSError:
-                continue
-            if st.st_mtime < cutoff:
-                continue
-            # Only a regular file is read: a FIFO or device named usage.json
-            # would block the open past any deadline check.
-            if not stat.S_ISREG(st.st_mode):
-                continue
-            try:
-                with open(usage_path, encoding="utf-8") as f:
-                    payload = json.load(f)
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            turns = payload.get("turns")
-            if not isinstance(turns, list):
-                continue
-            counted_in_session = False
-            for turn in turns:
-                if not isinstance(turn, dict):
-                    continue
-                ended = _epoch(turn.get("endedAt"))
-                if ended is None or ended < cutoff:
-                    continue
-                counted_in_session = True
-                ticks, turn_partial = _turn_cost_ticks(turn)
-                total_ticks += ticks
-                if turn_partial:
-                    partial = True
-            if counted_in_session:
-                sessions += 1
-
-    return {
-        "cached_at": now,
-        "cost_usd": total_ticks / GROK_USD_TICKS,
-        "cost_usd_ticks": total_ticks,
-        "sessions": sessions,
-        "partial": partial,
-    }
-
-
-def _arm_grok_watchdog(lock_path, seconds):
-    """End this helper process after `seconds`, whatever it is blocked on.
-
-    The deadline checks inside the scan run only between directory entries,
-    so a stuck open or read could outlive them. The watchdog thread removes
-    the lock it holds and exits the process with 124, which bounds the
-    helper's lifetime and lets the next refresh start cleanly. Setting the
-    returned event cancels it; the refresh does so when it finishes.
-    """
-    done = threading.Event()
-
-    def _expire():
-        if done.wait(seconds):
-            return
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            pass
-        os._exit(124)
-
-    threading.Thread(target=_expire, name="grok-refresh-watchdog", daemon=True).start()
-    return done
-
-
-def _refresh_grok_cache(force=False, hard_timeout=False):
-    """Refresh the Grok usage cache synchronously in a bounded helper process.
-
-    `hard_timeout` arms a process-ending watchdog; only the detached
-    `--refresh-grok` helper sets it, never an in-process caller.
-    """
-    cache_path = _grok_cache_path()
-    attempt_path = _grok_attempt_path()
-    lock_path = _grok_lock_path()
-    if not force:
-        cache_age = _path_age(cache_path)
-        if cache_age is not None and cache_age < GROK_USAGE_TTL_SECONDS:
-            return 0
-        attempt_age = _path_age(attempt_path)
-        if attempt_age is not None and attempt_age < GROK_USAGE_TTL_SECONDS:
-            return 0
-
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(lock_fd)
-    except FileExistsError:
-        lock_age = _path_age(lock_path)
-        if lock_age is None or lock_age < GROK_USAGE_TIMEOUT_SECONDS + 30:
-            return 0
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            return 0
-        try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(lock_fd)
-        except OSError:
-            return 0
-    except OSError:
-        return 0
-
-    watchdog = None
-    if hard_timeout:
-        watchdog = _arm_grok_watchdog(lock_path, GROK_USAGE_TIMEOUT_SECONDS + 5)
-    try:
-        _write_json_atomic(attempt_path, {"ts": time.time()})
-        if not _grok_binary():
-            return 1
-        deadline = time.monotonic() + GROK_USAGE_TIMEOUT_SECONDS
-        cached = _scan_grok_usage(deadline=deadline)
-        if cached is None:
-            return 1
-        _write_json_atomic(cache_path, cached)
-        return 0
-    finally:
-        if watchdog is not None:
-            watchdog.set()
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            pass
-
-
-def _start_grok_refresh():
-    if _grok_binary() is None:
-        return False
-    cache_age = _path_age(_grok_cache_path())
-    if cache_age is not None and cache_age < GROK_USAGE_TTL_SECONDS:
-        return False
-    attempt_age = _path_age(_grok_attempt_path())
-    if attempt_age is not None and attempt_age < GROK_USAGE_TTL_SECONDS:
-        return False
-    kwargs = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        kwargs["start_new_session"] = True
-    try:
-        subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "--refresh-grok"],
-            **kwargs,
-        )
-        return True
-    except OSError:
-        return False
-
-
-def _read_grok_cache():
-    try:
-        with open(_grok_cache_path(), encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    sessions = data.get("sessions")
-    if isinstance(sessions, bool) or not isinstance(sessions, int) or sessions < 0:
-        return None
-    if "cost_usd" in data:
-        raw_cost = data.get("cost_usd")
-        if isinstance(raw_cost, bool):
-            return None
-        try:
-            cost_usd = float(raw_cost)
-        except (TypeError, ValueError):
-            return None
-    elif "cost_usd_ticks" in data:
-        raw_ticks = data.get("cost_usd_ticks")
-        if isinstance(raw_ticks, bool):
-            return None
-        try:
-            cost_usd = float(raw_ticks) / GROK_USD_TICKS
-        except (TypeError, ValueError):
-            return None
-    else:
-        return None
-    if cost_usd != cost_usd or cost_usd in (float("inf"), float("-inf")) or cost_usd < 0:
-        return None
-    return {
-        "cached_at": data.get("cached_at"),
-        "cost_usd": cost_usd,
-        "sessions": sessions,
-        "partial": bool(data.get("partial", False)),
-    }
 
 
 def _fmt_age(secs):
@@ -960,43 +648,17 @@ def agy_row(refresh_started=False, installed=True):
     return "\n".join(rows) if rows else "Agy      (quota groups unavailable)"
 
 
-def grok_row():
-    if _grok_binary() is None:
-        return None
-    data = _read_grok_cache()
-    if data is None:
-        return None
-    cost = data["cost_usd"]
-    sessions = data["sessions"]
-    note = (
-        f"{sessions} sessions, partial"
-        if data.get("partial")
-        else f"{sessions} sessions"
-    )
-    return (
-        f"Grok     7d ${cost:.2f} local list-price usage ({note})  "
-        f"[{_age(data.get('cached_at'))}]"
-    )
-
-
 def main():
     if sys.argv[1:] in (["--refresh-agy"], ["--refresh-agy", "--force"]):
         return _refresh_agy_cache(force="--force" in sys.argv[1:])
-    if sys.argv[1:] in (["--refresh-grok"], ["--refresh-grok", "--force"]):
-        return _refresh_grok_cache(force="--force" in sys.argv[1:], hard_timeout=True)
     installed = _agy_binary() is not None
     # Without a binary the helper would only exit 1 in the background, so the
     # plain readout names the missing install instead of a refresh that
     # never lands.
     refresh_started = _start_agy_refresh() if installed else False
-    if _grok_binary() is not None:
-        _start_grok_refresh()
     print(claude_row())
     print(codex_row())
     print(agy_row(refresh_started, installed=installed))
-    gk = grok_row()
-    if gk:
-        print(gk)
     return 0
 
 
