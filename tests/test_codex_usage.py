@@ -3,9 +3,8 @@
 
 Covers two schema changes. After OpenAI removed the fixed 5h window on
 2026-07-12, the rollout `payload.rate_limits` reports `primary` as the
-weekly window (window_minutes 10080) with `secondary` null and a `credits`
-block. Both scripts derive the window label from window_minutes and gate
-credits null-safely.
+weekly window (window_minutes 10080) with `secondary` null. Both scripts
+derive the window label from window_minutes.
 
 The later change tags each snapshot with `limit_id` / `limit_name`. A
 session running a per-model bucket writes that bucket instead of the
@@ -244,18 +243,17 @@ class TestWindowLabel(unittest.TestCase):
 
 class TestRender(unittest.TestCase):
     def test_weekly_only(self):
-        # Current shape: primary is weekly, secondary null, zero credits.
+        # Current shape: primary is weekly, secondary null, and a credits
+        # block that neither script displays.
         seg, row = _render({
             "primary": _window(13, 10080),
             "secondary": None,
-            "credits": {"has_credits": False, "balance": "0"},
+            "credits": {"has_credits": True, "balance": "62500.0000000000"},
         })
         self.assertIn("7d 87%", seg)      # 100 - 13
         self.assertNotIn("5h", seg)       # not mislabeled
-        self.assertNotIn("cr", seg)       # zero balance, credits off -> hidden
         self.assertIn("7d 87%", row)
         self.assertNotIn("5h", row)
-        self.assertNotIn("credits", row)
 
     def test_dual_window_when_5h_restored(self):
         seg, row = _render({
@@ -268,85 +266,12 @@ class TestRender(unittest.TestCase):
         self.assertIn("5h 50%", row)
         self.assertIn("7d 80%", row)
 
-    def test_credits_nonzero_shown(self):
-        seg, row = _render({
-            "primary": _window(0, 10080),
-            "credits": {"has_credits": True, "balance": "42"},
-        })
-        self.assertIn("cr 42", seg)
-        self.assertIn("credits 42", row)
-
-    def test_has_credits_null_balance_is_null_safe(self):
-        # The Medium finding: has_credits opens the branch, but balance may
-        # be absent. Must render the tag alone, never "cr None"/"credits None".
-        seg, row = _render({
-            "primary": _window(0, 10080),
-            "credits": {"has_credits": True, "balance": None},
-        })
-        self.assertNotIn("None", seg)
-        self.assertNotIn("None", row)
-        # The tag stands alone as its own segment. It no longer ends the
-        # string: this rollout carries no timestamp, so the age qualifier
-        # trails it.
-        self.assertIn("cr", seg.split(" · "), seg)
-        self.assertIn("credits", row)
-
-    def test_decimal_balance_is_rounded(self):
-        # Codex reports the balance as a ten-place decimal string.
-        seg, row = _render({
-            "primary": _window(0, 10080),
-            "credits": {"has_credits": True, "balance": "62500.0000000000"},
-        })
-        self.assertIn("cr 62,500", seg)
-        self.assertIn("credits 62,500", row)
-        self.assertNotIn("0000", seg)
-        self.assertNotIn("0000", row)
-
-    def test_decimal_zero_balance_hidden(self):
-        # "0.0000000000" is zero; it must not pass as nonzero against "0".
-        seg, row = _render({
-            "primary": _window(13, 10080),
-            "credits": {"has_credits": False, "balance": "0.0000000000"},
-        })
-        self.assertNotIn("cr", seg)
-        self.assertNotIn("credits", row)
-
-    def test_no_windows_no_credits(self):
+    def test_no_windows(self):
         # rate_limits present but empty -> no broken row.
         seg, row = _render({"primary": None, "secondary": None,
                             "credits": {"has_credits": False, "balance": "0"}})
         self.assertIsNone(seg)
         self.assertIn("(no windows)", row)
-
-
-class TestFmtCredits(unittest.TestCase):
-    def test_compact_statusline(self):
-        fn = statusline.fmt_credits
-        self.assertEqual(fn("62500.0000000000", compact=True), "62.5k")
-        self.assertEqual(fn("1000", compact=True), "1k")
-        self.assertEqual(fn("1500000", compact=True), "1.5M")
-        self.assertEqual(fn("42.5000000000", compact=True), "42.5")
-        self.assertEqual(fn("42", compact=True), "42")
-
-    def test_full_row(self):
-        for fn in (statusline.fmt_credits, agent_quota._fmt_credits):
-            self.assertEqual(fn("62500.0000000000"), "62,500")
-            self.assertEqual(fn("1234.5600000000"), "1,234.56")
-            self.assertEqual(fn("42"), "42")
-
-    def test_unparseable_shown_as_given(self):
-        for fn in (statusline.fmt_credits, agent_quota._fmt_credits):
-            self.assertEqual(fn("unlimited"), "unlimited")
-            self.assertEqual(fn("nan"), "nan")
-
-    def test_nonzero(self):
-        for fn in (statusline.credits_nonzero, agent_quota._credits_nonzero):
-            self.assertFalse(fn(None))
-            self.assertFalse(fn(""))
-            self.assertFalse(fn("0"))
-            self.assertFalse(fn("0.0000000000"))
-            self.assertTrue(fn("62500.0000000000"))
-            self.assertTrue(fn("unlimited"))
 
 
 class TestMeterLabel(unittest.TestCase):

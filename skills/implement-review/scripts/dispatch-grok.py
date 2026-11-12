@@ -7,7 +7,6 @@ executes in or mutates the caller's working tree or Git index. Enforces:
 - Orchestrator self-review refusal (IMPLEMENT_REVIEW_ORCHESTRATOR=grok exits 2)
 - Registry model and effort resolution via scripts/agent_models.py
 - Preflight binary and login checks without spending quota
-- Rolling 7-day machine spend guard (GROK_WEEKLY_BUDGET_USD, exits 75)
 - Staged-snapshot isolation and supplied-input injection (AGENTS.md and
   AGENTS.local.md)
 - Live NDJSON streaming to <state-dir>/tail with tool_call narration reset
@@ -17,7 +16,6 @@ executes in or mutates the caller's working tree or Git index. Enforces:
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import importlib.util
 import io
@@ -29,7 +27,6 @@ import queue
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -40,7 +37,6 @@ from typing import Any, Callable, Optional
 
 EXIT_USAGE = 2
 EXIT_RUNTIME = 70
-EXIT_BUDGET = 75
 EXIT_NOT_FOUND = 127
 
 DEFAULT_TIMEOUT_SECONDS = 2700.0
@@ -247,123 +243,6 @@ def check_grok_login() -> tuple[bool, str]:
         False,
         f"Grok credentials not found at {default_auth}; run `grok login` or set XAI_API_KEY.",
     )
-
-
-def parse_iso8601_epoch(value: Any) -> Optional[float]:
-    """Parse an ISO-8601 timestamp string into POSIX epoch seconds (Python 3.9+)."""
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
-    # Python 3.9 datetime.fromisoformat supports 3 or 6 fractional digits only.
-    match = re.match(
-        r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.(\d+))?([+-]\d{2}:?\d{2})?$",
-        text,
-    )
-    if match:
-        head, frac, tz = match.groups()
-        if frac:
-            frac = (frac + "000000")[:6]
-            text = f"{head}.{frac}{tz or ''}"
-        else:
-            text = f"{head}{tz or ''}"
-    try:
-        dt = datetime.datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-    return dt.timestamp()
-
-
-def compute_weekly_spend_usd(
-    grok_home: Optional[Path] = None,
-    now_epoch: Optional[float] = None,
-) -> float:
-    """Sum turns[].costUsdTicks / 1e10 over the last 7 days across usage.json files."""
-    if now_epoch is None:
-        env_now = os.environ.get("GROK_DISPATCH_NOW_EPOCH", "").strip()
-        if env_now:
-            try:
-                now_epoch = float(env_now)
-            except ValueError:
-                now_epoch = time.time()
-        else:
-            now_epoch = time.time()
-
-    cutoff = now_epoch - (7 * 86400.0)
-    home = grok_home if grok_home is not None else grok_home_dir()
-    sessions_root = home / "sessions"
-    if not sessions_root.is_dir():
-        return 0.0
-
-    total_ticks = 0.0
-    for usage_path in sessions_root.glob("*/*/usage.json"):
-        try:
-            st = usage_path.stat()
-        except OSError:
-            continue
-        # A FIFO or device named usage.json would block the read; skip it.
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        # File mtime is used strictly as a skip filter for files untouched in 7 days.
-        if st.st_mtime < cutoff:
-            continue
-        try:
-            data = json.loads(usage_path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        turns = data.get("turns")
-        if not isinstance(turns, list):
-            continue
-        for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            ended_epoch = parse_iso8601_epoch(turn.get("endedAt"))
-            if ended_epoch is None or ended_epoch < cutoff:
-                continue
-            ticks = turn.get("costUsdTicks")
-            if (
-                isinstance(ticks, (int, float))
-                and not isinstance(ticks, bool)
-                and math.isfinite(ticks)
-                and ticks > 0
-            ):
-                total_ticks += float(ticks)
-    return total_ticks / 1e10
-
-
-def check_weekly_budget(
-    grok_home: Optional[Path] = None,
-    now_epoch: Optional[float] = None,
-) -> Optional[str]:
-    """Return a refusal message when GROK_WEEKLY_BUDGET_USD is reached, else None."""
-    raw_budget = os.environ.get("GROK_WEEKLY_BUDGET_USD", "").strip()
-    if not raw_budget:
-        return None
-    # A cap someone set but mistyped must not turn into no cap at all.
-    try:
-        budget = float(raw_budget)
-    except ValueError:
-        budget = float("nan")
-    if not math.isfinite(budget) or budget < 0:
-        return (
-            f"GROK_WEEKLY_BUDGET_USD={raw_budget!r} is not a non-negative number; "
-            "refusing to dispatch until it is fixed or unset."
-        )
-
-    spend = compute_weekly_spend_usd(grok_home=grok_home, now_epoch=now_epoch)
-    if spend >= budget:
-        return (
-            f"Grok 7-day spend ${spend:.4f} has reached "
-            f"GROK_WEEKLY_BUDGET_USD=${budget:.4f}; refusing to dispatch."
-        )
-    return None
 
 
 def staged_paths_edited_since(cwd: Path) -> Optional[list[str]]:
@@ -1200,11 +1079,6 @@ def main(argv: list[str]) -> int:
     if not logged_in:
         sys.stderr.write(f"dispatch-grok.py: {login_detail}\n")
         return EXIT_RUNTIME
-
-    budget_refusal = check_weekly_budget()
-    if budget_refusal is not None:
-        sys.stderr.write(f"dispatch-grok.py: {budget_refusal}\n")
-        return EXIT_BUDGET
 
     raw_timeout = os.environ.get("GROK_DISPATCH_TIMEOUT_SECONDS", "").strip()
     timeout_seconds = DEFAULT_TIMEOUT_SECONDS

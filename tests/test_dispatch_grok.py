@@ -19,7 +19,6 @@ Covers:
   - Supplied-input selection for tracked AGENTS.local.md, untracked
     AGENTS.local.md, and consumer repo with gitignored/untracked AGENTS.md
   - Caller worktree and Git index unchanged after dispatch
-  - Rolling 7-day budget guard refusal (GROK_WEEKLY_BUDGET_USD, exit 75)
   - Missing families.grok registry row (exit 70) and env overrides
   - Orchestrator self-review guard (IMPLEMENT_REVIEW_ORCHESTRATOR=grok, exit 2)
   - Preflight binary (exit 127) and login (exit 70, grok login) checks
@@ -27,7 +26,6 @@ Covers:
 
 from __future__ import annotations
 
-import datetime
 import importlib.util
 import json
 import os
@@ -414,8 +412,6 @@ class DispatchGrokHarness(unittest.TestCase):
             "GROK_DISPATCH_TIMEOUT_SECONDS",
             "GROK_DISPATCH_KILL_GRACE_SECONDS",
             "GROK_DISPATCH_CLOCK_STEP_SECONDS",
-            "GROK_DISPATCH_NOW_EPOCH",
-            "GROK_WEEKLY_BUDGET_USD",
             "GROK_AUTH_PATH",
             "XAI_API_KEY",
             "AGENT_MODELS_REGISTRY",
@@ -777,97 +773,7 @@ class TestDispatchGrokSnapshotAndSuppliedInputs(DispatchGrokHarness):
         self.assertNotIn("--- SUPPLIED INPUT: AGENTS.local.md ---", relay)
 
 
-class TestDispatchGrokBudgetRegistryAndGuards(DispatchGrokHarness):
-    def test_weekly_budget_guard_refuses_when_7d_spend_reaches_cap(self) -> None:
-        now = 1_760_000_000.0
-        recent_iso = (
-            datetime.datetime.fromtimestamp(now - 2 * 86400, tz=datetime.timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        old_iso = (
-            datetime.datetime.fromtimestamp(now - 10 * 86400, tz=datetime.timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-
-        # Session 1: touched recently; has one recent turn ($1.25) and one 10-day-old turn ($9.00)
-        s1 = self.grok_home / "sessions" / "p1" / "s1"
-        s1.mkdir(parents=True)
-        u1 = s1 / "usage.json"
-        u1.write_text(
-            json.dumps(
-                {
-                    "turns": [
-                        {"turnNumber": 1, "endedAt": old_iso, "costUsdTicks": 90_000_000_000},
-                        {"turnNumber": 2, "endedAt": recent_iso, "costUsdTicks": 12_500_000_000},
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        os.utime(u1, (now - 100, now - 100))
-
-        # Session 2: file mtime is 10 days old (skipped by mtime filter)
-        s2 = self.grok_home / "sessions" / "p1" / "s2"
-        s2.mkdir(parents=True)
-        u2 = s2 / "usage.json"
-        u2.write_text(
-            json.dumps(
-                {
-                    "turns": [
-                        {"turnNumber": 1, "endedAt": recent_iso, "costUsdTicks": 50_000_000_000}
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        os.utime(u2, (now - 10 * 86400, now - 10 * 86400))
-
-        # 7-day spend is $1.25. A $1.25 budget refuses with exit 75.
-        proc_refuse, state_dir = self._run_dispatch(
-            extra_env={
-                "GROK_WEEKLY_BUDGET_USD": "1.25",
-                "GROK_DISPATCH_NOW_EPOCH": str(now),
-            }
-        )
-        self.assertEqual(proc_refuse.returncode, 75)
-        self.assertIsNone(state_dir)
-        self.assertIn("1.2500", proc_refuse.stderr)
-        self.assertIn("GROK_WEEKLY_BUDGET_USD", proc_refuse.stderr)
-        self.assertFalse((self.record_dir / "argv.json").exists())
-
-        # A $2.00 budget allows the dispatch.
-        proc_ok, _ = self._run_dispatch(
-            extra_env={
-                "GROK_WEEKLY_BUDGET_USD": "2.00",
-                "GROK_DISPATCH_NOW_EPOCH": str(now),
-            }
-        )
-        self.assertEqual(proc_ok.returncode, 0, msg=proc_ok.stderr)
-
-        # A cap that was set but cannot be read refuses rather than lifting
-        # the cap, and never launches grok.
-        for bad in ("not-a-number", "10usd", "-1", "nan", "inf"):
-            (self.record_dir / "argv.json").unlink(missing_ok=True)
-            proc_bad, _ = self._run_dispatch(
-                extra_env={
-                    "GROK_WEEKLY_BUDGET_USD": bad,
-                    "GROK_DISPATCH_NOW_EPOCH": str(now),
-                }
-            )
-            self.assertEqual(proc_bad.returncode, 75, msg=f"{bad}: {proc_bad.stderr}")
-            self.assertIn("GROK_WEEKLY_BUDGET_USD", proc_bad.stderr)
-            self.assertFalse((self.record_dir / "argv.json").exists(), msg=bad)
-
-        # Zero is a valid budget that refuses every dispatch.
-        proc_zero, _ = self._run_dispatch(
-            extra_env={
-                "GROK_WEEKLY_BUDGET_USD": "0",
-                "GROK_DISPATCH_NOW_EPOCH": str(now),
-            }
-        )
-        self.assertEqual(proc_zero.returncode, 75, msg=proc_zero.stderr)
+class TestDispatchGrokRegistryAndGuards(DispatchGrokHarness):
 
     def test_missing_registry_row_exits_70_and_env_overrides_work(self) -> None:
         reg_without_grok = self.temp_root / "no-grok-models.json"
@@ -1003,42 +909,6 @@ class ConsumerLayoutRegistryTests(unittest.TestCase):
                 self.assertTrue(row["effort"])
             finally:
                 os.environ.update(saved)
-
-
-class WeeklySpendScanTests(unittest.TestCase):
-    def test_a_fifo_named_usage_json_is_skipped_not_opened(self) -> None:
-        if not hasattr(os, "mkfifo"):
-            self.skipTest("no FIFOs on this platform")
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            now = datetime.datetime.now(datetime.timezone.utc)
-            regular = home / "sessions" / "proj" / "s-file"
-            regular.mkdir(parents=True)
-            (regular / "usage.json").write_text(
-                json.dumps({"turns": [{
-                    "endedAt": (now - datetime.timedelta(hours=1)).isoformat(),
-                    "costUsdTicks": int(1.25 * 1e10),
-                }]}),
-                encoding="utf-8",
-            )
-            fifo_dir = home / "sessions" / "proj" / "s-fifo"
-            fifo_dir.mkdir(parents=True)
-            os.mkfifo(fifo_dir / "usage.json")
-            # In a child process, so a regression blocks there, not the suite.
-            driver = (
-                "import importlib.util, sys\n"
-                "from pathlib import Path\n"
-                "spec = importlib.util.spec_from_file_location('dg', sys.argv[1])\n"
-                "mod = importlib.util.module_from_spec(spec)\n"
-                "spec.loader.exec_module(mod)\n"
-                "print(mod.compute_weekly_spend_usd(grok_home=Path(sys.argv[2])))\n"
-            )
-            proc = subprocess.run(
-                [sys.executable, "-c", driver, str(DISPATCH_PY), str(home)],
-                capture_output=True, text=True, timeout=20,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertAlmostEqual(float(proc.stdout.strip()), 1.25, places=6)
 
 
 if __name__ == "__main__":

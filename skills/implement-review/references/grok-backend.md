@@ -4,7 +4,7 @@ This reference documents the opt-in Grok CLI backend for `/vet` (`skills/impleme
 
 ## Role and Opt-In Scope
 
-Grok is an explicit opt-in reviewer selected via `/vet grok` (or `/implement-review grok`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=grok` when a project or user sets it), or via `all` (`/vet all`, `/implement-review all`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=all`), which selects the three of Claude, Codex, Agy, and Grok that are not coordinating. Grok is never part of `both` and is never placed in the automatic failover queue. In a multi-reviewer round, a Grok slot that is absent, refused by the budget guard, or failed is a confirmed failure, and the round continues with the other reviewers. A failed Grok review exits with a non-zero status and does not fail over to another paid reviewer backend.
+Grok is an explicit opt-in reviewer selected via `/vet grok` (or `/implement-review grok`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=grok` when a project or user sets it), or via `all` (`/vet all`, `/implement-review all`, or `IMPLEMENT_REVIEW_DEFAULT_REVIEWER=all`), which selects the three of Claude, Codex, Agy, and Grok that are not coordinating. Grok is never part of `both` and is never placed in the automatic failover queue. In a multi-reviewer round, a Grok slot that is absent or failed is a confirmed failure, and the round continues with the other reviewers. A failed Grok review exits with a non-zero status and does not fail over to another paid reviewer backend.
 
 When `IMPLEMENT_REVIEW_ORCHESTRATOR=grok`, `dispatch-grok.py` refuses self-review and exits `2`.
 
@@ -33,13 +33,12 @@ Every Grok child process runs with these environment variables set so the review
 - `GROK_DISABLE_AUTOUPDATER=1`
 - `GIT_PAGER=cat`
 
-## Preflight and Weekly Budget Guard
+## Preflight
 
-Before creating the state directory or spawning Grok, `dispatch-grok.py` runs three non-spending checks:
+Before creating the state directory or spawning Grok, `dispatch-grok.py` runs two non-spending checks:
 
 1. **Binary check**: verifies `<grok-bin>` exists and is executable (exit `127` when missing).
 2. **Authentication check**: verifies that `XAI_API_KEY` is set and non-empty, `GROK_AUTH_PATH` points to a non-empty file, or `<GROK_HOME or ~/.grok>/auth.json` exists and is non-empty. When none is present, the dispatcher exits `70` and instructs the user to run `grok login`.
-3. **Rolling 7-day budget guard (`GROK_WEEKLY_BUDGET_USD`)**: when `GROK_WEEKLY_BUDGET_USD` is set to a finite non-negative number, `dispatch-grok.py` scans `<GROK_HOME or ~/.grok>/sessions/*/*/usage.json` (using file `mtime` only to skip files untouched in the last 7 days) and sums `turns[].costUsdTicks / 1e10` for every turn whose `endedAt` timestamp falls within the last 7 days. If the 7-day total is greater than or equal to `GROK_WEEKLY_BUDGET_USD`, the dispatcher refuses before launching and exits `75` with a message naming both the budget and the current spend. When `GROK_WEEKLY_BUDGET_USD` is unset or empty, no cap applies. A value that is set but is not a non-negative number refuses the dispatch with exit `75` and a message naming the variable, so a mistyped cap never becomes no cap. Zero refuses every dispatch.
 
 ## Staged Snapshot and Supplied Inputs
 
@@ -97,13 +96,13 @@ Because `user/settings.json` does not pre-authorize paid third-party CLIs for al
 - A permission allow rule does not do this job. Auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-grok.py *)`, a pattern that would also match `python3 -c "<code>" dispatch-grok.py`, and an allow rule does not match past a leading assignment such as `PRUN_SCRATCH_CWD=`. Never allow the `grok` binary itself, and never put either setting in the shared `user/settings.json`.
 - Without the entry, auto mode may refuse the launch; other permission modes apply the user's ordinary rules.
 
-An entry of this shape works on the maintainer's machine. Describe only what the dispatchers enforce: the spend check runs only when `GROK_WEEKLY_BUDGET_USD` is set, and `dispatch-task-grok.py` does not check that a `PRUN_SCRATCH_CWD` path is disposable.
+An entry of this shape works on the maintainer's machine. Describe only what the dispatchers enforce: `dispatch-task-grok.py` does not check that a `PRUN_SCRATCH_CWD` path is disposable.
 
 ```json
 "autoMode": {
   "allow": [
     "$defaults",
-    "Running the anywhere-agents Grok dispatchers with python or python3 is allowed: dispatch-grok.py (a /vet review) and dispatch-task-grok.py (a prun unit), from a source repository's skills/ directory or any project's .claude/skills or .agent-config/repo/skills copy, including with leading PRUN_SCRATCH_CWD= or IMPLEMENT_REVIEW_ORCHESTRATOR= assignments. dispatch-grok.py keeps grok inside an exported index snapshot; dispatch-task-grok.py runs it in a temporary work directory, or in PRUN_SCRATCH_CWD when the caller sets one. Both switch off the user's hooks and MCP servers, and both refuse to launch once the last 7 days' Grok spend reaches GROK_WEEKLY_BUDGET_USD when that variable is set."
+    "Running the anywhere-agents Grok dispatchers with python or python3 is allowed: dispatch-grok.py (a /vet review) and dispatch-task-grok.py (a prun unit), from a source repository's skills/ directory or any project's .claude/skills or .agent-config/repo/skills copy, including with leading PRUN_SCRATCH_CWD= or IMPLEMENT_REVIEW_ORCHESTRATOR= assignments. dispatch-grok.py keeps grok inside an exported index snapshot; dispatch-task-grok.py runs it in a temporary work directory, or in PRUN_SCRATCH_CWD when the caller sets one. Both switch off the user's hooks and MCP servers."
   ]
 }
 ```

@@ -14,7 +14,6 @@ whose first line matches ``^# [A-Za-z0-9_-]+ result \\(FALLBACK, ``.
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import importlib.util
 import json
@@ -23,7 +22,6 @@ import os
 import re
 import signal
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -101,9 +99,6 @@ DEFAULT_TIMEOUT_SECONDS = 2700
 DEFAULT_STALL_SECONDS = 600
 DEFAULT_KILL_GRACE_SECONDS = 2.0
 MIN_RESULT_BYTES = 20
-SEVEN_DAYS_SECONDS = 7 * 86400
-TICKS_PER_USD = 1e10
-QUOTA_EXHAUSTED_EXIT = 75
 UNIT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 
@@ -298,98 +293,6 @@ def check_login_preflight(child_env: dict[str, str]) -> str:
         f"Grok authentication not found at {default_auth}; "
         "run 'grok login' or pass PRUN_KEEP_ENV=XAI_API_KEY"
     )
-
-
-def parse_iso_timestamp(text: str) -> float | None:
-    """Parse an ISO-8601 timestamp into POSIX seconds (Python 3.9+ compatible)."""
-    if not isinstance(text, str):
-        return None
-    raw = text.strip()
-    if not raw:
-        return None
-    if raw.endswith(("Z", "z")):
-        raw = raw[:-1] + "+00:00"
-    # Python 3.9's datetime.fromisoformat requires fractional seconds to be
-    # 3 or 6 digits when present.
-    raw = re.sub(
-        r"\.(\d+)(?=[+-]\d{2}:\d{2}$|$)",
-        lambda m: "." + (m.group(1)[:6].ljust(6, "0")),
-        raw,
-    )
-    try:
-        parsed = datetime.datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.timestamp()
-
-
-def compute_weekly_spend_usd(
-    home: Path, now: float | None = None
-) -> float:
-    """Sum turns[].costUsdTicks / 1e10 for turns ended within the last 7 days."""
-    current = time.time() if now is None else now
-    cutoff = current - SEVEN_DAYS_SECONDS
-    sessions_dir = home / "sessions"
-    if not sessions_dir.is_dir():
-        return 0.0
-    total_ticks = 0.0
-    for usage_path in sessions_dir.glob("*/*/usage.json"):
-        try:
-            st = usage_path.stat()
-            # A FIFO or device named usage.json would block the read; skip it.
-            if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:
-                continue
-            data = json.loads(
-                usage_path.read_text(encoding="utf-8", errors="replace")
-            )
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        turns = data.get("turns")
-        if not isinstance(turns, list):
-            continue
-        for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            ended_at = parse_iso_timestamp(turn.get("endedAt", ""))
-            if ended_at is None or ended_at < cutoff:
-                continue
-            ticks = turn.get("costUsdTicks", 0)
-            if (
-                isinstance(ticks, (int, float))
-                and not isinstance(ticks, bool)
-                and math.isfinite(ticks)
-                and ticks > 0
-            ):
-                total_ticks += float(ticks)
-    return total_ticks / TICKS_PER_USD
-
-
-def check_budget_guard(child_env: dict[str, str], now: float | None = None) -> str:
-    """Return a refusal message when 7-day spend has reached GROK_WEEKLY_BUDGET_USD."""
-    raw = os.environ.get("GROK_WEEKLY_BUDGET_USD", "").strip()
-    if not raw:
-        return ""
-    # A cap someone set but mistyped must not turn into no cap at all.
-    try:
-        budget = float(raw)
-    except ValueError:
-        budget = float("nan")
-    if not math.isfinite(budget) or budget < 0:
-        return (
-            f"GROK_WEEKLY_BUDGET_USD={raw!r} is not a non-negative number; "
-            "refusing to launch unit until it is fixed or unset"
-        )
-    spend = compute_weekly_spend_usd(grok_home(child_env), now=now)
-    if spend >= budget:
-        return (
-            f"Grok 7-day spend ${spend:.2f} has reached "
-            f"GROK_WEEKLY_BUDGET_USD=${budget:.2f}; refusing to launch unit"
-        )
-    return ""
 
 
 def record_grok_version(
@@ -981,14 +884,6 @@ def main(argv: list[str] | None = None) -> int:
             result_path, args.unit_id, login_error, tail_path, stderr_path, nonce
         )
         return fail(login_error, 70)
-
-    budget_error = check_budget_guard(child_env)
-    if budget_error:
-        stderr_path.write_text(budget_error + "\n", encoding="utf-8")
-        publish_fallback(
-            result_path, args.unit_id, budget_error, tail_path, stderr_path, nonce
-        )
-        return fail(budget_error, QUOTA_EXHAUSTED_EXIT)
 
     record_grok_version(executable, state_dir, child_env)
 

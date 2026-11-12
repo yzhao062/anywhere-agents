@@ -73,10 +73,6 @@ Additional environment variables:
 
 On POSIX, both limits send `SIGTERM`, then `SIGKILL` if the process tree is still alive after `GROK_KILL_GRACE_SECONDS` (default `2`). On Windows, they run `taskkill /T /F` and fall back to `process.kill()` when that command cannot run or times out. A non-positive or non-integer threshold or timeout exits `2` before launch.
 
-## Weekly Budget Guard
-
-When `GROK_WEEKLY_BUDGET_USD` is set to a non-negative number, the dispatcher sums `turns[].costUsdTicks / 1e10` for all turns whose `endedAt` timestamp falls within the last 7 days across `<GROK_HOME or ~/.grok>/sessions/*/*/usage.json` (using file `mtime` only to skip files older than 7 days). When the 7-day local list-price spend has reached or exceeded `GROK_WEEKLY_BUDGET_USD`, the dispatcher refuses to launch, writes a `FALLBACK` result, and exits `75` naming the budget and the spend. When `GROK_WEEKLY_BUDGET_USD` is unset or empty, no cap is applied. A value that is set but is not a non-negative number refuses the launch the same way, so a mistyped cap never becomes no cap. Zero refuses every launch.
-
 ## Automatic Launch Route
 
 Claude Code's auto mode refused a direct `grok --always-approve` launch, and its classifier judges each dispatcher command too. To run Grok units unattended on a maintainer machine, add an `autoMode.allow` entry describing `dispatch-task-grok.py` (and `dispatch-grok.py` for `/vet`) to the machine-local `~/.claude/settings.json`, after `"$defaults"`; [the implement-review Grok reference](../../implement-review/references/grok-backend.md) shows one. A permission allow rule does not do this job: it does not match past a leading `PRUN_SCRATCH_CWD=` assignment, and auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-task-grok.py *)`. Never allow `grok` itself, and never put the entry in the repository's shared `user/settings.json`. Without the entry, auto mode may refuse the unit.

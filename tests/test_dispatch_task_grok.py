@@ -1,7 +1,6 @@
 """Contract tests for prun's Grok task dispatcher (dispatch-task-grok.py)."""
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import shutil
@@ -582,70 +581,6 @@ class DispatchTaskGrokTests(unittest.TestCase):
         recorded_env = json.loads((self.log_dir / "env.json").read_text(encoding="utf-8"))
         self.assertEqual(recorded_env.get("XAI_API_KEY"), "xai-live-secret")
 
-    def test_weekly_budget_guard_counts_recent_turns_only_and_refuses_at_cap(self) -> None:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        two_days_ago = (now - datetime.timedelta(days=2)).isoformat()
-        ten_days_ago = (now - datetime.timedelta(days=10)).isoformat()
-
-        sess_dir = self.grok_home / "sessions" / "proj" / "s-budget"
-        sess_dir.mkdir(parents=True, exist_ok=True)
-        usage_payload = {
-            "turns": [
-                {
-                    "turnNumber": 1,
-                    "endedAt": ten_days_ago,
-                    "costUsdTicks": int(10.0 * 1e10),
-                },
-                {
-                    "turnNumber": 2,
-                    "endedAt": two_days_ago,
-                    "costUsdTicks": int(3.50 * 1e10),
-                },
-            ]
-        }
-        (sess_dir / "usage.json").write_text(
-            json.dumps(usage_payload), encoding="utf-8"
-        )
-
-        # Budget $3.00 <= recent spend $3.50 -> refused with exit 75
-        res_refused = self.root / "budget_refused.result.md"
-        proc, _ = self.run_dispatch(
-            env_overrides={"GROK_WEEKLY_BUDGET_USD": "3.00"},
-            result_path=res_refused,
-            unit_id="budget_refused",
-        )
-        self.assertEqual(proc.returncode, 75)
-        self.assertIn("$3.50", proc.stderr)
-        self.assertIn("$3.00", proc.stderr)
-        self.assertRegex(
-            res_refused.read_text(encoding="utf-8").splitlines()[0],
-            r"^# budget_refused result \(FALLBACK, ",
-        )
-
-        # Budget $4.00 > recent spend $3.50 (10-day-old $10 turn ignored) -> allowed
-        res_allowed = self.root / "budget_allowed.result.md"
-        proc2, _ = self.run_dispatch(
-            env_overrides={"GROK_WEEKLY_BUDGET_USD": "4.00"},
-            result_path=res_allowed,
-            unit_id="budget_allowed",
-        )
-        self.assertEqual(proc2.returncode, 0, proc2.stderr)
-
-        # A cap that was set but cannot be read refuses instead of lifting it.
-        for index, bad in enumerate(("10usd", "-1", "nan")):
-            res_bad = self.root / f"budget_bad_{index}.result.md"
-            proc_bad, _ = self.run_dispatch(
-                env_overrides={"GROK_WEEKLY_BUDGET_USD": bad},
-                result_path=res_bad,
-                unit_id=f"budget_bad_{index}",
-            )
-            self.assertEqual(proc_bad.returncode, 75, msg=f"{bad}: {proc_bad.stderr}")
-            self.assertIn("GROK_WEEKLY_BUDGET_USD", proc_bad.stderr)
-            self.assertRegex(
-                res_bad.read_text(encoding="utf-8").splitlines()[0],
-                rf"^# budget_bad_{index} result \(FALLBACK, ",
-            )
-
     def test_missing_registry_row_exits_70_and_missing_binary_exits_127(self) -> None:
         no_grok_reg = self.root / "no-grok-models.json"
         no_grok_reg.write_text(
@@ -787,42 +722,6 @@ class DispatchTaskGrokTests(unittest.TestCase):
         self.assertEqual(mon_fail.returncode, 3)
         self.assertIn("MONITOR-EVENT fail", mon_fail.stdout)
         self.assertIn(f"UNIT {state_fail.name} failed(fallback)", mon_fail.stdout)
-
-
-class WeeklySpendScanTests(unittest.TestCase):
-    def test_a_fifo_named_usage_json_is_skipped_not_opened(self) -> None:
-        if not hasattr(os, "mkfifo"):
-            self.skipTest("no FIFOs on this platform")
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            now = datetime.datetime.now(datetime.timezone.utc)
-            regular = home / "sessions" / "proj" / "s-file"
-            regular.mkdir(parents=True)
-            (regular / "usage.json").write_text(
-                json.dumps({"turns": [{
-                    "endedAt": (now - datetime.timedelta(hours=1)).isoformat(),
-                    "costUsdTicks": int(1.25 * 1e10),
-                }]}),
-                encoding="utf-8",
-            )
-            fifo_dir = home / "sessions" / "proj" / "s-fifo"
-            fifo_dir.mkdir(parents=True)
-            os.mkfifo(fifo_dir / "usage.json")
-            # In a child process, so a regression blocks there, not the suite.
-            driver = (
-                "import importlib.util, sys\n"
-                "from pathlib import Path\n"
-                "spec = importlib.util.spec_from_file_location('dtg', sys.argv[1])\n"
-                "mod = importlib.util.module_from_spec(spec)\n"
-                "spec.loader.exec_module(mod)\n"
-                "print(mod.compute_weekly_spend_usd(Path(sys.argv[2])))\n"
-            )
-            proc = subprocess.run(
-                [sys.executable, "-c", driver, str(DISPATCH), str(home)],
-                capture_output=True, text=True, timeout=20,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertAlmostEqual(float(proc.stdout.strip()), 1.25, places=6)
 
 
 if __name__ == "__main__":

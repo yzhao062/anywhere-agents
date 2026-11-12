@@ -81,8 +81,8 @@ Rules:
   `Antigravity preflight failed`, exit 124 or 70), report the failure and offer Grok to the user
   rather than switching automatically. A Grok unit runs through `dispatch-task-grok.py` with its
   model and effort from the registry's `prun-worker` row for Grok; see
-  `skills/prun/references/grok-executor.md` for flags, child environment, the weekly budget guard,
-  and the automatic launch route.
+  `skills/prun/references/grok-executor.md` for flags, child environment, and the automatic
+  launch route.
 - **Session-internal tools stay outside the fan-out.** An Agy process cannot use the coordinator's
   MCP, email connectors, or Artifact tool. Gather what a unit needs from those tools in the
   coordinating session before dispatch, and put it in the unit prompt; leave a small action that

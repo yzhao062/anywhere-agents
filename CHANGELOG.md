@@ -15,7 +15,7 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 - **A user-scoped reviewer default for `/vet`.** `IMPLEMENT_REVIEW_DEFAULT_REVIEWER` supplies the reviewer tokens when an invocation names none, the way `IMPLEMENT_REVIEW_DEFAULT_CHANNEL` supplies the channel. Set to `both`, a bare `/vet` runs the two of Claude, Codex, and Agy that are not coordinating. An explicit reviewer token still wins, and without the variable the default stays Codex. Claude Code reads both variables from the `env` block of `~/.claude/settings.json`, and Codex from `[shell_environment_policy] set` in `~/.codex/config.toml`.
 
-- **`/vet all` for three reviewers.** `all` selects the three of Claude, Codex, Agy, and Grok that are not coordinating, as a `/vet` argument or as the value of `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`. `both` stays the pair without Grok. A Grok slot that is absent, refused by its budget guard, or failed does not fail over, and the round continues with the other two.
+- **`/vet all` for three reviewers.** `all` selects the three of Claude, Codex, Agy, and Grok that are not coordinating, as a `/vet` argument or as the value of `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`. `both` stays the pair without Grok. A Grok slot that is absent or failed does not fail over, and the round continues with the other two.
 
 - **`/vet` triage weighs whether a fix is worth it.** A correct but low-value finding is declined with a one-line reason and recorded as `Deferred` once the user confirms. Agreement between reviewers and a passed factual check no longer make a finding Will fix by themselves, and the loop ends when no new or still-open finding meets the bar.
 
@@ -38,6 +38,10 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 - **The Copilot reviewer backend of `/vet`.** The `copilot` reviewer token, `dispatch-copilot.{sh,ps1}`, and their tests are gone, and the failover queue is now Codex, Antigravity, Claude Code. Where a rule fell back to Copilot, it now falls back to Agy. This breaks `/vet copilot` for anyone who ran it; a Copilot review can still be pasted by hand through Terminal-relay.
 
 - **The Plugin path of `/vet`.** The channel that had the user paste the review prompt into the Codex IDE sidebar is removed, with the `plugin` argument hint. Terminal-relay still takes a review from any tool that honors the `Review-<AgentName>.md` save contract.
+
+- **The Codex credit balance readout.** The statusline no longer shows `cr` and the `agent-quota.py` row no longer shows `credits`. The rate-limit windows stay.
+
+- **The weekly spend cap of the Grok dispatchers.** `GROK_WEEKLY_BUDGET_USD` summed this machine's list-price spend, and the plan meter that `agent-quota.py` and the statusline read from Grok is the accurate figure. Setting the variable now has no effect.
 
 ### Fixed
 
