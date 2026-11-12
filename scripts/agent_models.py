@@ -796,8 +796,10 @@ def agy_actual(log_text: str) -> tuple | None:
 
 
 def grok_home_path() -> Path:
+    """The Grok home the dispatchers' login and budget checks use, with a
+    leading ~ in GROK_HOME expanded the same way."""
     home = os.environ.get("GROK_HOME", "").strip()
-    return Path(home) if home else Path.home() / ".grok"
+    return Path(os.path.expanduser(home)) if home else Path.home() / ".grok"
 
 
 def _grok_model_from_record(record: dict) -> str | None:

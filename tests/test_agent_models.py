@@ -656,6 +656,13 @@ class ActualReaderTests(unittest.TestCase):
             )
             self.assertEqual((code, out.strip(), err), (0, "actual=gemini-9.2-test-high high status=ok", ""))
 
+    def test_grok_home_expands_a_leading_tilde_like_the_dispatchers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp, "GROK_HOME": "~/grok-home"}):
+                self.assertEqual(agent_models.grok_home_path(), Path(tmp) / "grok-home")
+            with mock.patch.dict(os.environ, {"GROK_HOME": "  "}):
+                self.assertEqual(agent_models.grok_home_path(), Path.home() / ".grok")
+
     def test_grok_actual_reads_end_event_and_session_files_in_grok_home(self) -> None:
         sid = "01a1ccb0-fc1a-7703-9a57-1c45f1840ec3"
         with tempfile.TemporaryDirectory() as tmp:
