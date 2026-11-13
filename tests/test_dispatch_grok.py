@@ -341,6 +341,23 @@ class DispatchGrokHarness(unittest.TestCase):
             "Review staged changes in repo. Round 1.\n",
             encoding="utf-8",
         )
+        # The dispatcher takes the reviewer model and effort from the registry,
+        # so these cases name their own rather than the live one.
+        self.registry_path = self.temp_root / "agent-models.json"
+        self.registry_path.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "families": {
+                        "claude": {"model": "fable", "effort": "high"},
+                        "codex": {"model": "gpt-6-astra", "effort": "medium"},
+                        "agy": {"model": "gemini-4-argon", "effort": "high"},
+                        "grok": {"model": "grok-4.7", "effort": "high"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         self.created_state_dirs: list[Path] = []
 
     def tearDown(self) -> None:
@@ -419,6 +436,7 @@ class DispatchGrokHarness(unittest.TestCase):
             env.pop(key, None)
         env["GROK_HOME"] = str(self.grok_home)
         env["GROK_BIN"] = str(self.fake_grok)
+        env["AGENT_MODELS_FILE"] = str(self.registry_path)
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_GROK_RECORD_DIR"] = str(self.record_dir)
         env["FAKE_GROK_REVIEW_TEXT"] = valid_review_body(1)
@@ -780,11 +798,11 @@ class TestDispatchGrokRegistryAndGuards(DispatchGrokHarness):
         reg_without_grok.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema": 1,
                     "families": {
-                        "claude": {"model": "claude-opus-4-7", "effort": "xhigh"},
-                        "codex": {"model": "gpt-5.4", "effort": "xhigh"},
-                        "agy": {"model": "gemini-3.1-pro-high", "effort": "high"},
+                        "claude": {"model": "fable", "effort": "high"},
+                        "codex": {"model": "gpt-6-astra", "effort": "medium"},
+                        "agy": {"model": "gemini-4-argon", "effort": "high"},
                     },
                 }
             ),
@@ -794,7 +812,9 @@ class TestDispatchGrokRegistryAndGuards(DispatchGrokHarness):
             extra_env={"AGENT_MODELS_FILE": str(reg_without_grok)}
         )
         self.assertEqual(proc_missing.returncode, 70, msg=proc_missing.stderr)
-        self.assertIn("families.grok", proc_missing.stderr)
+        # The dispatcher names families.grok for any registry it cannot read, so
+        # the resolver's own message is what shows the row was the missing part.
+        self.assertIn("registry has no families.grok row", proc_missing.stderr)
 
         # Explicit valid env overrides bypass the missing registry row
         proc_override, state_dir = self._run_dispatch(

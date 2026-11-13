@@ -16,7 +16,7 @@
       "fallback_model": "gemini-4-hydrogen"
     },
     "grok": {
-      "model": "grok-4.7",
+      "model": "grok-4.7-build-fast",
       "effort": "high"
     }
   },
@@ -59,7 +59,6 @@
         "effort": "medium"
       },
       "grok": {
-        "model": "grok-4.7",
         "effort": "medium"
       },
       "claude": {
