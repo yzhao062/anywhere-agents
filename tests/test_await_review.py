@@ -299,8 +299,8 @@ class TestDead(AwaitReviewCase):
     def test_a_published_review_with_the_wrong_round_marker_is_reported_only(self):
         """Reported through the ALIVE reason, never terminal.
 
-        A reviewer can publish more than once in a round: on 2026-08-21 an
-        agent-startup-thesis round satisfied its watcher at 22:12:13 and rewrote
+        A reviewer can publish more than once in a round: on 2026-08-21 a
+        research-impact round satisfied its watcher at 22:12:13 and rewrote
         the same file at 22:15:59. Ending the round on the first artifact would
         discard the second, which is the harm this script exists to prevent.
         """
