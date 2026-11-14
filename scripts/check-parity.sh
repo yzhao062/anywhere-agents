@@ -300,6 +300,9 @@ strict_test_files=(
   tests/test_monitor.py
   tests/test_shell_nounset_arrays.py
   tests/test_skill_size.py
+  # Pins the one tracked link that shows a source repo's skills/ to Codex.
+  # The link itself is not a STRICT file: `-f` follows it to a directory.
+  tests/test_codex_skill_link.py
 )
 for f in "${strict_test_files[@]}"; do
   $AA_INTERNAL_ONLY && break

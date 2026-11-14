@@ -12,12 +12,15 @@ No network activity; the v0.3.x composer's URL fetch is not exercised here
 from __future__ import annotations
 
 import io
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 # tests/ is on sys.path under `unittest discover -s tests` but not under
 # `python -m unittest tests.<module>`, which validate.yml uses for the
@@ -29,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import compose_packs  # noqa: E402
+from packs import codex_links  # noqa: E402
 
 
 def _write(path: Path, text: str) -> None:
@@ -141,6 +145,84 @@ class CLIEntryPointTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("agent-config.yaml", result.stdout)
+
+
+@unittest.skipUnless(
+    codex_links.platform_supported() and shutil.which("git") is not None,
+    "links need macOS or Linux and git",
+)
+class CodexLocalSkillWiringTests(unittest.TestCase):
+    """Compose wiring for project-local Codex skill links."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.root = base / "consumer"
+        self.root.mkdir()
+        self.home = base / "home"
+        self.home.mkdir()
+        _write(self.root / ".agent-config" / "AGENTS.md", "# upstream\n")
+        _write(
+            self.root / ".agent-config" / "repo" / "skills" / "alpha" / "SKILL.md",
+            "# alpha\n",
+        )
+        self.pack = {
+            "name": "pack-a",
+            "source": "bundled:aa",
+            "hosts": ["claude-code", "codex"],
+            "active": [
+                {
+                    "kind": "skill",
+                    "files": [{"from": "skills/alpha/", "to": ".claude/skills/alpha/"}],
+                }
+            ],
+        }
+
+    def _compose(self, packs: list[dict]) -> tuple[int, str, str]:
+        by_name = {pack["name"]: pack for pack in packs}
+        selections = [{"name": pack["name"], "ref": "bundled"} for pack in packs]
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err), patch.object(
+            compose_packs.config_mod, "resolved_for_project", return_value=selections
+        ), patch.object(
+            compose_packs,
+            "_process_selection",
+            side_effect=lambda selection, **_kw: (by_name[selection["name"]], None),
+        ), patch.object(compose_packs.Path, "home", return_value=self.home):
+            rc = compose_packs._do_compose_v2(
+                self.root, {"version": 2, "packs": []}, no_cache=True
+            )
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_no_pack_change_links_newly_added_local_skill(self) -> None:
+        rc, _out, err = self._compose([self.pack])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            os.readlink(self.root / ".agents" / "skills" / "alpha"),
+            "../../.claude/skills/alpha",
+        )
+
+        _write(self.root / "skills" / "local-skill" / "SKILL.md", "# local\n")
+        rc, out, err = self._compose([self.pack])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            os.readlink(self.root / ".agents" / "skills" / "local-skill"),
+            "../../skills/local-skill",
+        )
+        self.assertIn("Codex skill links: 2 linked, 1 new.", out)
+
+    def test_opt_out_packs_empty_leaves_links_alone(self) -> None:
+        _write(self.root / "skills" / "local-skill" / "SKILL.md", "# local\n")
+        rc, _out, err = self._compose([self.pack])
+        self.assertEqual(rc, 0, err)
+        _write(self.root / "skills" / "added-later" / "SKILL.md", "# later\n")
+
+        rc, _out, err = self._compose([])
+        self.assertEqual(rc, 0, err)
+        self.assertTrue((self.root / ".agents" / "skills" / "alpha").is_symlink())
+        self.assertTrue((self.root / ".agents" / "skills" / "local-skill").is_symlink())
+        self.assertFalse(os.path.lexists(self.root / ".agents" / "skills" / "added-later"))
 
 
 if __name__ == "__main__":

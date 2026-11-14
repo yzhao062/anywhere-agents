@@ -2044,9 +2044,10 @@ def _do_compose_v2(
 
     # ----- post-commit: Codex skill links -----
     # Codex reads repository skills only from .agents/skills/. Link each
-    # committed codex-eligible skill there, still under the repo lock the
-    # transaction used. Filesystem problems are reported in the summary
-    # and never fail the compose, because the transaction has committed.
+    # committed codex-eligible pack skill and project-local skill (discovered
+    # inside sync_links) there, still under the repo lock the transaction
+    # used. Filesystem problems are reported in the summary and never fail
+    # the compose, because the transaction has committed.
     codex_link_report = codex_links.sync_links(root, codex_eligible_skills)
 
     # ----- Phase 8 post-commit: pending-updates.json invariant -----

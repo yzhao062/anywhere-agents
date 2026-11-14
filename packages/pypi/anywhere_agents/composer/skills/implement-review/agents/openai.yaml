@@ -1,4 +1,4 @@
 interface:
   display_name: "Implement Review"
-  short_description: "Review staged changes with Codex"
-  default_prompt: "Use $implement-review to review the current staged changes in this repo. Apply the review lens from skills/implement-review/references/review-lenses.md that matches the content type. Report findings with severity and file references."
+  short_description: "Run the independent review loop"
+  default_prompt: "Use $implement-review to run the independent review loop for the current staged changes. Follow the configured channel and reviewer selection. Report the review file and intake status."

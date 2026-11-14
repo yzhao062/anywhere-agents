@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from packs import codex_links  # noqa: E402
 from packs import state as state_mod  # noqa: E402
 from packs import uninstall as uninstall_mod  # noqa: E402
 
@@ -351,6 +355,174 @@ class PermissionPartialCleanupTests(_Fixture):
             self.user_home / ".claude" / "pack-state.json"
         )
         self.assertEqual(reloaded["entries"], [])
+
+
+@unittest.skipUnless(
+    codex_links.platform_supported() and shutil.which("git") is not None,
+    "links need macOS or Linux and git",
+)
+class CodexLocalSkillUninstallTests(_Fixture):
+    def _write_pack_lock(self, target_rel: str, target_bytes: bytes) -> None:
+        pack_lock = {
+            "version": state_mod.SCHEMA_VERSION,
+            "packs": {
+                "demo-pack": {
+                    "source_url": "bundled:aa",
+                    "requested_ref": "bundled",
+                    "resolved_commit": "bundled",
+                    "pack_update_policy": "locked",
+                    "files": [
+                        {
+                            "role": "active-skill",
+                            "host": "claude-code",
+                            "source_path": target_rel,
+                            "input_sha256": _sha(target_bytes),
+                            "output_paths": [target_rel],
+                            "output_scope": "project-local",
+                            "effective_update_policy": "locked",
+                        }
+                    ],
+                }
+            },
+        }
+        state_mod.save_pack_lock(
+            self.project_root / ".agent-config" / "pack-lock.json", pack_lock
+        )
+
+    def _add_local_skill(self, name: str) -> None:
+        skill_dir = self.project_root / "skills" / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    def _add_pack_skill(self, name: str) -> None:
+        skill_dir = self.project_root / ".claude" / "skills" / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    def _record_and_link(self, *entries: tuple[str, bool]) -> None:
+        skills_dir = self.project_root / ".agents" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            codex_links.MANAGED_HEADER,
+            "/.gitignore",
+            "/.gitignore.*.tmp",
+        ] + [f"/{name}" for name, _local in entries]
+        (skills_dir / ".gitignore").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for name, is_local in entries:
+            os.symlink(codex_links.link_target(name, local=is_local), skills_dir / name)
+
+    def test_uninstall_all_removes_local_links_record_and_empty_dirs(self) -> None:
+        target_rel = ".claude/commands/demo.md"
+        target_abs = self.project_root / target_rel
+        target_abs.parent.mkdir(parents=True)
+        content = b"pointer\n"
+        target_abs.write_bytes(content)
+        self._write_pack_lock(target_rel, content)
+        self._add_local_skill("local-skill")
+        self._record_and_link(("local-skill", True))
+
+        result = uninstall_mod.run_uninstall_all(
+            self.project_root, user_home=self.user_home, repo_id=self.repo_id
+        )
+        self.assertEqual(result.status, uninstall_mod.STATUS_CLEAN, result.details)
+        self.assertFalse(os.path.lexists(self.project_root / ".agents"))
+        self.assertTrue((self.project_root / "skills" / "local-skill" / "SKILL.md").is_file())
+
+    def test_uninstall_all_retry_no_op_removes_remaining_local_links(self) -> None:
+        self._add_local_skill("local-skill")
+        self._record_and_link(("local-skill", True))
+
+        result = uninstall_mod.run_uninstall_all(
+            self.project_root, user_home=self.user_home, repo_id=self.repo_id
+        )
+        self.assertEqual(result.status, uninstall_mod.STATUS_CLEAN, result.details)
+        self.assertFalse(os.path.lexists(self.project_root / ".agents"))
+        self.assertTrue((self.project_root / "skills" / "local-skill" / "SKILL.md").is_file())
+
+    def test_unremovable_link_makes_uninstall_all_partial_and_stays_recorded(self) -> None:
+        self._add_local_skill("local-skill")
+        self._record_and_link(("local-skill", True))
+        link = self.project_root / ".agents" / "skills" / "local-skill"
+        real_unlink = os.unlink
+
+        def failing_unlink(path, *args, **kwargs):
+            parts = Path(path).parts
+            if parts[-3:] == (".agents", "skills", "local-skill"):
+                raise PermissionError(1, "Operation not permitted")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(os, "unlink", side_effect=failing_unlink):
+            result = uninstall_mod.run_uninstall_all(
+                self.project_root, user_home=self.user_home, repo_id=self.repo_id
+            )
+        self.assertEqual(result.status, uninstall_mod.STATUS_PARTIAL, result.details)
+        self.assertTrue(os.path.islink(link))
+        record = (link.parent / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/local-skill\n", record)
+
+    def test_drift_stop_keeps_live_links_of_both_forms_and_prunes_dangling(self) -> None:
+        target_rel = ".claude/commands/demo.md"
+        target_abs = self.project_root / target_rel
+        target_abs.parent.mkdir(parents=True)
+        target_abs.write_bytes(b"user-modified\n")
+        self._write_pack_lock(target_rel, b"original\n")
+        self._add_pack_skill("pack-skill")
+        self._add_local_skill("local-skill")
+        self._record_and_link(
+            ("dangling-local", True),
+            ("local-skill", True),
+            ("pack-skill", False),
+        )
+
+        result = uninstall_mod.run_uninstall_all(
+            self.project_root, user_home=self.user_home, repo_id=self.repo_id
+        )
+        self.assertEqual(result.status, uninstall_mod.STATUS_DRIFT)
+        skills_dir = self.project_root / ".agents" / "skills"
+        self.assertFalse(os.path.lexists(skills_dir / "dangling-local"))
+        self.assertTrue((skills_dir / "pack-skill").is_symlink())
+        self.assertTrue((skills_dir / "local-skill").is_symlink())
+        recorded = (skills_dir / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/pack-skill", recorded)
+        self.assertIn("/local-skill", recorded)
+        self.assertNotIn("/dangling-local", recorded)
+
+    def test_malformed_state_keeps_live_links_of_both_forms(self) -> None:
+        (self.project_root / ".agent-config" / "pack-lock.json").write_text(
+            "{not valid json", encoding="utf-8"
+        )
+        self._add_pack_skill("pack-skill")
+        self._add_local_skill("local-skill")
+        self._record_and_link(("local-skill", True), ("pack-skill", False))
+
+        result = uninstall_mod.run_uninstall_all(
+            self.project_root, user_home=self.user_home, repo_id=self.repo_id
+        )
+        self.assertEqual(result.status, uninstall_mod.STATUS_MALFORMED)
+        skills_dir = self.project_root / ".agents" / "skills"
+        self.assertTrue((skills_dir / "pack-skill").is_symlink())
+        self.assertTrue((skills_dir / "local-skill").is_symlink())
+
+    def test_single_pack_uninstall_keeps_live_local_link_and_prunes_dangling(self) -> None:
+        target_rel = ".claude/commands/demo.md"
+        target_abs = self.project_root / target_rel
+        target_abs.parent.mkdir(parents=True)
+        content = b"pointer\n"
+        target_abs.write_bytes(content)
+        self._write_pack_lock(target_rel, content)
+        self._add_local_skill("local-skill")
+        self._record_and_link(("dangling-local", True), ("local-skill", True))
+
+        result = uninstall_mod.run_uninstall_pack(
+            self.project_root, "demo-pack", user_home=self.user_home, repo_id=self.repo_id
+        )
+        self.assertEqual(result.status, uninstall_mod.STATUS_CLEAN, result.details)
+        skills_dir = self.project_root / ".agents" / "skills"
+        self.assertFalse(os.path.lexists(skills_dir / "dangling-local"))
+        self.assertTrue((skills_dir / "local-skill").is_symlink())
+        self.assertEqual(os.readlink(skills_dir / "local-skill"), "../../skills/local-skill")
+        recorded = (skills_dir / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/local-skill", recorded)
 
 
 if __name__ == "__main__":

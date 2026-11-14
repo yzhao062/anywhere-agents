@@ -1,13 +1,15 @@
 ---
 name: implement-review
-description: Review loop for staged changes. Detects content type, prepares a review request for Codex (Terminal-relay manual default or opt-in Auto-terminal codex-exec subprocess) or an explicitly selected Agy or headless Claude backend, categorizes feedback, revises, and iterates. Works for code, papers, proposals, or any text-based output.
+description: Review loop (/vet) for staged changes or a plan. Detects the content type, sends a review request to Codex, Agy, Claude, or Grok, categorizes the feedback, revises, and iterates. Works for code, papers, proposals, or any text-based output.
 ---
 
 # Implement-Review
 
+On `/vet` or `$implement-review`, run the review loop for the requested target. A subagent of the coordinator, or the coordinator's own checks, cannot fill a reviewer slot. An Auto-terminal round reports the reviewer, its review file, and the Phase 2 health-check result, or says that intake is pending or failed.
+
 ## Overview
 
-A review loop for staged changes. Claude Code detects the content type, sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the primary reviewer via two channels: terminal relay (manual copy-paste, default on every platform) or Auto-terminal (opt-in subprocess dispatch). The Auto-terminal channel also supports explicit cross-vendor reviewer backends for Claude Code and Gemini through Antigravity CLI. Other reviewers are driven ad-hoc by the user through their own UI and only need to honor the `Review-<AgentName>.md` save contract defined in Phase 1c. Reviewer defaults and coordinator rewrites follow Path selection.
+The coordinator sends the changes to one or more reviewers, categorizes the feedback, revises, and iterates. Codex is the default reviewer, through terminal relay (manual copy-paste, default on every platform) or Auto-terminal (opt-in subprocess dispatch), which also drives the Agy, Claude, and Grok backends. A reviewer driven by hand only needs the `Review-<AgentName>.md` save contract in Phase 1c. Reviewer defaults and coordinator rewrites follow Path selection.
 
 ## When to plan-review first
 

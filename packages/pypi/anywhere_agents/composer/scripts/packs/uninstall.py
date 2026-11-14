@@ -123,7 +123,11 @@ def run_uninstall_all(
                     user_state_path=user_state_path,
                 )
                 _prune_codex_links(
-                    project_root, outcome, remove_record_when_empty=True
+                    project_root,
+                    outcome,
+                    remove_record_when_empty=True,
+                    remove_local=outcome.status
+                    in (STATUS_CLEAN, STATUS_PARTIAL, STATUS_NO_OP),
                 )
                 return outcome
     except locks.LockTimeout as exc:
@@ -139,17 +143,27 @@ def _prune_codex_links(
     outcome: UninstallOutcome,
     *,
     remove_record_when_empty: bool,
+    remove_local: bool = False,
 ) -> None:
     """Clean up Codex skill links after the output walk, whatever its result.
 
-    The walk deletes skill directories one at a time and can stop on
-    drift, so cleanup removes only recorded ``.agents/skills`` links whose
-    ``.claude/skills/<name>`` no longer exists (``packs.codex_links``).
-    The links never reach ``_delete_project_local``, whose ``resolve()``
-    plus ``shutil.rmtree`` would follow a link into ``.claude/skills``.
+    The walk deletes pack skill directories one at a time and can stop on
+    drift, so cleanup checks each recorded ``.agents/skills`` link by its
+    own target form (``packs.codex_links``): pack-form links stay while
+    ``.claude/skills/<name>`` exists, and local-form links are removed when
+    ``remove_local`` is true or the name is no longer a project-local skill
+    (a real ``skills/<name>`` directory holding a regular ``SKILL.md``). A
+    link that should have gone and could not be removed turns a clean or
+    no-op outcome into a partial one, since the tool's own output is still
+    on disk; a drift or malformed-state outcome stays as it is. The links never
+    reach ``_delete_project_local``, whose ``resolve()`` plus
+    ``shutil.rmtree`` would follow a link into ``.claude/skills`` or
+    ``skills``.
     """
     report = codex_links.prune_links(
-        project_root, remove_record_when_empty=remove_record_when_empty
+        project_root,
+        remove_record_when_empty=remove_record_when_empty,
+        remove_local=remove_local,
     )
     if report.removed:
         outcome.details.append(
@@ -168,6 +182,11 @@ def _prune_codex_links(
             outcome.status = STATUS_PARTIAL
     for name, reason in report.left_alone:
         outcome.details.append(f"Codex skill link {name} left alone: {reason}")
+        if reason.startswith("could not remove") and outcome.status in (
+            STATUS_NO_OP,
+            STATUS_CLEAN,
+        ):
+            outcome.status = STATUS_PARTIAL
 
 
 def _uninstall_under_locks(
@@ -505,7 +524,10 @@ def run_uninstall_pack(
                     user_state_path=user_state_path,
                 )
                 _prune_codex_links(
-                    project_root, outcome, remove_record_when_empty=False
+                    project_root,
+                    outcome,
+                    remove_record_when_empty=False,
+                    remove_local=False,
                 )
                 return outcome
     except locks.LockTimeout as exc:

@@ -111,6 +111,12 @@ class _Repo(unittest.TestCase):
         (directory / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
         return directory
 
+    def local_skill(self, name: str) -> Path:
+        directory = self.root / "skills" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "SKILL.md").write_text(f"# local {name}\n", encoding="utf-8")
+        return directory
+
     def link(self, name: str, target: str | None = None, where: Path | None = None) -> Path:
         where = self.skills if where is None else where
         where.mkdir(parents=True, exist_ok=True)
@@ -823,6 +829,293 @@ class UninstallWiring(_Consumer):
         with patch.object(uninstall_mod.locks, "acquire", side_effect=timeout):
             outcome = self.uninstall_all()
         self.assertEqual(outcome.status, uninstall_mod.STATUS_LOCK_TIMEOUT)
+        self.assertEqual(self.snapshot(), before)
+
+
+@needs_links
+class LocalSkills(_Repo):
+    def test_local_link_created_and_removed_when_dir_goes(self) -> None:
+        self.local_skill("foo")
+        report = self.sync()
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../skills/foo")
+        self.assertEqual((self.skills / "foo" / "SKILL.md").read_text(encoding="utf-8"), "# local foo\n")
+        self.assertEqual(report.created, ["foo"])
+        self.assertEqual(report.linked, ["foo"])
+        self.assertEqual(self.recorded(), ["foo"])
+        self.assertEqual(report.summary_line(), "Codex skill links: 1 linked, 1 new.")
+
+        shutil.rmtree(self.root / "skills" / "foo")
+        report = self.sync()
+        self.assertEqual(report.removed, ["foo"])
+        self.assertEqual(report.linked, [])
+        self.assertFalse(os.path.lexists(self.skills / "foo"))
+        self.assertEqual(self.recorded(), [])
+
+    def test_local_overrides_pack_and_case_collision_blocks_both(self) -> None:
+        self.claude_skill("foo")
+        self.local_skill("foo")
+        report = self.sync("foo")
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../skills/foo")
+        self.assertEqual(report.created, ["foo"])
+        self.assertEqual(self.recorded(), ["foo"])
+
+        self.local_skill("bar")
+        report = self.sync("Bar", local=["bar"])
+        self.assertEqual(
+            self.reasons(report),
+            {
+                "Bar": "differs only by case from another skill",
+                "bar": "differs only by case from another skill",
+            },
+        )
+        self.assertFalse(os.path.lexists(self.skills / "bar"))
+
+    def test_retarget_both_directions_and_summary_order(self) -> None:
+        self.claude_skill("foo")
+        self.sync("foo")
+        self.local_skill("foo")
+        report = self.sync("foo")
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../skills/foo")
+        self.assertEqual(report.retargeted, ["foo"])
+        self.assertEqual(report.created, [])
+        self.assertEqual(report.removed, [])
+        self.assertEqual(report.linked, ["foo"])
+        self.assertEqual(self.recorded(), ["foo"])
+        self.assertEqual(report.summary_line(), "Codex skill links: 1 linked, retargeted foo.")
+
+        shutil.rmtree(self.root / "skills" / "foo")
+        report = self.sync("foo")
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../.claude/skills/foo")
+        self.assertEqual(report.retargeted, ["foo"])
+        self.assertEqual(report.created, [])
+        self.assertEqual(report.removed, [])
+        self.assertEqual(report.linked, ["foo"])
+        self.assertEqual(self.recorded(), ["foo"])
+        self.assertEqual(report.summary_line(), "Codex skill links: 1 linked, retargeted foo.")
+
+        # Summary placement: new, then retargeted, then removed.
+        self.claude_skill("bar")
+        self.claude_skill("old")
+        self.sync("bar", "old")
+        self.local_skill("bar")
+        self.claude_skill("fresh")
+        report = self.sync("bar", "fresh")
+        self.assertEqual(
+            report.summary_line(),
+            "Codex skill links: 2 linked, 1 new, retargeted bar, removed old.",
+        )
+
+    def test_retarget_unlink_failure_keeps_record_and_skips_symlink(self) -> None:
+        self.claude_skill("foo")
+        self.sync("foo")
+        self.local_skill("foo")
+        real_unlink = os.unlink
+
+        def fail_unlink(path, *args, **kwargs):
+            if Path(path) == self.skills / "foo":
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(codex_links.os, "unlink", side_effect=fail_unlink), patch.object(
+            codex_links.os, "symlink"
+        ) as symlink_mock:
+            report = self.sync("foo")
+        symlink_mock.assert_not_called()
+        self.assertEqual(report.retargeted, [])
+        self.assertEqual(report.linked, [])
+        self.assertEqual(self.reasons(report)["foo"], "could not remove: Permission denied")
+        self.assertEqual(self.recorded(), ["foo"])
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../.claude/skills/foo")
+
+    def test_retarget_symlink_failure_keeps_record_for_next_run(self) -> None:
+        self.claude_skill("foo")
+        self.sync("foo")
+        self.local_skill("foo")
+        with patch.object(
+            codex_links.os, "symlink", side_effect=PermissionError(13, "Permission denied")
+        ):
+            report = self.sync("foo")
+        self.assertEqual(report.retargeted, [])
+        self.assertEqual(report.linked, [])
+        self.assertEqual(self.reasons(report)["foo"], "could not link: Permission denied")
+        self.assertFalse(os.path.lexists(self.skills / "foo"))
+        self.assertEqual(self.recorded(), ["foo"])
+
+        report = self.sync("foo")
+        self.assertEqual(report.created, ["foo"])
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../skills/foo")
+        self.assertEqual(self.recorded(), ["foo"])
+
+    def test_unwritable_record_defers_retarget_only_run(self) -> None:
+        self.claude_skill("foo")
+        self.sync("foo")
+        self.local_skill("foo")
+        with patch.object(
+            codex_links, "_write_record", side_effect=PermissionError(13, "Permission denied")
+        ):
+            report = self.sync("foo")
+        self.assertIn("could not write .agents/skills/.gitignore", report.skipped)
+        self.assertEqual(report.deferred, ["foo"])
+        self.assertEqual(os.readlink(self.skills / "foo"), "../../.claude/skills/foo")
+        self.assertEqual(self.recorded(), ["foo"])
+
+    def test_unowned_wanted_link_left_alone_and_other_legal_link_occupied(self) -> None:
+        self.local_skill("wanted")
+        self.link("wanted", target=codex_links.link_target("wanted", local=True))
+        self.local_skill("other")
+        self.link("other", target=codex_links.link_target("other", local=False))
+        report = self.sync()
+        self.assertEqual(self.reasons(report)["wanted"], "working link, not owned")
+        self.assertEqual(self.reasons(report)["other"], "occupied")
+        self.assertIn(codex_links.OCCUPIED_STEP, report.summary_line())
+        self.assertIsNone(self.recorded())
+        self.assertEqual(os.readlink(self.skills / "wanted"), "../../skills/wanted")
+        self.assertEqual(os.readlink(self.skills / "other"), "../../.claude/skills/other")
+
+        # Reverse direction: unrecorded local-form link while skill is pack-only.
+        shutil.rmtree(self.root / "skills")
+        self.claude_skill("packonly")
+        self.link("packonly", target=codex_links.link_target("packonly", local=True))
+        report = self.sync("packonly")
+        self.assertEqual(self.reasons(report)["packonly"], "occupied")
+        self.assertEqual(os.readlink(self.skills / "packonly"), "../../skills/packonly")
+
+    def test_symlinked_skills_dir_entry_or_skill_md_are_skipped(self) -> None:
+        outside = Path(self.tmp.name).resolve() / "outside"
+        (outside / "foo").mkdir(parents=True)
+        (outside / "foo" / "SKILL.md").write_text("# outside\n", encoding="utf-8")
+
+        # 1. Symlinked skills/
+        os.symlink(outside, self.root / "skills")
+        self.assertEqual(codex_links.local_skill_names(self.root), [])
+        self.sync()
+        self.assertFalse(os.path.lexists(self.root / ".agents"))
+        (self.root / "skills").unlink()
+
+        # 2. Symlinked skills/<name>
+        (self.root / "skills").mkdir()
+        os.symlink(outside / "foo", self.root / "skills" / "foo")
+        self.assertEqual(codex_links.local_skill_names(self.root), [])
+        self.sync()
+        self.assertFalse(os.path.lexists(self.root / ".agents"))
+        (self.root / "skills" / "foo").unlink()
+
+        # 3. Symlinked skills/<name>/SKILL.md
+        (self.root / "skills" / "foo").mkdir()
+        os.symlink(outside / "foo" / "SKILL.md", self.root / "skills" / "foo" / "SKILL.md")
+        self.assertEqual(codex_links.local_skill_names(self.root), [])
+        self.sync()
+        self.assertFalse(os.path.lexists(self.root / ".agents"))
+
+        # Non-skill files, dirs without SKILL.md, and invalid names are also ignored.
+        (self.root / "skills" / "README.md").write_text("hi\n", encoding="utf-8")
+        (self.root / "skills" / ".hidden").mkdir()
+        (self.root / "skills" / ".hidden" / "SKILL.md").write_text("# h\n", encoding="utf-8")
+        (self.root / "skills" / "dirmd").mkdir()
+        (self.root / "skills" / "dirmd" / "SKILL.md").mkdir()
+        self.assertEqual(codex_links.local_skill_names(self.root), [])
+
+    def test_unsupported_platform_notices_for_local_skills(self) -> None:
+        self.local_skill("foo")
+        with patch.object(codex_links, "_current_platform", return_value="win32"):
+            report = self.sync()
+            self.assertEqual(
+                report.summary_line(),
+                "Codex skill links are not created on Windows in this release.",
+            )
+            report_explicit = self.sync(local=["bar"])
+            self.assertEqual(
+                report_explicit.summary_line(),
+                "Codex skill links are not created on Windows in this release.",
+            )
+        self.assertFalse(os.path.lexists(self.root / ".agents"))
+
+    def test_prune_links_by_form_with_remove_local_false_and_true(self) -> None:
+        self.claude_skill("live-pack")
+        self.local_skill("live-local")
+        # A skill directory that became a symlink is no longer a local skill,
+        # even though a readable SKILL.md sits behind it.
+        behind = self.root / "elsewhere" / "symlinked-local"
+        behind.mkdir(parents=True)
+        (behind / "SKILL.md").write_text("# x\n", encoding="utf-8")
+        os.symlink(behind, self.root / "skills" / "symlinked-local")
+        self.record("gone-local", "gone-pack", "live-local", "live-pack", "symlinked-local")
+        self.link("live-pack", target=codex_links.link_target("live-pack", local=False))
+        self.link("gone-pack", target=codex_links.link_target("gone-pack", local=False))
+        self.link("live-local", target=codex_links.link_target("live-local", local=True))
+        self.link("gone-local", target=codex_links.link_target("gone-local", local=True))
+        self.link(
+            "symlinked-local", target=codex_links.link_target("symlinked-local", local=True)
+        )
+
+        report = codex_links.prune_links(
+            self.root, remove_record_when_empty=False, remove_local=False
+        )
+        self.assertEqual(report.removed, ["gone-local", "gone-pack", "symlinked-local"])
+        self.assertTrue(os.path.islink(self.root / "skills" / "symlinked-local"))
+        self.assertTrue((behind / "SKILL.md").is_file())
+        self.assertEqual(self.entries(), [".gitignore", "live-local", "live-pack"])
+        self.assertEqual(self.recorded(), ["live-local", "live-pack"])
+
+        report = codex_links.prune_links(
+            self.root, remove_record_when_empty=True, remove_local=True
+        )
+        self.assertEqual(report.removed, ["live-local"])
+        self.assertFalse(report.record_removed)
+        self.assertEqual(self.entries(), [".gitignore", "live-pack"])
+        self.assertEqual(self.recorded(), ["live-pack"])
+        self.assertTrue((self.root / "skills" / "live-local" / "SKILL.md").is_file())
+
+        # Remove pack target too; only local-form or dangling left -> removes record & dirs.
+        shutil.rmtree(self.root / ".claude" / "skills" / "live-pack")
+        self.link("live-local", target=codex_links.link_target("live-local", local=True))
+        self.record("live-local", "live-pack")
+        report = codex_links.prune_links(
+            self.root, remove_record_when_empty=True, remove_local=True
+        )
+        self.assertEqual(report.removed, ["live-local", "live-pack"])
+        self.assertTrue(report.record_removed)
+        self.assertFalse(os.path.lexists(self.root / ".agents"))
+
+    def test_lstat_error_during_compose_scan_skips_without_changing_links(self) -> None:
+        self.claude_skill("bar")
+        self.sync("bar")
+        self.local_skill("foo")
+        before = self.snapshot()
+        real_lstat = os.lstat
+
+        def fail_local_lstat(path, *args, **kwargs):
+            if Path(path) == self.root / "skills":
+                raise PermissionError(13, "Permission denied")
+            return real_lstat(path, *args, **kwargs)
+
+        with patch.object(codex_links.os, "lstat", side_effect=fail_local_lstat):
+            with self.assertRaises(PermissionError):
+                codex_links.local_skill_names(self.root)
+            report = self.sync("bar")
+        self.assertIsNotNone(report.skipped)
+        self.assertIn("filesystem error:", report.skipped)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_lstat_error_during_prune_removes_nothing(self) -> None:
+        self.record("gone-pack", "live-local")
+        self.link("gone-pack", target=codex_links.link_target("gone-pack", local=False))
+        self.link("live-local", target=codex_links.link_target("live-local", local=True))
+        self.local_skill("live-local")
+        before = self.snapshot()
+        real_lstat = os.lstat
+
+        def fail_local_lstat(path, *args, **kwargs):
+            if Path(path) == self.root / "skills" / "live-local":
+                raise PermissionError(13, "Permission denied")
+            return real_lstat(path, *args, **kwargs)
+
+        with patch.object(codex_links.os, "lstat", side_effect=fail_local_lstat):
+            report = codex_links.prune_links(
+                self.root, remove_record_when_empty=True, remove_local=False
+            )
+        self.assertIsNotNone(report.skipped)
+        self.assertIn("filesystem error:", report.skipped)
         self.assertEqual(self.snapshot(), before)
 
 

@@ -1,11 +1,14 @@
-"""Codex skill links: a derived view of ``.claude/skills/`` under ``.agents/skills/``.
+"""Codex skill links: a derived view of pack and local skills under ``.agents/skills/``.
 
 Codex discovers repository skills only in ``.agents/skills/``, which the
 composer never writes. After each committed compose, :func:`sync_links`
-links ``.agents/skills/<name>`` to ``../../.claude/skills/<name>`` for every
-skill whose effective hosts include ``codex``, but only where that is
-provably safe. :func:`prune_links` is the uninstall counterpart: it removes
-recorded links whose target directory is gone.
+links ``.agents/skills/<name>`` for every skill whose effective hosts
+include ``codex`` (``../../.claude/skills/<name>``) and every project-local
+skill under ``skills/<name>/SKILL.md`` (``../../skills/<name>``), with
+local skills taking precedence when a name appears in both sets, only where
+that is provably safe. :func:`prune_links` is the uninstall counterpart: it
+removes recorded links whose target is gone (or all local-form links when
+``remove_local`` is set).
 
 The links sit outside pack-lock. Their ownership record is the nested,
 self-ignoring ``.agents/skills/.gitignore``: a name is ours only when that
@@ -13,10 +16,10 @@ file listed it at the start of a run, or when the run created the link.
 Every other entry (tracked, case-variant, occupied, or an unlisted link) is
 left alone and reported. Nothing here resolves a link before deciding what
 it is, and removal is always ``os.unlink`` on the link itself, so a link can
-never lead a write or delete into ``.claude/skills``.
+never lead a write or delete into ``.claude/skills`` or ``skills``.
 
 Links are created only on macOS and Linux in this release. Elsewhere the
-compose summary says so whenever Codex-eligible skills exist.
+compose summary says so whenever pack or local Codex-eligible skills exist.
 """
 from __future__ import annotations
 
@@ -51,8 +54,10 @@ OCCUPIED_STEP = (
 Runner = Callable[..., Any]
 
 
-def link_target(name: str) -> str:
+def link_target(name: str, *, local: bool = False) -> str:
     """Return the relative target text of the link for ``name``."""
+    if local:
+        return f"../../skills/{name}"
     return f"../../.claude/skills/{name}"
 
 
@@ -73,6 +78,7 @@ class LinkReport:
 
     linked: list[str] = field(default_factory=list)
     created: list[str] = field(default_factory=list)
+    retargeted: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     left_alone: list[tuple[str, str]] = field(default_factory=list)
     record_removed: bool = False
@@ -89,11 +95,13 @@ class LinkReport:
             if self.deferred:
                 line += f"; deferred: {', '.join(self.deferred)}"
             return line + "."
-        if not (self.linked or self.removed or self.left_alone):
+        if not (self.linked or self.retargeted or self.removed or self.left_alone):
             return None
         parts = [f"{len(self.linked)} linked"]
         if self.created:
             parts.append(f"{len(self.created)} new")
+        if self.retargeted:
+            parts.append(f"retargeted {', '.join(self.retargeted)}")
         if self.removed:
             parts.append(f"removed {', '.join(self.removed)}")
         line = "Codex skill links: " + ", ".join(parts)
@@ -123,11 +131,48 @@ def _is_real_dir(st: os.stat_result | None) -> bool:
     return st is not None and stat.S_ISDIR(st.st_mode)
 
 
-def _is_exact_link(path: Path, name: str) -> bool:
+def _read_link_text(path: Path) -> str | None:
     st = _lstat(path)
     if st is None or not stat.S_ISLNK(st.st_mode):
+        return None
+    return os.readlink(path)
+
+
+def _is_legal_link(path: Path, name: str) -> bool:
+    text = _read_link_text(path)
+    return text in (link_target(name), link_target(name, local=True))
+
+
+def _is_local_skill_dir(skill_dir: Path) -> bool:
+    if not _is_real_dir(_lstat(skill_dir)):
         return False
-    return os.readlink(path) == link_target(name)
+    md_st = _lstat(skill_dir / "SKILL.md")
+    return md_st is not None and stat.S_ISREG(md_st.st_mode)
+
+
+def _is_local_skill(root: Path, name: str) -> bool:
+    if not _NAME_RE.fullmatch(name):
+        return False
+    skills_dir = root / "skills"
+    if not _is_real_dir(_lstat(skills_dir)):
+        return False
+    return _is_local_skill_dir(skills_dir / name)
+
+
+def local_skill_names(root: Path) -> list[str]:
+    """Return sorted project-local skill names under ``<root>/skills``."""
+    skills_dir = root / "skills"
+    if not _is_real_dir(_lstat(skills_dir)):
+        return []
+    try:
+        entries = os.listdir(skills_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    return [
+        name
+        for name in sorted(entries)
+        if _NAME_RE.fullmatch(name) and _is_local_skill_dir(skills_dir / name)
+    ]
 
 
 def _read_tracking(root: Path, run: Runner) -> _Tracking | None:
@@ -327,35 +372,53 @@ def sync_links(
     root: Path,
     eligible: Iterable[str],
     *,
+    local: Iterable[str] | None = None,
     platform: str | None = None,
     run: Runner = subprocess.run,
 ) -> LinkReport:
-    """Reconcile ``.agents/skills`` links with the committed Codex-eligible skills."""
+    """Reconcile ``.agents/skills`` links with pack-deployed and local skills."""
     report = LinkReport()
     current = _current_platform() if platform is None else platform
-    wanted = sorted(set(eligible))
+    eligible_set = set(eligible)
     if not platform_supported(current):
-        if wanted:
+        if eligible_set:
+            label = "Windows" if current == "win32" else current
+            report.notice = f"Codex skill links are not created on {label} in this release."
+            return report
+        try:
+            local_set = set(local_skill_names(root) if local is None else local)
+        except OSError as exc:
+            report.skipped = f"filesystem error: {exc}"
+            return report
+        if local_set:
             label = "Windows" if current == "win32" else current
             report.notice = f"Codex skill links are not created on {label} in this release."
         return report
-    valid: list[str] = []
-    folds = _fold_map(name for name in wanted if _NAME_RE.fullmatch(name))
-    for name in wanted:
-        if not _NAME_RE.fullmatch(name):
-            report.left_alone.append((name, "unsupported name"))
-        elif len(folds[name.casefold()]) > 1:
-            report.left_alone.append((name, "differs only by case from another skill"))
-        else:
-            valid.append(name)
     try:
-        _sync(root, valid, report, run)
+        local_set = set(local_skill_names(root) if local is None else local)
+        wanted = sorted(eligible_set | local_set)
+        valid: list[str] = []
+        folds = _fold_map(name for name in wanted if _NAME_RE.fullmatch(name))
+        for name in wanted:
+            if not _NAME_RE.fullmatch(name):
+                report.left_alone.append((name, "unsupported name"))
+            elif len(folds[name.casefold()]) > 1:
+                report.left_alone.append((name, "differs only by case from another skill"))
+            else:
+                valid.append(name)
+        _sync(root, valid, local_set, report, run)
     except OSError as exc:
         report.skipped = f"filesystem error: {exc}"
     return report
 
 
-def _sync(root: Path, valid: list[str], report: LinkReport, run: Runner) -> None:
+def _sync(
+    root: Path,
+    valid: list[str],
+    local_set: set[str],
+    report: LinkReport,
+    run: Runner,
+) -> None:
     agents = root / ".agents"
     skills = agents / "skills"
     tracking, recorded, problem = _precheck(root, run)
@@ -392,7 +455,7 @@ def _sync(root: Path, valid: list[str], report: LinkReport, run: Runner) -> None
         if name.casefold() in tracking.names:
             if spellings:
                 report.left_alone.append((name, "tracked"))
-        elif name in spellings and _is_exact_link(skills / name, name):
+        elif name in spellings and _is_legal_link(skills / name, name):
             removals.append(name)
         elif name in spellings:
             report.left_alone.append((name, "no longer eligible; not an exact link"))
@@ -400,6 +463,7 @@ def _sync(root: Path, valid: list[str], report: LinkReport, run: Runner) -> None
 
     owned: list[str] = []
     to_create: list[str] = []
+    to_retarget: list[str] = []
     for name in valid:
         spellings = present.get(name.casefold(), [])
         variants = [entry for entry in spellings if entry != name]
@@ -409,23 +473,30 @@ def _sync(root: Path, valid: list[str], report: LinkReport, run: Runner) -> None
             report.left_alone.append((name, f"case collision with {variants[0]}"))
         elif name not in spellings:
             to_create.append(name)
-        elif _is_exact_link(skills / name, name):
-            if name in recorded:
-                owned.append(name)
-            else:
-                report.left_alone.append((name, "working link, not owned"))
         else:
-            report.left_alone.append((name, "occupied"))
+            is_local = name in local_set
+            text = _read_link_text(skills / name)
+            wanted_target = link_target(name, local=is_local)
+            other_target = link_target(name, local=not is_local)
+            if text == wanted_target:
+                if name in recorded:
+                    owned.append(name)
+                else:
+                    report.left_alone.append((name, "working link, not owned"))
+            elif text == other_target and name in recorded:
+                to_retarget.append(name)
+            else:
+                report.left_alone.append((name, "occupied"))
 
     record_exists = _lstat(skills / IGNORE_FILE) is not None
-    if to_create or removals:
+    if to_create or to_retarget or removals:
         # Record prospective links before creating them, and prove the record
         # is writable before any link changes; a failure changes no link.
         try:
             _write_record(skills, list(recorded) + to_create, force=True)
         except OSError as exc:
             report.skipped = f"could not write .agents/skills/.gitignore: {exc}"
-            report.deferred = to_create + removals
+            report.deferred = to_create + to_retarget + removals
             report.linked = sorted(owned)
             return
         record_exists = True
@@ -438,9 +509,24 @@ def _sync(root: Path, valid: list[str], report: LinkReport, run: Runner) -> None
             report.left_alone.append((name, f"could not remove: {exc.strerror or exc}"))
         else:
             report.removed.append(name)
+    for name in to_retarget:
+        try:
+            os.unlink(skills / name)
+        except OSError as exc:
+            kept_for_retry.append(name)
+            report.left_alone.append((name, f"could not remove: {exc.strerror or exc}"))
+            continue
+        try:
+            os.symlink(link_target(name, local=(name in local_set)), skills / name)
+        except OSError as exc:
+            kept_for_retry.append(name)
+            report.left_alone.append((name, f"could not link: {exc.strerror or exc}"))
+        else:
+            report.retargeted.append(name)
+            owned.append(name)
     for name in to_create:
         try:
-            os.symlink(link_target(name), skills / name)
+            os.symlink(link_target(name, local=(name in local_set)), skills / name)
         except OSError as exc:
             report.left_alone.append((name, f"could not link: {exc.strerror or exc}"))
         else:
@@ -480,28 +566,38 @@ def prune_links(
     root: Path,
     *,
     remove_record_when_empty: bool,
+    remove_local: bool = False,
     platform: str | None = None,
     run: Runner = subprocess.run,
 ) -> LinkReport:
-    """Remove recorded exact links whose ``.claude/skills/<name>`` no longer exists.
+    """Remove recorded exact links whose target is gone (or local links when requested).
 
     Uninstall calls this on every run that finds the ownership file, whatever
     the pack-state result, so a retry after a crash still removes a dangling
-    link. A link whose target directory survived stays recorded. With
-    ``remove_record_when_empty`` (uninstall-all), an empty record is removed,
-    then ``.agents/skills`` and ``.agents`` if they are empty.
+    link. A pack-form link stays while ``.claude/skills/<name>`` exists; a
+    local-form link is removed when ``remove_local`` is true or
+    ``skills/<name>/SKILL.md`` is no longer a valid local skill, and stays
+    otherwise. With ``remove_record_when_empty`` (uninstall-all), an empty
+    record is removed, then ``.agents/skills`` and ``.agents`` if they are
+    empty.
     """
     report = LinkReport()
     if not has_record(root, platform=platform):
         return report
     try:
-        _prune(root, remove_record_when_empty, report, run)
+        _prune(root, remove_record_when_empty, remove_local, report, run)
     except OSError as exc:
         report.skipped = f"filesystem error: {exc}"
     return report
 
 
-def _prune(root: Path, remove_record_when_empty: bool, report: LinkReport, run: Runner) -> None:
+def _prune(
+    root: Path,
+    remove_record_when_empty: bool,
+    remove_local: bool,
+    report: LinkReport,
+    run: Runner,
+) -> None:
     agents = root / ".agents"
     skills = agents / "skills"
     tracking, recorded, problem = _precheck(root, run)
@@ -517,12 +613,19 @@ def _prune(root: Path, remove_record_when_empty: bool, report: LinkReport, run: 
         spellings = by_fold.get(name.casefold(), [])
         if name.casefold() in tracking.names or name not in spellings:
             continue
-        if not _is_exact_link(skills / name, name):
-            report.left_alone.append((name, "not an exact link"))
-        elif _lstat(root / ".claude" / "skills" / name) is not None:
-            kept.append(name)
+        text = _read_link_text(skills / name)
+        if text == link_target(name):
+            if _lstat(root / ".claude" / "skills" / name) is not None:
+                kept.append(name)
+            else:
+                dangling.append(name)
+        elif text == link_target(name, local=True):
+            if not remove_local and _is_local_skill(root, name):
+                kept.append(name)
+            else:
+                dangling.append(name)
         else:
-            dangling.append(name)
+            report.left_alone.append((name, "not an exact link"))
     if dangling:
         # Prove the record is writable before any link changes, as the
         # compose pass does; a failure here removes nothing.
