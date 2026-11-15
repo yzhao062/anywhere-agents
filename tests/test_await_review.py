@@ -644,7 +644,7 @@ class TestAgreesWithHealthChecks1To3(AwaitReviewCase):
         self.assertIn("FAIL check-2", hout)
 
     def test_float_epoch_state_files_are_rejected_by_both(self):
-        """SKILL.md requires integer Unix epoch state files.
+        """references/codex-backend.md (Timestamp units) requires integer Unix epoch state files.
 
         Both readers reject a fractional spelling, and the producers write
         integers, so this pins the two readers to the same refusal.

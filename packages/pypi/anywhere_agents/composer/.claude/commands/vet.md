@@ -20,4 +20,4 @@ The two run in parallel when memory allows and one after the other otherwise.
 When the pair includes Claude, every staged path must be in scope, because the Claude backend reviews the whole staged diff.
 `/vet all` runs the three of Claude, Codex, Agy, and Grok that are not coordinating; `both` never includes Grok.
 
-Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.
+Apply it to the user's current task. Read `references/review-lenses.md` each round, and any other reference only when its read condition in `SKILL.md` holds.

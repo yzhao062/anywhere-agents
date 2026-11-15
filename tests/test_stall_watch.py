@@ -1,7 +1,8 @@
 """Tests for stall-watch.{sh,ps1} -- background stall observer.
 
-Validates the contract in skills/implement-review/SKILL.md > Script contract
-invariants and Phase 2.0 Health check 9. Uses STALL_THRESHOLD_SECONDS=2
+Validates the contract in skills/implement-review/references/codex-backend.md >
+Script contract invariants and references/health-check.md > Phase 2.0 prologue
+(Health check 9). Uses STALL_THRESHOLD_SECONDS=2
 and STALL_POLL_INTERVAL_SECONDS=1 so tests complete in seconds.
 """
 from __future__ import annotations

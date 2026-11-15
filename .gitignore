@@ -19,6 +19,9 @@ site/
 # Per-session planning / review scratch. These accumulate over time; the
 # wildcards keep the committed tree clean without needing per-file edits.
 PLAN-*.md
+# git ignores case-insensitively on macOS and Windows, so `PLAN-*.md` would
+# also hide the shipped references/plan-review.md, its docs page, and the wheel copy.
+!**/references/plan-review.md
 CodexReview.md
 /Review-*.md
 # Reviewers write to a dotted temp file and rename it over the target, so a

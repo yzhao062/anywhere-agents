@@ -15,4 +15,4 @@ Antigravity directly; `gemini` and `antigravity` remain aliases. With no
 reviewer token, the default is Codex unless `IMPLEMENT_REVIEW_DEFAULT_REVIEWER`
 names others, such as `both` or `all`.
 
-Apply it to the user's current task. Also read the supporting files under the skill's references/ directory as needed.
+Apply it to the user's current task. Read `references/review-lenses.md` each round, and any other reference only when its read condition in `SKILL.md` holds.

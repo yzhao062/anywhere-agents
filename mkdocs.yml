@@ -87,6 +87,13 @@ nav:
     - implement-review:
       - skills/implement-review.md
       - Review lenses: skills/references/review-lenses.md
+      - Plan review: skills/references/plan-review.md
+      - Codex backend: skills/references/codex-backend.md
+      - Agy backend: skills/references/agy-backend.md
+      - Claude backend: skills/references/claude-backend.md
+      - Grok backend: skills/references/grok-backend.md
+      - Failover and recovery: skills/references/failover-and-recovery.md
+      - Health check: skills/references/health-check.md
       - 'Example reviews':
         - 'Code (phased)': skills/references/example-reviews/example-code-phased.md
         - 'Paper (verification)': skills/references/example-reviews/example-paper-verification.md

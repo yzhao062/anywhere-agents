@@ -1,7 +1,8 @@
 """Contract tests for dispatch-claude.{sh,ps1} -- Auto-terminal Claude backend.
 
 Validates the dispatch contract documented in
-skills/implement-review/SKILL.md > Auto-terminal Claude backend. The Claude
+skills/implement-review/references/claude-backend.md > Auto-terminal Claude
+backend (cross-vendor reviewer, opt-in). The Claude
 backend is the cross-vendor reviewer path used when Codex (or the user) is the
 primary implementer and Claude is preferred as the reviewer voice.
 
@@ -392,7 +393,8 @@ class _DispatchContractMixin:
             self.assertLess(
                 int(pre_mtime), 10**12,
                 "pre-mtime looks like FILETIME (100ns since 1601), "
-                "not Unix epoch seconds. SKILL.md Phase 1c bans this.",
+                "not Unix epoch seconds. references/codex-backend.md (Timestamp "
+                "units) requires Unix epoch seconds.",
             )
             self.assertAlmostEqual(int(pre_mtime), old_mtime, delta=2,
                                    msg="pre-mtime must match file's mtime")

@@ -576,9 +576,9 @@ INDEX_HEADER_CELLS = ["File", "Read when"]
 INDEX_LINK_RE = re.compile(r"\[(references/[\w.-]+\.md)\]\((references/[\w.-]+\.md)\)")
 INDEX_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
-# Skills whose SKILL.md carries the index. Slice 2 of the skills diet adds
-# "implement-review" to this tuple.
-REFERENCE_INDEX_SKILLS = ("prun",)
+# Skills whose SKILL.md carries the index: the two coordinator skills that
+# the skills diet slimmed into a core plus references/.
+REFERENCE_INDEX_SKILLS = ("prun", "implement-review")
 
 
 def _table_cells(line: str) -> list[str]:
@@ -729,6 +729,223 @@ class ReferenceIndexCheckTests(unittest.TestCase):
     def test_a_second_index_heading_is_rejected(self):
         with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 2"):
             self._check(self.GOOD_INDEX + "\n" + self.GOOD_INDEX)
+
+
+# ------------------------------------------------------- round checklist
+# implement-review opens with a "## Round checklist": two lettered standing
+# rules, then one numbered step per action of a round. A Codex head reads the
+# first 115 lines and a whole-file cat is cut by a token cap, so the checklist
+# must sit in that head and the standing rules (the Claude slot and the stop
+# rule) in its first 9,500 bytes. Each step names the heading that holds its
+# procedure as an in-page link; a link that matches no heading, or two, would
+# send the reader nowhere. What a step says is reviewed with the skill and is
+# not pinned here.
+
+CHECKLIST_HEADING = "## Round checklist"
+CHECKLIST_LAST_LINE = 115
+STANDING_RULES_LAST_BYTE = 9_500
+CHECKLIST_STEP_RE = re.compile(r"^(\d+)\.\s+\S")
+STANDING_RULE_RE = re.compile(r"^[A-Z]\.\s+\S")
+INPAGE_LINK_RE = re.compile(r"\[[^\]\n]*\]\(#([^)\s]*)\)")
+HEADING_TEXT_RE = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
+
+# Skills whose SKILL.md carries the checklist.
+ROUND_CHECKLIST_SKILLS = ("implement-review",)
+
+
+def github_slug(heading: str) -> str:
+    """The anchor GitHub gives a heading: lowercase, keep letters, digits,
+    spaces, hyphens, and underscores, then turn spaces into hyphens."""
+    return re.sub(r"[^\w \-]", "", heading.strip().lower()).replace(" ", "-")
+
+
+def _heading_slugs(masked: str) -> list[str]:
+    slugs: list[str] = []
+    for line in masked.splitlines():
+        match = HEADING_TEXT_RE.match(line)
+        if match:
+            slugs.append(github_slug(match.group(1)))
+    return slugs
+
+
+def _reject_broken_links(where: str, targets: list[str], slugs: list[str]) -> None:
+    broken = [t for t in targets if slugs.count(t) != 1]
+    if broken:
+        raise AssertionError(f"{where} has an in-page link that matches no heading, "
+                             f"or more than one: {broken}")
+
+
+def check_round_checklist(text: str) -> None:
+    masked, _ = _markdown_regions(text)
+    lines = masked.splitlines(keepends=True)
+    heads = [i for i, line in enumerate(lines)
+             if _line_body(line).strip() == CHECKLIST_HEADING]
+    if len(heads) != 1:
+        raise AssertionError(
+            f"expected one unfenced {CHECKLIST_HEADING!r}, found {len(heads)}")
+    start = heads[0]
+    end = next((i for i in range(start + 1, len(lines)) if HEADING_RE.match(lines[i])),
+               len(lines))
+    last = end
+    while last > start + 1 and not lines[last - 1].strip():
+        last -= 1
+    if last > CHECKLIST_LAST_LINE:
+        raise AssertionError(f"the round checklist ends at line {last}, past line "
+                             f"{CHECKLIST_LAST_LINE}")
+    slugs = _heading_slugs(masked)
+    step_numbers: list[int] = []
+    rule_end = None
+    offset = sum(len(line) for line in lines[:start + 1])
+    for i in range(start + 1, end):
+        body = _line_body(lines[i])
+        step = CHECKLIST_STEP_RE.match(body)
+        if step:
+            number = int(step.group(1))
+            step_numbers.append(number)
+            targets = INPAGE_LINK_RE.findall(body)
+            if not any(slugs.count(t) == 1 for t in targets):
+                raise AssertionError(
+                    f"checklist step {number} links no heading of this file by a "
+                    f"slug that matches exactly one heading: {targets}")
+            _reject_broken_links(f"checklist step {number}", targets, slugs)
+        elif STANDING_RULE_RE.match(body):
+            rule_end = len(text[:offset + len(body)].encode("utf-8"))
+            _reject_broken_links("a standing rule", INPAGE_LINK_RE.findall(body), slugs)
+        offset += len(lines[i])
+    if not step_numbers:
+        raise AssertionError("the round checklist has no numbered step")
+    if step_numbers != list(range(1, len(step_numbers) + 1)):
+        raise AssertionError(f"checklist steps are not numbered 1..N: {step_numbers}")
+    if rule_end is None:
+        raise AssertionError("the round checklist has no lettered standing rule")
+    if rule_end > STANDING_RULES_LAST_BYTE:
+        raise AssertionError(f"the standing rules end at byte {rule_end}, past byte "
+                             f"{STANDING_RULES_LAST_BYTE}")
+
+
+class RoundChecklistTests(unittest.TestCase):
+    def test_each_listed_skill_has_a_checklist_that_links_its_procedures(self):
+        for name in ROUND_CHECKLIST_SKILLS:
+            with self.subTest(name):
+                skill_md = SKILLS_DIR / name / "SKILL.md"
+                self.assertTrue(skill_md.is_file(), f"missing {skill_md}")
+                check_round_checklist(skill_md.read_text(encoding="utf-8", errors="replace"))
+
+
+class RoundChecklistCheckTests(unittest.TestCase):
+    """The check itself, run against small documents."""
+
+    GOOD = (
+        "# Core\n\n"
+        "## Round checklist\n\n"
+        "A. **Rule.** Keep the slot. See [Phase 2.0: Health check (Auto-terminal only)]"
+        "(#phase-20-health-check-auto-terminal-only).\n\n"
+        "1. **First.** Follow [Prerequisites](#prerequisites).\n\n"
+        "2. **Second.** Send by [1c. Send to reviewer](#1c-send-to-reviewer).\n\n"
+        "## Prerequisites\n\nBody.\n\n"
+        "### 1c. Send to reviewer\n\nBody.\n\n"
+        "### Phase 2.0: Health check (Auto-terminal only)\n\nBody.\n"
+    )
+
+    def test_a_complete_checklist_passes(self):
+        check_round_checklist(self.GOOD)
+
+    def test_a_crlf_copy_passes(self):
+        check_round_checklist(_to_crlf(self.GOOD))
+
+    def test_the_slug_drops_punctuation_and_keeps_hyphens_and_underscores(self):
+        self.assertEqual(github_slug("Phase 2.0: Health check (Auto-terminal only)"),
+                         "phase-20-health-check-auto-terminal-only")
+        self.assertEqual(github_slug("1d. Auto-watch (Terminal-relay and Auto-terminal channels)"),
+                         "1d-auto-watch-terminal-relay-and-auto-terminal-channels")
+        self.assertEqual(github_slug("Round_history"), "round_history")
+
+    def test_a_missing_checklist_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 0"):
+            check_round_checklist("# Core\n\nNo checklist here.\n")
+
+    def test_a_checklist_inside_a_fence_is_not_a_checklist(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 0"):
+            check_round_checklist("```\n" + self.GOOD + "```\n")
+
+    def test_a_second_checklist_heading_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 2"):
+            check_round_checklist(self.GOOD + "\n## Round checklist\n\nAgain.\n")
+
+    def test_a_step_without_an_in_page_link_is_rejected(self):
+        text = self.GOOD.replace("Follow [Prerequisites](#prerequisites).", "Follow Prerequisites.")
+        with self.assertRaisesRegex(AssertionError, r"step 1 links no heading"):
+            check_round_checklist(text)
+
+    def test_a_link_to_a_file_is_not_an_in_page_link(self):
+        text = self.GOOD.replace("[Prerequisites](#prerequisites)",
+                                 "[Prerequisites](references/a.md)")
+        with self.assertRaisesRegex(AssertionError, r"step 1 links no heading"):
+            check_round_checklist(text)
+
+    def test_a_link_to_a_missing_heading_is_rejected(self):
+        text = self.GOOD.replace("(#prerequisites)", "(#prerequisite)")
+        with self.assertRaisesRegex(AssertionError, r"step 1 links no heading"):
+            check_round_checklist(text)
+
+    def test_a_link_that_keeps_the_punctuation_is_rejected(self):
+        text = self.GOOD.replace("(#1c-send-to-reviewer)", "(#1c.-send-to-reviewer)")
+        with self.assertRaisesRegex(AssertionError, r"step 2 links no heading"):
+            check_round_checklist(text)
+
+    def test_a_link_that_matches_two_headings_is_rejected(self):
+        text = self.GOOD + "\n## Prerequisites\n\nAgain.\n"
+        with self.assertRaisesRegex(AssertionError, r"step 1 links no heading"):
+            check_round_checklist(text)
+
+    def test_a_broken_link_beside_a_good_one_is_rejected(self):
+        text = self.GOOD.replace("Follow [Prerequisites](#prerequisites).",
+                                 "See [gone](#gone) and [Prerequisites](#prerequisites).")
+        with self.assertRaisesRegex(AssertionError, r"step 1 has an in-page link"):
+            check_round_checklist(text)
+
+    def test_a_broken_link_in_a_standing_rule_is_rejected(self):
+        text = self.GOOD.replace("A. **Rule.** Keep the slot.",
+                                 "A. **Rule.** Keep the slot ([gone](#gone)).")
+        with self.assertRaisesRegex(AssertionError, r"a standing rule has an in-page link"):
+            check_round_checklist(text)
+
+    def test_a_step_numbering_gap_is_rejected(self):
+        text = self.GOOD.replace("2. **Second.**", "3. **Second.**")
+        with self.assertRaisesRegex(AssertionError, r"not numbered 1\.\.N"):
+            check_round_checklist(text)
+
+    def test_a_checklist_without_steps_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"no numbered step"):
+            check_round_checklist("## Round checklist\n\nA. **Rule.** Text.\n")
+
+    def test_a_checklist_without_a_standing_rule_is_rejected(self):
+        text = self.GOOD.replace("A. **Rule.**", "**Rule.**")
+        with self.assertRaisesRegex(AssertionError, r"no lettered standing rule"):
+            check_round_checklist(text)
+
+    def test_a_checklist_that_ends_past_the_head_is_rejected(self):
+        filler = "".join(f"Filler line {n}.\n\n" for n in range(60))
+        text = self.GOOD.replace("## Prerequisites", filler + "## Prerequisites", 1)
+        # The filler sits after the steps but before the next heading, so it
+        # belongs to the checklist section.
+        with self.assertRaisesRegex(AssertionError, r"ends at line \d+, past line 115"):
+            check_round_checklist(text)
+
+    def test_standing_rules_past_the_byte_budget_are_rejected(self):
+        text = self.GOOD.replace("Keep the slot.", "Keep the slot. " + "x" * STANDING_RULES_LAST_BYTE)
+        with self.assertRaisesRegex(AssertionError, r"standing rules end at byte \d+, past byte 9500"):
+            check_round_checklist(text)
+
+    def test_the_budget_counts_bytes_not_characters(self):
+        # 6,000 two-byte characters are 6,000 characters and 12,000 bytes.
+        text = self.GOOD.replace("Keep the slot.", "Keep the slot. " + "é" * 6000)
+        with self.assertRaisesRegex(AssertionError, r"standing rules end at byte \d+"):
+            check_round_checklist(text)
+
+    def test_a_standing_rule_inside_the_budget_passes(self):
+        text = self.GOOD.replace("Keep the slot.", "Keep the slot. " + "x" * 5000)
+        check_round_checklist(text)
 
 
 if __name__ == "__main__":

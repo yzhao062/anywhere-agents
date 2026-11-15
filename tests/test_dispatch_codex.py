@@ -1,7 +1,8 @@
 """Contract tests for dispatch-codex.{sh,ps1} -- Auto-terminal channel.
 
 Validates the dispatch contract documented in
-skills/implement-review/SKILL.md Phase 1c "Auto-terminal mechanics".
+skills/implement-review/references/codex-backend.md (Auto-terminal path, Script
+contract invariants) and SKILL.md > 1c. Send to reviewer.
 
 Strategy: replace the real codex binary with a mock Python stub (via the
 CODEX_BIN env override that dispatch-codex honors). The mock logs args +
@@ -367,7 +368,8 @@ class _DispatchContractMixin:
             self.assertLess(
                 int(pre_mtime), 10**12,
                 "pre-mtime looks like FILETIME (100ns since 1601), "
-                "not Unix epoch seconds. SKILL.md Phase 1c bans this.",
+                "not Unix epoch seconds. references/codex-backend.md (Timestamp "
+                "units) requires Unix epoch seconds.",
             )
             self.assertAlmostEqual(int(pre_mtime), old_mtime, delta=2,
                                    msg="pre-mtime must match file's mtime")
@@ -1618,8 +1620,8 @@ class DispatchSandboxFlagContract(unittest.TestCase):
     its own git / grep / pwsh subprocess, so the review came back as
     "could not access files". Passing `--sandbox danger-full-access` to
     `codex exec` bypasses the broken sandbox runner and gives Codex the
-    same access it has in Terminal-relay. See SKILL.md "Trust model and
-    the sandbox flag" paragraph for the full rationale.
+    same access it has in Terminal-relay. See references/codex-backend.md
+    "Trust model and the sandbox flag" paragraph for the full rationale.
 
     These tests freeze the dispatcher contract: a future refactor that
     silently drops the flag would re-introduce the 1312 failure mode.

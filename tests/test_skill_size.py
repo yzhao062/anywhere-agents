@@ -28,8 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # Lowered 2026-11-12 to the measured size after the Copilot reviewer backend
 # and the Plugin path left implement-review (156,049 -> 147,798).
 # Lowered 2026-11-15: prun text moved to references (40,776 -> 21,628).
+# Lowered 2026-11-15: implement-review text moved to references behind a round
+# checklist (147,798 -> 65,793).
 CEILINGS: dict[str, int] = {
-    "skills/implement-review/SKILL.md": 147_798,
+    "skills/implement-review/SKILL.md": 65_793,
     "skills/prun/SKILL.md": 21_628,
 }
 

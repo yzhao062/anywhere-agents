@@ -1,4 +1,5 @@
 # Grok Reviewer Backend (`dispatch-grok.py`)
+Read this when Grok reviews (`/vet grok`, `/vet all`, or a default reviewer that includes Grok), before overriding a `GROK_DISPATCH_*`, `GROK_BIN`, or `GROK_HOME` setting, or when stderr shows a `MODEL-*` line or `dispatch-grok.py` exits 70.
 
 This reference documents the opt-in Grok CLI backend for `/vet` (`skills/implement-review/scripts/dispatch-grok.py`).
 

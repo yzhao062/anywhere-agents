@@ -1,4 +1,5 @@
 # Review Lenses
+Read this when picking the lens for item 4 of section 1b, which is every round.
 
 Content-type-specific criteria for Codex reviews. Each lens is grounded in established review frameworks so the reviewer applies recognized standards rather than ad-hoc checks. The review request should include the relevant lens so Codex knows what to focus on. For any prose diff, regardless of lens, also apply the Writing rules audit (General lens, item 7) so banned words and the "X, not Y" antithesis are caught on papers, proposals, and docs alike.
 

@@ -1,7 +1,7 @@
 """Tests for health-check.py + health-check.{sh,ps1} wrappers.
 
 Covers the 9 structural Health checks + 3 Substance heuristics defined in
-skills/implement-review/SKILL.md > Phase 2.0 prologue. The Python helper
+skills/implement-review/references/health-check.md > Phase 2.0 prologue. The Python helper
 contains the real logic; the shell wrappers are exercised by smoke tests to
 confirm they delegate correctly.
 """
@@ -578,7 +578,7 @@ class HealthCheckPython(unittest.TestCase):
         """When Check 8 WARNs, the line includes a `breakdown=` segment
         with per-pattern counts sorted by frequency. This is what lets
         downstream Claude recognize WSL-stub-bash 1312 burst (and other
-        known-noise shapes catalogued in SKILL.md FP-tuning) without
+        known-noise shapes in references/health-check.md, False-positive tuning) without
         re-grepping the tail.
         """
         # Mix of patterns with distinct counts so order is deterministic.
@@ -748,7 +748,7 @@ class HealthCheckPython(unittest.TestCase):
     # present in only one repo while parity still reported green.
 
     def test_check8_passes_on_legacy_pre_w1a_check8_row_shape(self) -> None:
-        """Legacy pre-W1a shape of the SKILL.md Phase 2.0 check-8 row.
+        """Legacy pre-W1a shape of the Phase 2.0 check-8 row (now in references/health-check.md).
 
         This fixture is NOT how the current SKILL.md reads: W1a backticked both
         occurrences, so strip_code_spans now removes them before the fragment
@@ -1091,6 +1091,24 @@ class HealthCheckPython(unittest.TestCase):
             skill_md.read_text(encoding="utf-8", errors="replace"),
             source_label=str(skill_md),
         )
+
+    def test_check8_live_implement_review_references_scan_clean(self) -> None:
+        """Every implement-review reference, read whole, produces zero Check 8 markers.
+
+        The core moved prose into references/, and a coordinator that opens one
+        reads it into the same context a Check 8 scan covers, so each file is
+        held to the standard SKILL.md meets. references/example-reviews/ holds
+        sample reviews and is not read as instruction text.
+        """
+        refs_dir = ROOT / "skills" / "implement-review" / "references"
+        refs = sorted(p for p in refs_dir.glob("*.md") if p.is_file())
+        self.assertTrue(refs, f"no reference files under {refs_dir}")
+        for ref in refs:
+            with self.subTest(ref.name):
+                self._assert_check8_pass(
+                    ref.read_text(encoding="utf-8", errors="replace"),
+                    source_label=str(ref),
+                )
 
     def test_check8_live_agents_md_scans_clean(self) -> None:
         """The current AGENTS.md, read whole, produces zero Check 8 markers.
