@@ -157,7 +157,10 @@ if flood:
     for number in range(flood):
         sys.stdout.buffer.write(("L%05d " % number + chr(233) * 250 + "x\n").encode("utf-8"))
     sys.stdout.buffer.flush()
-sys.stderr.write("mock-codex: stderr\n")
+# Raw bytes: on Windows a text-mode write ends this last tail line with CRLF, and
+# the extra byte moves the FALLBACK byte cut onto a character boundary.
+sys.stderr.flush()
+sys.stderr.buffer.write(b"mock-codex: stderr\n")
 sys.stdout.flush()
 sys.stderr.flush()
 
