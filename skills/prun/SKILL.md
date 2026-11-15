@@ -182,7 +182,7 @@ accident; it is not a sandbox, and a worker can still read any file the user can
    on the CLI's bounded `--print-timeout`. (`gather.{sh,ps1}` remains for the plain wait-for-all case.)
 6. **Reconcile, then integrate**: before integrating, **reconcile the ledger**: every dispatched unit
    must have a non-empty result. If any is missing or empty, do **not** integrate the partial set;
-   recover the worker's output from its `<state-dir>/tail` (dispatch-task-agy also salvages the
+   recover the worker's output from its `<state-dir>/tail` (each dispatcher also salvages the
    tail into the result file automatically under a `FALLBACK` header). If no usable result can be
    recovered, re-dispatch that unit or flag the user. Then the coordinator reads each result plus
    each clone's `git diff`, merges the wanted changes into
@@ -328,9 +328,10 @@ Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
 scripts/dispatch-task.sh --prompt-file <prompt> --result-file <fresh abs result> --unit-id <id>
 ```
 
-`dispatch-task.ps1` is the Windows twin, with `reap-watch.ps1` as its watchdog. The arguments, the
-`STATE-DIR` line, the state directory, and the `FALLBACK` backstop match the Agy dispatcher, so
-`monitor` and `gather` work on both. There is no quota routing; a Codex unit spends the Codex plan.
+`dispatch-task.ps1` is the Windows twin, with `reap-watch.ps1` as its watchdog. It takes only these
+three arguments, so a Codex unit gets no follow-up turn. Result publishing, exit codes, and `STATE-DIR`
+match Agy (the preamble is Grok's; `FALLBACK` keeps 200 tail lines), so `monitor` and `gather` work.
+There is no quota routing; a Codex unit spends the Codex plan.
 
 - **Model and effort come from the registry.** The `prun-worker` row for the Codex family names both
   (`agent_models.py resolve --family codex --role prun-worker`), and the dispatcher passes both with
@@ -340,9 +341,9 @@ scripts/dispatch-task.sh --prompt-file <prompt> --result-file <fresh abs result>
   header `codex exec` prints (`actual=-` when there is none). `MODEL-MISMATCH` and `MODEL-UNVERIFIED`
   go to stderr; the exit code stays the worker's.
 - `codex exec` runs from the scratch dir (`PRUN_SCRATCH_CWD` for a clone) with `--sandbox
-  danger-full-access` (`CODEX_DISPATCH_SANDBOX`), the prompt on stdin, and `--ignore-user-config` so
-  a user MCP server cannot start inside the worker (`CODEX_DISPATCH_ISOLATE_MCP=off` drops it and
-  passes no model or effort).
+  danger-full-access` (`CODEX_DISPATCH_SANDBOX`), the preamble and prompt on stdin, and
+  `--ignore-user-config` so a user MCP server cannot start inside the worker
+  (`CODEX_DISPATCH_ISOLATE_MCP=off` drops it and passes no model or effort).
 - No output growth for `PRUN_STALL_THRESHOLD` seconds (default 600), or a run past
   `CODEX_DISPATCH_TIMEOUT` (default off), reaps the worker: exit `124` and a `FALLBACK` result.
 
