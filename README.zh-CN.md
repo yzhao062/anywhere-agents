@@ -38,6 +38,9 @@
 > [!NOTE]
 > **从每天用的东西浓缩出来的。** 这是我从 2026 年初起每天在用的 agent 配置的公开脱敏版 —— 场景覆盖科研、论文、写代码（PyOD 3、LaTeX、各种杂事），macOS / Windows / Linux 都有。不是周末写来玩的。维护者 [Yue Zhao](https://yzhao062.github.io)，USC 计算机系教员，[PyOD](https://github.com/yzhao062/pyod) 作者（9.8k★ · 38M+ 下载 · ~12k 学术引用）。
 
+> [!IMPORTANT]
+> **高度定制。** 默认值是我个人的工作配置，原样发布：谁做 review、每个角色用哪个模型和 effort（`user/agent-models.json`，包括 Claude Code 当作 advisor 咨询的模型）、开了哪些闸门。依赖它之前请先看一遍，不合适的地方在 `AGENTS.local.md` 和自己的 settings 里覆盖，或者直接 fork。advisor 每次调用都会重读整段对话，费用在主模型之外另算：订阅计入套餐额度，API 按价计费，advisor 模型走 usage credits 的套餐则扣 credits。想在某台机器上关掉 advisor，在 `~/.claude/settings.json` 的 `env` 里设置 `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`；单独运行 `/advisor off` 只管到下一次 bootstrap。
+
 ## 为什么用它
 
 几个一直存在、但单独看都不值得专门修、合起来却挺耗人的问题：

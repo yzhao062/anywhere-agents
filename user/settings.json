@@ -84,5 +84,6 @@
     "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/statusline.py\""
   },
   "model": "opus",
+  "advisorModel": "fable",
   "effortLevel": "xhigh"
 }

@@ -74,6 +74,13 @@ SETTINGS_FIXTURE = {
     "model": "stale",
     "env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "65", "CLAUDE_CODE_EFFORT_LEVEL": "low"},
 }
+# Roles that inherit the family row. The advisor is the one role that does not,
+# so the fixture registry lists none and a test adds the row it needs.
+INHERITING_ROLES = tuple(r for r in agent_models.ROLES if r != "advisor")
+
+
+def with_advisor(model: str = "opus"):
+    return lambda d: d["roles"].update(advisor={"claude": {"model": model}})
 
 
 def fixture(mutate=None) -> dict:
@@ -268,7 +275,22 @@ class ResolveTests(TempRegistryCase):
         code, out, _ = run_main(["show", "--json"], self.env)
         self.assertEqual(code, 0)
         rows = json.loads(out)
-        self.assertEqual(len(rows), len(FIXTURE["families"]) * len(agent_models.ROLES))
+        self.assertEqual(len(rows), len(FIXTURE["families"]) * len(INHERITING_ROLES))
+
+    def test_show_lists_the_advisor_row_only_when_the_registry_has_one(self) -> None:
+        code, out, _ = run_main(["show", "--json"], self.env)
+        self.assertEqual(code, 0)
+        self.assertNotIn("advisor", {r["role"] for r in json.loads(out)})
+        code, text, _ = run_main(["show"], self.env)
+        self.assertEqual(code, 0)
+        self.assertRegex(text, r"(?m)^claude\s+advisor\s+\(none\)\s+-\s")
+        self.write_registry(fixture(with_advisor("opus")))
+        code, out, _ = run_main(["show", "--json"], self.env)
+        advisors = [r for r in json.loads(out) if r["role"] == "advisor"]
+        self.assertEqual(advisors, [{"family": "claude", "role": "advisor", "model": "opus"}])
+        code, text, _ = run_main(["show"], self.env)
+        self.assertRegex(text, r"(?m)^claude\s+advisor\s+opus\s+-\s")
+        self.assertNotIn("(none)", text)
 
     def test_show_lists_only_present_families_with_and_without_grok(self) -> None:
         code, out, _ = run_main(["show", "--json"], self.env)
@@ -279,7 +301,7 @@ class ResolveTests(TempRegistryCase):
         code, out, _ = run_main(["show", "--json"], self.env)
         self.assertEqual(code, 0)
         rows = json.loads(out)
-        self.assertEqual(len(rows), len(agent_models.FAMILIES) * len(agent_models.ROLES))
+        self.assertEqual(len(rows), len(agent_models.FAMILIES) * len(INHERITING_ROLES))
         self.assertEqual({r["family"] for r in rows}, {"claude", "codex", "agy", "grok"})
 
     def test_resolve_grok_when_present_and_absent(self) -> None:
@@ -294,6 +316,40 @@ class ResolveTests(TempRegistryCase):
         self.assertEqual((code, out.strip()), (0, "grok-9-test high"))
         code, out, _ = run_main(["resolve", "--family", "grok", "--role", "prun-worker"], self.env)
         self.assertEqual((code, out.strip()), (0, "grok-9-test medium"))
+
+    def test_the_advisor_inherits_nothing_from_the_family_row(self) -> None:
+        # The fixture's claude family row names a model and an effort; neither
+        # becomes an advisor. No advisor row means no advisor, in every family.
+        data = fixture()
+        self.assertIsNone(agent_models.advisor_model(data))
+        for family in ("claude", "codex", "agy"):
+            with self.assertRaises(agent_models.RegistryError, msg=family) as raised:
+                agent_models.resolve(family, "advisor", data)
+            self.assertIn("no advisor", str(raised.exception))
+        code, out, err = run_main(["resolve", "--family", "claude", "--role", "advisor"], self.env)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("no advisor", err)
+
+    def test_the_advisor_row_is_a_model_and_no_effort(self) -> None:
+        data = fixture(with_advisor("opus"))
+        self.assertEqual(agent_models.advisor_model(data), "opus")
+        self.assertEqual(
+            agent_models.resolve("claude", "advisor", data),
+            {"family": "claude", "role": "advisor", "model": "opus"},
+        )
+        with self.assertRaises(agent_models.RegistryError):
+            agent_models.resolve("codex", "advisor", data)
+        self.write_registry(data)
+        for argv, expected in (
+            (["--family", "claude", "--role", "advisor"], (0, "opus")),
+            (["--family", "claude", "--role", "advisor", "--field", "model"], (0, "opus")),
+            (["--family", "claude", "--role", "advisor", "--field", "effort"], (2, "")),
+            (["--family", "codex", "--role", "advisor"], (2, "")),
+        ):
+            code, out, _ = run_main(["resolve"] + argv, self.env)
+            self.assertEqual((code, out.strip()), expected, argv)
+        # The other claude roles are untouched by the advisor row.
+        self.assertEqual(agent_models.resolve("claude", "interactive", data)["model"], "fable")
 
 
 class ValidateTests(unittest.TestCase):
@@ -360,6 +416,25 @@ class ValidateTests(unittest.TestCase):
         self.assert_rejected(lambda d: d["roles"]["worker"].update(gemini={"effort": "low"}), "may only list")
         self.assert_rejected(lambda d: d["families"].pop("agy"), "families must be exactly")
 
+    def test_the_advisor_row_is_claude_only_with_a_model_and_no_effort(self) -> None:
+        agent_models.validate(fixture(with_advisor("opus")))
+        agent_models.validate(fixture(lambda d: d["roles"].update(advisor={})))
+        for advisor, fragment in (
+            ({"claude": {"model": "opus", "effort": "high"}}, "model only"),
+            ({"claude": {"effort": "high"}}, "model only"),
+            ({"claude": {}}, "model is required"),
+            ({"claude": {"model": None}}, "model is required"),
+            ({"claude": {"model": "bad name"}}, "bad model name"),
+            ({"claude": {"model": "opus", "fallback_model": "x"}}, "unknown keys"),
+            ({"claude": "opus"}, "row must be an object"),
+            ({"codex": {"model": "gpt-9-test"}}, "may only list claude"),
+            ({"agy": {"model": "gemini-9-test"}}, "may only list claude"),
+            ({"claude": {"model": "opus"}, "codex": {"model": "gpt-9-test"}}, "may only list claude"),
+            ([], "may only list claude"),
+        ):
+            with self.subTest(advisor=advisor):
+                self.assert_rejected(lambda d, a=advisor: d["roles"].update(advisor=a), fragment)
+
     def test_rejects_an_agy_stem_that_carries_a_tier(self) -> None:
         for tier in agent_models.AGY_TIERS:
             self.assert_rejected(
@@ -391,11 +466,17 @@ class RealRegistryTests(unittest.TestCase):
     def test_real_registry_validates_and_resolves_every_family_and_role(self) -> None:
         data = agent_models.load(REAL_REGISTRY)
         for family in agent_models.FAMILIES:
-            for role in agent_models.ROLES:
+            for role in INHERITING_ROLES:
                 row = agent_models.resolve(family, role, data)
                 self.assertTrue(row["model"] and row["effort"], (family, role))
                 if family == "agy":
                     self.assertTrue(row["slug"].endswith("-" + row["effort"]), (family, role))
+
+    def test_real_registry_lists_a_claude_advisor_and_no_effort_for_it(self) -> None:
+        data = agent_models.load(REAL_REGISTRY)
+        row = agent_models.resolve("claude", "advisor", data)
+        self.assertTrue(row["model"])
+        self.assertNotIn("effort", row)
 
     def test_user_settings_mirror_the_real_registry(self) -> None:
         """`render --check` on the real files: user/settings.json must equal the render."""
@@ -453,6 +534,69 @@ class RenderTests(TempRegistryCase):
         self.assertNotIn("effortLevel", rendered)
         self.assertEqual(rendered["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max")
 
+    def test_the_advisor_key_follows_the_registry(self) -> None:
+        # (settings file carries the key, registry lists an advisor, value after render)
+        for has_key, has_row, expected in (
+            (False, True, "opus"),     # an advisor row adds the key
+            (True, True, "opus"),      # and keeps an existing one equal to the registry
+            (True, False, None),       # no advisor row removes the key
+            (False, False, None),
+        ):
+            with self.subTest(has_key=has_key, has_row=has_row):
+                self.write_registry(fixture(with_advisor("opus") if has_row else None))
+                settings = dict(SETTINGS_FIXTURE, **({"advisorModel": "stale"} if has_key else {}))
+                path = self.settings_file(settings)
+                self.assertEqual(run_main(["render", "--settings", str(path)], self.env)[0], 0)
+                rendered = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(rendered.get("advisorModel"), expected)
+                self.assertEqual("advisorModel" in rendered, expected is not None)
+                # The other mirrored keys and the file's own keys are unaffected.
+                self.assertEqual(rendered["model"], "fable")
+                self.assertEqual(rendered["permissions"], SETTINGS_FIXTURE["permissions"])
+                self.assertEqual(run_main(["render", "--check", "--settings", str(path)], self.env)[0], 0)
+
+    def test_render_then_bootstrap_merge_delivers_and_keeps_the_advisor(self) -> None:
+        # The path to a machine: render the shared file, then bootstrap's merge.
+        shared = self.settings_file()
+        live = self.dir / "live-settings.json"
+        off = {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"}
+        live.write_text(json.dumps({"theme": "dark", "env": off}) + "\n", encoding="utf-8")
+        merge = [sys.executable, str(SCRIPTS / "merge_settings.py"), str(live), str(shared)]
+        self.write_registry(fixture(with_advisor("opus")))
+        run_main(["render", "--settings", str(shared)], self.env)
+        self.assertEqual(subprocess.run(merge, capture_output=True).returncode, 0)
+        merged = json.loads(live.read_text(encoding="utf-8"))
+        self.assertEqual(merged["advisorModel"], "opus")
+        self.assertEqual(merged["theme"], "dark")
+        # The machine's off switch is not a shared key, so the merge keeps it.
+        self.assertEqual(merged["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"], "1")
+        # Removing the row renders the key out of the shared file; the merge never deletes it.
+        self.write_registry(fixture())
+        run_main(["render", "--settings", str(shared)], self.env)
+        self.assertNotIn("advisorModel", json.loads(shared.read_text(encoding="utf-8")))
+        self.assertEqual(subprocess.run(merge, capture_output=True).returncode, 0)
+        self.assertEqual(json.loads(live.read_text(encoding="utf-8"))["advisorModel"], "opus")
+
+    def test_check_reports_a_stale_advisor_value_and_render_repairs_it(self) -> None:
+        self.write_registry(fixture(with_advisor("opus")))
+        path = self.settings_file(dict(SETTINGS_FIXTURE, advisorModel="opus"))
+        run_main(["render", "--settings", str(path)], self.env)
+        rendered = json.loads(path.read_text(encoding="utf-8"))
+        rendered["advisorModel"] = "sonnet"
+        path.write_text(json.dumps(rendered, indent=2) + "\n", encoding="utf-8")
+        code, _, err = run_main(["render", "--check", "--settings", str(path)], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("stale", err)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["advisorModel"], "sonnet")
+        # A registry change reaches the file the same way.
+        run_main(["render", "--settings", str(path)], self.env)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["advisorModel"], "opus")
+        self.write_registry(fixture())
+        self.assertEqual(run_main(["render", "--check", "--settings", str(path)], self.env)[0], 1)
+        run_main(["render", "--settings", str(path)], self.env)
+        self.assertNotIn("advisorModel", json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual(run_main(["render", "--check", "--settings", str(path)], self.env)[0], 0)
+
 
 class SetTests(TempRegistryCase):
     def test_set_changes_the_family_row_and_validates(self) -> None:
@@ -500,6 +644,54 @@ class SetTests(TempRegistryCase):
         self.assertEqual(code, 2)
         self.assertIn("effort", err)
         self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_set_writes_the_advisor_row_and_off_removes_it(self) -> None:
+        code, out, _ = run_main(["set", "--family", "claude", "--role", "advisor", "--model", "opus"], self.env)
+        self.assertEqual(code, 0)
+        self.assertIn("opus", out)
+        data = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(data["roles"]["advisor"], {"claude": {"model": "opus"}})
+        self.assertEqual(data["families"]["claude"], FIXTURE["families"]["claude"])
+        code, _, _ = run_main(["set", "--family", "claude", "--role", "advisor", "--model", "sonnet"], self.env)
+        self.assertEqual(agent_models.advisor_model(json.loads(self.registry.read_text(encoding="utf-8"))), "sonnet")
+        code, out, _ = run_main(["set", "--family", "claude", "--role", "advisor", "--off"], self.env)
+        self.assertEqual(code, 0)
+        self.assertIn("off", out)
+        data = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(data["roles"]["advisor"], {})
+        self.assertIsNone(agent_models.advisor_model(data))
+        # Turning off an advisor that is already off is not an error.
+        code, _, _ = run_main(["set", "--family", "claude", "--role", "advisor", "--off"], self.env)
+        self.assertEqual(code, 0)
+
+    def test_set_refuses_an_advisor_effort_a_wrong_family_and_a_misplaced_off(self) -> None:
+        self.write_registry(fixture(with_advisor("opus")))
+        before = self.registry.read_bytes()
+        for argv, fragment in (
+            (["--family", "claude", "--role", "advisor", "--effort", "high"], "model only"),
+            (["--family", "claude", "--role", "advisor", "--model", "opus", "--effort", "high"], "model only"),
+            (["--family", "codex", "--role", "advisor", "--model", "gpt-9-test"], "may only list claude"),
+            (["--family", "codex", "--role", "advisor", "--off"], "may only list claude"),
+            (["--family", "claude", "--role", "advisor", "--off", "--model", "opus"], "--off takes no other"),
+            (["--family", "claude", "--role", "worker", "--off"], "--off applies to"),
+            (["--family", "claude", "--off"], "--off applies to"),
+            (["--family", "claude", "--role", "advisor"], "set needs"),
+        ):
+            with self.subTest(argv=argv):
+                code, _, err = run_main(["set"] + argv, self.env)
+                self.assertEqual(code, 2)
+                self.assertIn(fragment, err)
+                self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_set_on_the_real_paths_renders_the_advisor_key(self) -> None:
+        tree = self.dir / "tree-settings.json"
+        tree.write_text(json.dumps(SETTINGS_FIXTURE, indent=2) + "\n", encoding="utf-8")
+        with mock.patch.object(agent_models, "DEFAULT_REGISTRY", self.registry), \
+                mock.patch.object(agent_models, "DEFAULT_SETTINGS", tree):
+            run_main(["set", "--family", "claude", "--role", "advisor", "--model", "opus"], self.env)
+            self.assertEqual(json.loads(tree.read_text(encoding="utf-8"))["advisorModel"], "opus")
+            run_main(["set", "--family", "claude", "--role", "advisor", "--off"], self.env)
+            self.assertNotIn("advisorModel", json.loads(tree.read_text(encoding="utf-8")))
 
     def test_set_grok_without_family_row_raises_registry_error_and_with_row_updates(self) -> None:
         before = self.registry.read_bytes()
@@ -874,6 +1066,7 @@ class MapTests(unittest.TestCase):
         self.assertEqual(launches("Direct `claude -p` and `codex exec` are routes."), {"claude -p", "codex exec"})
         self.assertEqual(launches('subprocess.run(["codex", "exec", "--json"])'), {"codex exec"})
         self.assertEqual(launches("run(['agy', '--model', slug])"), {"agy --model"})
+        self.assertEqual(launches('exec claude --advisor "$ADVISOR"'), {"claude --advisor"})
         self.assertEqual(launches("a claude-powered tool, executed"), set())
         # A comment in a script is not a launch; prose in a skill file is still read.
         self.assertEqual(launches("    # + direct codex exec, because the wrapper hides it"), set())
@@ -971,6 +1164,15 @@ class ScanTests(unittest.TestCase):
             'CODEX_DISPATCH_REASONING="${CODEX_DISPATCH_REASONING:-xhigh}"',
             '"effortLevel": "high"',
             '"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"',
+            # The advisor: a Claude alias or a claude-* id, as a key or a flag.
+            '"advisorModel": "fable"',
+            "advisorModel: 'opus'",
+            "advisorModel = sonnet",
+            'advisorModel: "claude-3-5-sonnet"',
+            "claude --advisor opus",
+            "claude --advisor=fable",
+            '["claude", "--advisor", "sonnet"]',
+            "claude --advisor claude-opus-latest",
         ]
         for sample in samples:
             self.assertTrue(self.hits(sample), sample)
@@ -981,8 +1183,21 @@ class ScanTests(unittest.TestCase):
             "effort level high is described in the docs",
             "CLAUDE_CODE_EFFORT_LEVEL outranks --effort and /effort.",
             'env "CLAUDE_CODE_EFFORT_LEVEL": "<level>"',
+            "The advisorModel key names the advisor; /advisor off turns it off.",
+            '"advisorModel": "<model>"',
+            "claude --advisor <alias>",
+            "an advisor such as opus is consulted",
         ):
             self.assertEqual(self.hits(sample), [], sample)
+
+    def test_an_advisor_literal_is_one_hit_whichever_pattern_names_the_id(self) -> None:
+        for sample in (
+            '"advisorModel": "fable"',
+            'advisorModel: "claude-opus-5"',      # the claude-id pattern already names it
+            'advisorModel: "claude-3-5-sonnet"',  # only the advisor pattern does
+            "claude --advisor claude-opus-latest",
+        ):
+            self.assertEqual(len(self.hits(sample)), 1, sample)
 
     def test_allow_marker_exempts_a_line(self) -> None:
         self.assertEqual(self.hits("a note about gpt-9-test <!-- agent-models: allow -->"), [])
@@ -1124,6 +1339,38 @@ class DoctorTests(TempRegistryCase):
         self.assertIn("env.CLAUDE_CODE_EFFORT_LEVEL='high'", drift[0])
         self.assertTrue(any(s == "ok" and "codex" in m for m, s in by_text.items()))
         self.assertTrue(any(s == "ok" and "agy" in m for m, s in by_text.items()))
+
+    def test_doctor_checks_the_live_advisor_and_honors_the_disable_switch(self) -> None:
+        live_path = Path(self.env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+        off = {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"}
+        # (registry advisor, live settings, process env, status of the advisor line or None)
+        cases = (
+            ("opus", {"advisorModel": "opus"}, {}, "ok"),
+            ("opus", {"advisorModel": "sonnet"}, {}, "drift"),
+            ("opus", {}, {}, "drift"),
+            (None, {"advisorModel": "sonnet"}, {}, "drift"),   # left behind after --off
+            (None, {}, {}, None),
+            ("opus", {}, off, "skip"),                         # switch in the process env
+            ("opus", {"env": off}, {}, "skip"),                # switch in the settings env block
+            (None, {"advisorModel": "sonnet", "env": off}, {}, "skip"),
+            # A CLI session writes the settings env entry over the shell value.
+            ("opus", {"advisorModel": "sonnet", "env": off},
+             {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "0"}, "skip"),
+            ("opus", {"advisorModel": "opus", "env": {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "0"}},
+             off, "ok"),
+            ("opus", {"advisorModel": "sonnet", "env": {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": ""}},
+             off, "drift"),                                    # an empty entry cancels the export
+        )
+        for advisor, live, process_env, status in cases:
+            with self.subTest(advisor=advisor, live=live, process_env=process_env):
+                live_path.write_text(json.dumps(live), encoding="utf-8")
+                data = fixture(with_advisor(advisor) if advisor else None)
+                with mock.patch.dict(os.environ, dict(self.env, **process_env)):
+                    if not process_env:
+                        os.environ.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+                    checks = agent_models.doctor_checks(data)
+                lines = [(s, m) for s, m in checks if "advisorModel" in m]
+                self.assertEqual([s for s, _ in lines], [status] if status else [])
 
     def test_sync_and_doctor_are_unchanged_with_and_without_grok(self) -> None:
         grok_home = self.dir / "grok-home"

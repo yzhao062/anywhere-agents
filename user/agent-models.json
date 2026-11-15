@@ -36,6 +36,11 @@
         "effort": "high"
       }
     },
+    "advisor": {
+      "claude": {
+        "model": "fable"
+      }
+    },
     "worker": {
       "claude": {
         "model": "sonnet"

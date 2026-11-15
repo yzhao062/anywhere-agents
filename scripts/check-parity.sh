@@ -73,9 +73,10 @@
 #               (additionalDirectories stripping), skills/my-router
 #               (routing-table rewrite with extension guidance for
 #               forks). The keys of user/settings.json that mirror the
-#               registry (model, effortLevel, two env entries) are not
-#               by design: each tree's own agent_models.py render --check
-#               must pass, so a sanitized copy that went stale fails.
+#               registry (model, effortLevel, advisorModel, two env
+#               entries) are not by design: each tree's own
+#               agent_models.py render --check must pass, so a sanitized
+#               copy that went stale fails.
 #
 # Usage:
 #   bash scripts/check-parity.sh                           # default sibling path

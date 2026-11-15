@@ -68,6 +68,7 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 - **Codex** is the gatekeeper: review, feedback, and quality checks on work produced by Claude Code or the user, reached through `/vet`.
 - This division is a default. The user may reverse it, and two scenarios must stay workable: one agent absent (outage, quota, regional block) and roles deliberately reversed to test drift. Core functions (the review loop, structured dispatch, the health check) must work either way, even where an ergonomic helper exists for one agent only.
 - A skill, hook, or script hard-coding one agent's CLI (`codex exec`, `claude -p`) documents or wires the other agent's equivalent at the same time. That half may ship later; do not block the primary half on parity. A doc naming one agent in its steps names the cross-vendor equivalent once near the top.
+- When Claude Code has an advisor (`advisorModel`, `/advisor`), consult it before committing to a plan for a non-trivial change, after a failure recurs, before calling a multi-file change done, and before settling a paper, proposal, or rebuttal argument. It reads the whole conversation, so it never fills a `/vet` reviewer slot.
 
 ## Git Safety and Mechanical Gates
 
@@ -98,7 +99,7 @@ Escape hatches, set in the `env` block of `~/.claude/settings.json` (disable val
 | `AGENT_NESTED_GIT_INIT_HOOK=off` | Nested `git init` gate only (set it to create a submodule or a deliberate inner repository) |
 | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + banner only |
 
-Use the narrowest escape only for a legitimate write that quotes a banned word as an example (a style guide, a CHANGELOG entry), and remove the override after the write. Text an agent carries rather than writes, such as a dispatch prompt or a captured review, belongs under an `agent-io` directory in the session scratchpad, which both writing guards skip; an unmarked path is still scanned. Fan-out (unrequested subagents or Workflow runs) is deliberately a written rule with no gate, because whether the user asked is a judgement about the conversation.
+Use the narrowest escape only for a legitimate write that quotes a banned word as an example (a style guide, a CHANGELOG entry), and remove the override after the write. Text an agent carries rather than writes, such as a dispatch prompt or a captured review, belongs under an `agent-io` directory in the session scratchpad, which both writing guards skip; an unmarked path is still scanned.
 
 ## Shell Command Style
 
@@ -141,8 +142,8 @@ The first module governs a reply to a person; the other two govern a file, and d
 - Do not use em or en dashes as casual sentence punctuation; prefer commas, colons, parentheses, or a new sentence; keep semicolons rare. En dashes in numeric ranges (`1–3`, `2020–2025`), paired names, or citations are fine, as is ordinary hyphenation (`command-line`, `co-PI`, `zero-shot`).
 - Split nested or overloaded sentences. Vary sentence length and structure; do not open consecutive sentences with the same word, overuse transitions such as "Additionally", or close every paragraph with a summary.
 - Do not stage claims as "X, not Y" antithesis for emphasis ("not just X, but Y"; "it is not X, it is Y"). State the claim directly; keep the negation only when the rejected alternative is specific and informs the reader.
-- Text meant to be copied into an external destination (an email reply, a chat message, a table cell, a document) goes in a fenced code block. Inside such a block, treat hard line breaks as semantic: one paragraph or one list item is a single unbroken line however long it runs. Do not wrap to a display width, and do not indent continuation lines, because each destination applies its own wrapping and an added newline becomes a permanent break. Keep a blank line between paragraphs and keep the breaks that carry meaning, such as the lines of a postal address or a signature block.
-- A draft long enough to be a document (an email, a letter, a passage of prose) goes in a `.md` file instead of the terminal. Give the path and say what the file holds. The same line-break rule applies inside the file. Markdown pasted as plain text shows literal `**` and `-` in Outlook or Gmail. When formatting matters, say so and point the user at a rendered view or an artifact to copy from.
+- Text meant to be copied into an external destination (an email reply, a chat message, a table cell, a document) goes in a fenced code block. Inside such a block, treat hard line breaks as semantic: one paragraph or one list item is a single unbroken line however long it runs. Do not wrap or indent continuation lines: the destination wraps for itself, and an added newline becomes a permanent break. Keep blank lines between paragraphs and the breaks that carry meaning, such as signature lines.
+- A draft long enough to be a document (an email, a letter, a passage of prose) goes in a `.md` file instead of the terminal. Give the path and say what the file holds. The same line-break rule applies inside the file. Markdown pasted as plain text shows literal `**` and `-`, so when formatting matters, point the user at a rendered view or an artifact.
 
 ## Skills
 

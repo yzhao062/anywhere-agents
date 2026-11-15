@@ -3,9 +3,12 @@
 
 The registry is the single source for the model and effort of every agent
 role: the interactive session, a /vet reviewer, a review panel, an audit, a
-Claude subagent or Workflow worker, a prun worker, and the optional premium
-row for a task the user chooses to run on a scarcer model. A role inherits its
-family's row unless the registry lists an override for it. Nothing else in the
+Claude subagent or Workflow worker, a prun worker, the optional premium row
+for a task the user chooses to run on a scarcer model, and the optional
+advisor that Claude Code consults. A role inherits its family's row unless the
+registry lists an override for it. The advisor is the one exception: it is
+Claude only, takes a model and no effort, and inherits nothing, so a registry
+without a roles.advisor.claude row has no advisor. Nothing else in the
 repository names a concrete model; a dispatcher asks this script at run time,
 and bootstrap writes the interactive values into each tool's own config.
 
@@ -18,18 +21,24 @@ Commands:
         Every family and role with its resolved model and effort.
     render [--check]
         Rewrite the keys of user/settings.json that mirror the registry
-        (model, effortLevel, and two env entries). --check exits 1 when stale.
+        (model, effortLevel, advisorModel, and two env entries). advisorModel
+        is written when the registry lists an advisor row and removed when it
+        does not. --check exits 1 when stale.
     set --family F [--role R] [--model M] [--effort E]
         [--fallback-model STEM] [--fallback-effort TIER]
         Change the registry in a source repository, then render. The two
-        fallback flags are for an Agy row.
+        fallback flags are for an Agy row. The advisor row is
+        `set --family claude --role advisor --model M`; `set --family claude
+        --role advisor --off` removes it (no advisor).
     sync [--dry-run] [--quiet]
         Write the interactive Codex and Agy values into ~/.codex/config.toml
         and the Antigravity settings file. Claude's values reach
         ~/.claude/settings.json through bootstrap's settings merge.
     doctor [--scan DIR ...]
         Compare each tool's live config with the registry, and with --scan
-        list model literals in the given trees. Exit 1 on a mismatch.
+        list model literals in the given trees. Exit 1 on a mismatch,
+        including an advisorModel left behind after the registry dropped its
+        advisor. CLAUDE_CODE_DISABLE_ADVISOR_TOOL skips the advisor check.
     scan PATH ...
         List model and effort literals outside the registry. Exit 1 on a hit.
     map PATH ... [--json]
@@ -62,7 +71,13 @@ from typing import Iterable, Iterator
 REQUIRED_FAMILIES = ("claude", "codex", "agy")
 OPTIONAL_FAMILIES = ("grok",)
 FAMILIES = REQUIRED_FAMILIES + OPTIONAL_FAMILIES
-ROLES = ("interactive", "reviewer", "premium", "worker", "prun-worker")
+ROLES = ("interactive", "reviewer", "premium", "worker", "prun-worker", "advisor")
+# The advisor is Claude Code's consult-a-stronger-model tool. Its row carries a
+# model only and is never inherited from the family row.
+ADVISOR_ROLE = "advisor"
+ADVISOR_FAMILY = "claude"
+ADVISOR_KEY = "advisorModel"
+ADVISOR_DISABLE_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
     "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
@@ -122,10 +137,31 @@ def validate(data: dict) -> None:
         _check_row(family, row, family_row=True)
     present_families = tuple(f for f in FAMILIES if f in families)
     for role, rows in roles.items():
+        if role == ADVISOR_ROLE:
+            _check_advisor_rows(rows)
+            continue
         if not isinstance(rows, dict) or not set(rows) <= set(families):
             raise RegistryError(f"role {role} may only list {', '.join(present_families)}")
         for family, row in rows.items():
             _check_row(family, row, family_row=False, where=f"role {role}")
+
+
+def _check_advisor_rows(rows: object) -> None:
+    """The advisor role lists the claude family only, and its row is a model."""
+    where = f"role {ADVISOR_ROLE}"
+    if not isinstance(rows, dict) or not set(rows) <= {ADVISOR_FAMILY}:
+        raise RegistryError(f"{where} may only list {ADVISOR_FAMILY}")
+    if ADVISOR_FAMILY not in rows:
+        return
+    row = rows[ADVISOR_FAMILY]
+    if isinstance(row, dict) and "effort" in row:
+        raise RegistryError(
+            f"{where} {ADVISOR_FAMILY}: the advisor takes a model only, "
+            "since the advisor tool has no effort setting"
+        )
+    if isinstance(row, dict) and not row.get("model"):
+        raise RegistryError(f"{where} {ADVISOR_FAMILY}: model is required")
+    _check_row(ADVISOR_FAMILY, row, family_row=False, where=where)
 
 
 def _check_row(family: str, row: dict, family_row: bool, where: str = "family") -> None:
@@ -172,6 +208,12 @@ def resolve(family: str, role: str = "interactive", data: dict | None = None) ->
     data = data if data is not None else load()
     if family not in data["families"]:
         raise RegistryError(f"registry has no families.{family} row")
+    if role == ADVISOR_ROLE:
+        # No family row to inherit: an unlisted advisor means no advisor.
+        model = advisor_model(data) if family == ADVISOR_FAMILY else None
+        if model is None:
+            raise RegistryError(f"registry lists no roles.{ADVISOR_ROLE}.{family} row (no advisor)")
+        return {"family": family, "role": role, "model": model}
     family_row = data["families"][family]
     role_row = data.get("roles", {}).get(role, {}).get(family, {})
     row = dict(family_row)
@@ -197,6 +239,17 @@ def resolve(family: str, role: str = "interactive", data: dict | None = None) ->
         chain = (result["fallback_slug"], family_fallback) if result["fallback_slug"] else ()
         result["fallback_slugs"] = list(dict.fromkeys(slug for slug in chain if slug))
     return result
+
+
+def advisor_model(data: dict | None = None) -> str | None:
+    """The advisor's model, or None when the registry lists no advisor row.
+
+    The advisor never inherits the claude family row, so absence here is
+    the answer "no advisor", not a gap to fill.
+    """
+    data = data if data is not None else load()
+    row = data.get("roles", {}).get(ADVISOR_ROLE, {}).get(ADVISOR_FAMILY)
+    return str(row["model"]) if isinstance(row, dict) and row.get("model") else None
 
 
 def _fallback_slug(row: dict, effort: str) -> str | None:
@@ -514,6 +567,11 @@ def rendered_settings(settings: dict, data: dict) -> dict:
     env = out.setdefault("env", {})
     env["CLAUDE_CODE_EFFORT_LEVEL"] = claude["effort"]
     env["CLAUDE_CODE_SUBAGENT_MODEL"] = worker["model"]
+    advisor = advisor_model(data)
+    if advisor:
+        out[ADVISOR_KEY] = advisor
+    else:
+        out.pop(ADVISOR_KEY, None)
     return out
 
 
@@ -557,15 +615,28 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 2
     fallback_model = getattr(args, "fallback_model", None)
     fallback_effort = getattr(args, "fallback_effort", None)
-    if not (args.model or args.effort or fallback_model or fallback_effort):
-        print("agent_models: set needs --model, --effort, --fallback-model, or --fallback-effort",
-              file=sys.stderr)
+    off = getattr(args, "off", False)
+    if off and args.role != ADVISOR_ROLE:
+        print(f"agent_models: --off applies to --role {ADVISOR_ROLE} only", file=sys.stderr)
+        return 2
+    if off and (args.model or args.effort or fallback_model or fallback_effort):
+        print("agent_models: --off takes no other value", file=sys.stderr)
+        return 2
+    if not (args.model or args.effort or fallback_model or fallback_effort or off):
+        print("agent_models: set needs --model, --effort, --fallback-model, --fallback-effort, "
+              "or --off", file=sys.stderr)
         return 2
     path = registry_path()
     data = load(path)
     if args.family not in data["families"]:
         raise RegistryError(f"registry has no families.{args.family} row")
-    if args.role in (None, "interactive", "reviewer") and not args.role_only:
+    if args.role == ADVISOR_ROLE and args.family != ADVISOR_FAMILY:
+        raise RegistryError(f"role {ADVISOR_ROLE} may only list {ADVISOR_FAMILY}")
+    if off:
+        # No advisor row means no advisor; the role entry stays as an empty object.
+        data.setdefault("roles", {}).setdefault(ADVISOR_ROLE, {}).pop(ADVISOR_FAMILY, None)
+        row = {}
+    elif args.role in (None, "interactive", "reviewer") and not args.role_only:
         row = data["families"][args.family]
     else:
         row = data.setdefault("roles", {}).setdefault(args.role, {}).setdefault(args.family, {})
@@ -582,8 +653,13 @@ def cmd_set(args: argparse.Namespace) -> int:
     validate(data)
     atomic_write(path, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
                  backup=False)
-    print(f"agent_models: {args.family} {args.role or 'family'} -> "
-          f"{resolve(args.family, args.role or 'interactive', data)}")
+    if off:
+        print(f"agent_models: {args.family} {ADVISOR_ROLE} -> off (no advisor row)")
+        print(f"agent_models: bootstrap never deletes {ADVISOR_KEY} from ~/.claude/settings.json; "
+              "run /advisor off once on each machine that already has it")
+    else:
+        print(f"agent_models: {args.family} {args.role or 'family'} -> "
+              f"{resolve(args.family, args.role or 'interactive', data)}")
     if path == DEFAULT_REGISTRY and DEFAULT_SETTINGS.exists():
         return cmd_render(argparse.Namespace(settings=None, check=False))
     return 0
@@ -747,6 +823,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 EFFORT_WORDS = r"(?:minimal|low|medium|high|xhigh|max|ultra)"
+ADVISOR_NAME = (
+    r"(?:(?:opus|sonnet|haiku|fable)\b"
+    r"|claude-(?!(?:opus|sonnet|haiku|fable)-\d)[\w.\-]+)"
+)
 LITERAL_PATTERNS = [
     re.compile(r"\bgpt-\d[\w.\-]*"),
     re.compile(r"\bgrok-\d[\w.\-]*"),
@@ -764,6 +844,9 @@ LITERAL_PATTERNS = [
     # A default written as an assignment or a key: effort = "high", "effort": "high".
     re.compile(r"\b(?:\w*_)?effort['\"]?\s*[:=]\s*['\"]" + EFFORT_WORDS + r"['\"]"),
     re.compile(r"\bCLAUDE_CODE_SUBAGENT_MODEL['\"]?\s*[:=]\s*['\"]?(?:opus|sonnet|haiku|fable)"),
+    # The advisor: a Claude alias, or a claude-* id the pattern above does not already name.
+    re.compile(r"\badvisorModel['\"]?\s*[:=]\s*['\"]?" + ADVISOR_NAME),
+    re.compile(r"--advisor(?:[ =]['\"]?|['\"]\s*,\s*['\"])" + ADVISOR_NAME),
 ]
 SCAN_SUFFIXES = {".py", ".sh", ".ps1", ".md", ".json", ".yaml", ".yml", ".toml", ".js", ".mjs",
                  ".ts", ".txt", ".cfg", ".ini", ""}
@@ -818,7 +901,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 # Two purposes share the registry. A review needs depth. General work (fan-out
 # units, subagents, Workflow agents) needs to be fast, parallel, and cheap.
 PURPOSES = {"reviewer": "review", "worker": "general", "prun-worker": "general",
-            "interactive": "session", "premium": "session"}
+            "interactive": "session", "premium": "session", "advisor": "session"}
 _FAMILY_RE = "|".join(FAMILIES)
 _ROLE_RE = "|".join(re.escape(role) for role in ROLES)
 _SEP = r"[\"',\s\[\]]+"
@@ -854,7 +937,7 @@ WORKFLOW_AGENT = re.compile(r"\bagent\(")
 # pattern does not follow a binary held in a variable, and it cannot tell
 # whether the launch is given the registry's values.
 LAUNCH = re.compile(
-    r"\b(?P<cli>claude|codex|agy|grok)(?:\s+|[\"']\s*,\s*[\"'])(?P<verb>-p|exec|--model)(?![\w-])"
+    r"\b(?P<cli>claude|codex|agy|grok)(?:\s+|[\"']\s*,\s*[\"'])(?P<verb>-p|exec|--model|--advisor)(?![\w-])"
 )
 SLASH_COMMANDS = ("/vet", "/prun")
 MAP_ROOT_SUFFIXES = {".py", ".sh", ".ps1", ".js", ".mjs"}
@@ -1322,14 +1405,19 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             return 2
         print(value)
     else:
-        print(f"{row['model']} {row['effort']}")
+        # The advisor row has a model and no effort.
+        print(" ".join(str(row[key]) for key in ("model", "effort") if key in row))
     return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
     data = load()
     present = [f for f in FAMILIES if f in data["families"]]
-    rows = [resolve(f, r, data) for f in present for r in ROLES]
+    has_advisor = advisor_model(data) is not None
+    rows = [
+        resolve(f, r, data) for f in present for r in ROLES
+        if r != ADVISOR_ROLE or (f == ADVISOR_FAMILY and has_advisor)
+    ]
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -1340,7 +1428,9 @@ def cmd_show(args: argparse.Namespace) -> int:
             f"{k}={'>'.join(v) if isinstance(v, list) else v}" for k, v in row.items()
             if k in ("slug", "fallback_slugs", "second_slug") and v
         )
-        print(f"{row['family']:<8} {row['role']:<12} {row['model']:<22} {row['effort']:<8} {extra}")
+        print(f"{row['family']:<8} {row['role']:<12} {row['model']:<22} {row.get('effort') or '-':<8} {extra}")
+    if not has_advisor:
+        print(f"{ADVISOR_FAMILY:<8} {ADVISOR_ROLE:<12} {'(none)':<22} {'-':<8} no advisor row, no advisor")
     return 0
 
 
@@ -1360,6 +1450,21 @@ def doctor_checks(data: dict) -> list:
         ]
         if "effortLevel" in settings:
             pairs.append(("effortLevel", settings.get("effortLevel"), claude["effort"]))
+        # A CLI session writes settings env entries over the inherited shell
+        # value, and an empty entry cancels a shell export (the Desktop app and
+        # self-hosted runners differ). With the tool disabled, advisorModel has
+        # no effect, so neither value is a mismatch.
+        if isinstance(env, dict) and ADVISOR_DISABLE_ENV in env:
+            disable = env[ADVISOR_DISABLE_ENV]
+        else:
+            disable = os.environ.get(ADVISOR_DISABLE_ENV, "")
+        advisor = advisor_model(data)
+        if str(disable).strip().lower() in ("1", "true", "yes", "on"):
+            checks.append(("skip", f"claude: {ADVISOR_DISABLE_ENV} is set; {ADVISOR_KEY} not compared"))
+        elif advisor or settings.get(ADVISOR_KEY):
+            # A key left after the row was removed is drift too: bootstrap's
+            # merge never deletes it, so only /advisor off clears it.
+            pairs.append((ADVISOR_KEY, settings.get(ADVISOR_KEY), advisor))
         # /effort saves a per-model level here; the env entry outranks it, so a
         # different value is a setting that looks applied and is not.
         per_model = settings.get("modelSettings")
@@ -1455,6 +1560,8 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--effort")
     p.add_argument("--fallback-model", help="agy: the stem an account without the row's family falls back to")
     p.add_argument("--fallback-effort", help="agy: the fallback's tier, when it differs from the row's effort")
+    p.add_argument("--off", action="store_true",
+                   help="with --role advisor: remove the advisor row (no advisor)")
     p.set_defaults(func=cmd_set)
     p = sub.add_parser("sync")
     p.add_argument("--dry-run", action="store_true")

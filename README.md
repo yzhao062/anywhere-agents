@@ -38,6 +38,9 @@ Start with effective defaults. Add **packs**, small bundles of rules, skills, or
 > [!NOTE]
 > **Condensed from daily use.** The sanitized public release of the agent config I have run daily since early 2026 across research, paper writing, and dev work (PyOD 3, LaTeX, admin) on macOS, Windows, and Linux. Not a weekend project. Maintained by [Yue Zhao](https://yzhao062.github.io) — USC CS faculty and author of [PyOD](https://github.com/yzhao062/pyod) (9.8k★ · 38M+ downloads · ~12k citations).
 
+> [!IMPORTANT]
+> **Highly customized.** The defaults are my own working setup, shipped as is: which agent reviews, which model and effort level run each role (`user/agent-models.json`), including the model Claude Code consults as its advisor, and which gates are on. Read them before you rely on them, then override what does not fit in `AGENTS.local.md` and your own settings, or fork. Each advisor call rereads the whole conversation and is billed on top of the main model: against a subscription's usage limits, at API rates, or to usage credits on plans where the advisor's model bills there. To turn the advisor off on a machine, set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the `env` block of `~/.claude/settings.json`; `/advisor off` lasts only until the next bootstrap.
+
 ## Why You'd Use This
 
 Four problems this fixes:
