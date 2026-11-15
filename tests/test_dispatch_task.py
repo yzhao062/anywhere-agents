@@ -1,7 +1,8 @@
 """Contract tests for prun's Codex worker, dispatch-task.{sh,ps1}.
 
 A prun unit runs on Agy unless the user names Codex for it. This pair of scripts
-is the Codex route. The contract is in skills/prun/SKILL.md:
+is the Codex route. The contract is in skills/prun/references/codex-executor.md,
+with the shared reconciliation rules in skills/prun/SKILL.md:
 
   - args are --prompt-file / --result-file / --unit-id, and the first and only
     stdout line is `STATE-DIR <abs-path>` (state-dir `prun-task-<8hex>-<unit>-<pid>-<16hex>`);

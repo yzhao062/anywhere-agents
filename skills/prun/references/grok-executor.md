@@ -1,5 +1,7 @@
 # Grok Executor Reference (`dispatch-task-grok.py`)
 
+Read this when the user names Grok for a unit or a batch.
+
 This reference documents the Grok executor for `prun` (`skills/prun/scripts/dispatch-task-grok.py`). Like Codex, a unit runs on Grok only when the user names Grok for that unit or batch. The coordinator never moves units to Grok on its own, including when Antigravity (`agy`) is out of quota or unreachable.
 
 ## Command Contract and Flags
@@ -71,8 +73,8 @@ Additional environment variables:
 - `PRUN_STALL_THRESHOLD`: seconds without new `tail` or stderr output before the idle reaper terminates the process tree (default `600`, exit `124`).
 - `GROK_DISPATCH_TIMEOUT_SECONDS`: absolute wall-clock timeout before terminating the process tree (default `2700`, exit `124`).
 
-On POSIX, both limits send `SIGTERM`, then `SIGKILL` if the process tree is still alive after `GROK_KILL_GRACE_SECONDS` (default `2`). On Windows, they run `taskkill /T /F` and fall back to `process.kill()` when that command cannot run or times out. A non-positive or non-integer threshold or timeout exits `2` before launch.
+Both limits send `SIGTERM`, then `SIGKILL` if the process tree is still alive after `GROK_KILL_GRACE_SECONDS` (default `2`). A non-positive or non-integer threshold or timeout exits `2` before launch.
 
 ## Automatic Launch Route
 
-Claude Code's auto mode refused a direct `grok --always-approve` launch, and its classifier judges each dispatcher command too. To run Grok units unattended on a maintainer machine, add an `autoMode.allow` entry describing `dispatch-task-grok.py` (and `dispatch-grok.py` for `/vet`) to the machine-local `~/.claude/settings.json`, after `"$defaults"`; [the implement-review Grok reference](../../implement-review/references/grok-backend.md) shows one. A permission allow rule does not do this job: it does not match past a leading `PRUN_SCRATCH_CWD=` assignment, and auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-task-grok.py *)`. Never allow `grok` itself, and never put the entry in the repository's shared `user/settings.json`. Without the entry, auto mode may refuse the unit.
+Claude Code's auto mode refused a direct `grok --always-approve` launch, and its classifier judges each dispatcher command too. To run Grok units unattended on a maintainer machine, add an `autoMode.allow` entry describing `dispatch-task-grok.py` (and `dispatch-grok.py` for `/vet`) to the machine-local `~/.claude/settings.json`, after `"$defaults"`; the implement-review Grok reference (`skills/implement-review/references/grok-backend.md`) shows one. A permission allow rule does not do this job: it does not match past a leading `PRUN_SCRATCH_CWD=` assignment, and auto mode suspends interpreter wildcards such as `Bash(python3 *dispatch-task-grok.py *)`. Never allow `grok` itself, and never put the entry in the repository's shared `user/settings.json`. Without the entry, auto mode may refuse the unit.

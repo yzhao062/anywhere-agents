@@ -27,9 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # for the Grok executor row and policy, each keeping its earlier headroom.
 # Lowered 2026-11-12 to the measured size after the Copilot reviewer backend
 # and the Plugin path left implement-review (156,049 -> 147,798).
+# Lowered 2026-11-15: prun text moved to references (40,776 -> 21,628).
 CEILINGS: dict[str, int] = {
     "skills/implement-review/SKILL.md": 147_798,
-    "skills/prun/SKILL.md": 40_776,
+    "skills/prun/SKILL.md": 21_628,
 }
 
 RATCHET_SLACK = 4_096

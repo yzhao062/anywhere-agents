@@ -1,6 +1,6 @@
 """Contract tests for prun's gather.{sh,ps1}.
 
-Validates the result-collector contract in skills/prun/SKILL.md. Key regression:
+Validates the result-collector contract in skills/prun/references/state-recovery.md. Key regression:
 gather must fire on a result file that already exists + is non-empty + stable
 when it starts (a unit that finished BEFORE gather began) -- the prun fix for
 the auto-watch startup-snapshot race. Also: empty files are ignored, missing

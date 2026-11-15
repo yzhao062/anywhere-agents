@@ -100,7 +100,13 @@ nav:
       - skills/readme-polish.md
       - Copyable patterns: skills/references/patterns.md
       - Audit checklist: skills/references/checklist.md
-    - prun: skills/prun.md
+    - prun:
+      - skills/prun.md
+      - Grok executor: skills/references/grok-executor.md
+      - Agy quota and models: skills/references/agy-quota-and-models.md
+      - Codex executor: skills/references/codex-executor.md
+      - State recovery: skills/references/state-recovery.md
+      - Web units: skills/references/web-units.md
     - agent-models: skills/agent-models.md
     - editable-figure:
       - skills/editable-figure.md

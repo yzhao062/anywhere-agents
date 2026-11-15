@@ -26,12 +26,14 @@ restart this loop.
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILL_MD = ROOT / "skills" / "implement-review" / "SKILL.md"
+SKILLS_DIR = ROOT / "skills"
+SKILL_MD = SKILLS_DIR / "implement-review" / "SKILL.md"
 
 LIST_INTRO = "Prepare a review request with:"
 TERMINAL_PATH_MARKER = "**Terminal path**:"
@@ -559,6 +561,174 @@ class StoppedTaskRuleTests(unittest.TestCase):
         self.assertIn("await-review.py", self.text)
         script = SKILL_MD.parent / "scripts" / "await-review.py"
         self.assertTrue(script.is_file(), f"SKILL.md names a missing {script}")
+
+
+# ------------------------------------------------------- reference index
+# A skill core that moves prose into references/ routes the reader with a
+# "## Reference Index" table: "| File | Read when |", one row per reference. The
+# table is what an agent follows to decide which file to open, so the contract
+# is structural. Every row links a file that exists, every row says when to read
+# it, and no reference file sits on disk without a row. The wording of a read
+# condition is reviewed with the skill and is not pinned here.
+
+INDEX_HEADING = "## Reference Index"
+INDEX_HEADER_CELLS = ["File", "Read when"]
+INDEX_LINK_RE = re.compile(r"\[(references/[\w.-]+\.md)\]\((references/[\w.-]+\.md)\)")
+INDEX_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+
+# Skills whose SKILL.md carries the index. Slice 2 of the skills diet adds
+# "implement-review" to this tuple.
+REFERENCE_INDEX_SKILLS = ("prun",)
+
+
+def _table_cells(line: str) -> list[str]:
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
+
+
+def _reference_index_rows(text: str) -> list[tuple[str, str]]:
+    """The (link target, read condition) pairs of the Reference Index table.
+
+    Read through the prose mask, so a table inside a fence is not an index.
+    """
+    masked, _ = _markdown_regions(text)
+    lines = masked.splitlines()
+    heads = [i for i, line in enumerate(lines) if line.strip() == INDEX_HEADING]
+    if len(heads) != 1:
+        raise AssertionError(
+            f"expected one unfenced {INDEX_HEADING!r}, found {len(heads)}")
+    table: list[str] = []
+    for line in lines[heads[0] + 1:]:
+        if HEADING_RE.match(line):
+            break
+        if line.lstrip().startswith("|"):
+            table.append(line)
+    if len(table) < 3:
+        raise AssertionError("the Reference Index needs a header row, a separator "
+                             f"row, and at least one reference row: {table}")
+    if _table_cells(table[0]) != INDEX_HEADER_CELLS:
+        raise AssertionError(f"the Reference Index header row must be "
+                             f"{INDEX_HEADER_CELLS}: {_table_cells(table[0])}")
+    separator = _table_cells(table[1])
+    if len(separator) != 2 or not all(INDEX_SEPARATOR_CELL_RE.fullmatch(c) for c in separator):
+        raise AssertionError(f"the Reference Index has no separator row: {table[1]!r}")
+    rows: list[tuple[str, str]] = []
+    for line in table[2:]:
+        cells = _table_cells(line)
+        if len(cells) != 2:
+            raise AssertionError(f"a Reference Index row needs two cells: {line!r}")
+        link = INDEX_LINK_RE.fullmatch(cells[0])
+        if link is None or link.group(1) != link.group(2):
+            raise AssertionError("a Reference Index File cell must be a link of the "
+                                 f"form [references/<name>.md](references/<name>.md): {cells[0]!r}")
+        rows.append((link.group(1), cells[1]))
+    return rows
+
+
+def check_reference_index(text: str, skill_dir: Path) -> None:
+    rows = _reference_index_rows(text)
+    targets = [target for target, _ in rows]
+    for target, read_when in rows:
+        if not (skill_dir / target).is_file():
+            raise AssertionError(f"the Reference Index names a missing file: {target}")
+        if not read_when:
+            raise AssertionError(f"the Reference Index row for {target} has an empty read condition")
+    duplicates = sorted({t for t in targets if targets.count(t) > 1})
+    if duplicates:
+        raise AssertionError(f"the Reference Index lists a file twice: {duplicates}")
+    # glob() is not recursive, which leaves out references/example-reviews/.
+    on_disk = sorted(f"references/{p.name}"
+                     for p in (skill_dir / "references").glob("*.md") if p.is_file())
+    unlisted = [path for path in on_disk if path not in targets]
+    if unlisted:
+        raise AssertionError(f"a reference file has no Reference Index row: {unlisted}")
+
+
+class ReferenceIndexTests(unittest.TestCase):
+    def test_each_listed_skill_routes_to_every_reference_it_ships(self):
+        for name in REFERENCE_INDEX_SKILLS:
+            with self.subTest(name):
+                skill_md = SKILLS_DIR / name / "SKILL.md"
+                self.assertTrue(skill_md.is_file(), f"missing {skill_md}")
+                text = skill_md.read_text(encoding="utf-8", errors="replace")
+                check_reference_index(text, skill_md.parent)
+
+
+class ReferenceIndexCheckTests(unittest.TestCase):
+    """The check itself, run against small skill directories built in a temp dir."""
+
+    GOOD_INDEX = (
+        "## Reference Index\n\n"
+        "| File | Read when |\n|---|---|\n"
+        "| [references/a.md](references/a.md) | the user names A |\n"
+        "| [references/b.md](references/b.md) | a run was interrupted |\n"
+    )
+
+    def _check(self, text: str, files=("a.md", "b.md"), extra_dirs=()) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp)
+            (skill_dir / "references").mkdir()
+            for name in files:
+                (skill_dir / "references" / name).write_text("x\n", encoding="utf-8")
+            for sub in extra_dirs:
+                (skill_dir / "references" / sub).mkdir()
+                (skill_dir / "references" / sub / "r.md").write_text("x\n", encoding="utf-8")
+            check_reference_index(text, skill_dir)
+
+    def test_a_complete_index_passes(self):
+        self._check("# Core\n\n" + self.GOOD_INDEX + "\n## Next\n")
+
+    def test_a_crlf_copy_passes(self):
+        self._check(_to_crlf(self.GOOD_INDEX))
+
+    def test_example_reviews_need_no_row(self):
+        self._check(self.GOOD_INDEX, extra_dirs=("example-reviews",))
+
+    def test_a_row_naming_a_missing_file_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"missing file: references/b\.md"):
+            self._check(self.GOOD_INDEX, files=("a.md",))
+
+    def test_an_empty_read_condition_is_rejected(self):
+        text = self.GOOD_INDEX.replace("a run was interrupted", "  ")
+        with self.assertRaisesRegex(AssertionError, r"empty read condition"):
+            self._check(text)
+
+    def test_a_reference_without_a_row_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"no Reference Index row: \['references/c\.md'\]"):
+            self._check(self.GOOD_INDEX, files=("a.md", "b.md", "c.md"))
+
+    def test_a_file_listed_twice_is_rejected(self):
+        text = self.GOOD_INDEX + "| [references/a.md](references/a.md) | again |\n"
+        with self.assertRaisesRegex(AssertionError, r"lists a file twice"):
+            self._check(text)
+
+    def test_a_wrong_header_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"header row must be"):
+            self._check(self.GOOD_INDEX.replace("Read when", "Notes"))
+
+    def test_a_file_cell_that_is_not_a_matching_link_is_rejected(self):
+        for cell in ("`references/a.md`", "[references/a.md](references/b.md)",
+                     "[a](references/a.md)"):
+            with self.subTest(cell):
+                text = self.GOOD_INDEX.replace("[references/a.md](references/a.md)", cell)
+                with self.assertRaisesRegex(AssertionError, r"File cell must be a link"):
+                    self._check(text)
+
+    def test_a_missing_index_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 0"):
+            self._check("# Core\n\nNo index here.\n")
+
+    def test_an_index_inside_a_fence_is_not_an_index(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 0"):
+            self._check("```\n" + self.GOOD_INDEX + "```\n")
+
+    def test_a_second_index_heading_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, r"expected one unfenced .* found 2"):
+            self._check(self.GOOD_INDEX + "\n" + self.GOOD_INDEX)
 
 
 if __name__ == "__main__":
