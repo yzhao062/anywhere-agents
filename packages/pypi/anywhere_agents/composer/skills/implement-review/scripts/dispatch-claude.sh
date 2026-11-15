@@ -555,8 +555,31 @@ if [ "$CLAUDE_EXIT" -eq 0 ]; then
     REVIEW_CANDIDATE="${REVIEW_DIR}/.${REVIEW_BASE}.dispatch-claude-$$-${NONCE}.tmp"
     REVIEW_FAILURE=""
 
+    # The first round number a standalone marker line names when no marker
+    # line in any spelling names this round; empty when the output is not for
+    # another round, so a current-round marker wins over a quoted older one.
+    # Round numbers compare as digit strings without leading zeros, so round 1
+    # never matches round 11.
+    OTHER_ROUND=""
+    if [ -s "$STATE_DIR/tail" ]; then
+        OTHER_ROUND=$(awk -v round="$ROUND" '
+            function digits(s) { sub(/^0+/, "", s); return s == "" ? "0" : s }
+            { sub(/\r$/, "") }
+            tolower($0) ~ /^[ \t]*<!--[ \t]*round[ \t]+[0-9]+[ \t]*-->[ \t]*$/ {
+                line = tolower($0)
+                sub(/^[ \t]*<!--[ \t]*round[ \t]+/, "", line)
+                sub(/[ \t]*-->[ \t]*$/, "", line)
+                if ((digits(line) "") == (digits(round) "")) current = 1
+                else if (other == "") other = digits(line) ""
+            }
+            END { if (!current && other != "") print other }
+        ' "$STATE_DIR/tail") || OTHER_ROUND=""
+    fi
+
     if [ ! -s "$STATE_DIR/tail" ]; then
         REVIEW_FAILURE="Claude exited 0 but produced no review output"
+    elif [ -n "$OTHER_ROUND" ]; then
+        REVIEW_FAILURE="review answers Round ${OTHER_ROUND}, but this dispatch expects Round ${ROUND}"
     elif awk -v marker="$MARKER" '
         { sub(/\r$/, "") }
         found || $0 == marker { found = 1; print }

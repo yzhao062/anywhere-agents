@@ -147,6 +147,10 @@ elif kind == "no-verdict":
     response = review.replace("Commit verdict: PASS\n", "")
 elif kind == "no-marker":
     response = review.replace(f"<!-- Round {round_num} -->\n\n", "")
+elif kind == "other-round":
+    response = review.replace(
+        f"<!-- Round {round_num} -->", f"<!-- Round {int(round_num) - 1} -->"
+    )
 elif kind == "quoted-template":
     response = (
         "I will write the review in this shape once the suite finishes:\n\n"
@@ -268,6 +272,109 @@ class DispatchGeminiUnitTests(unittest.TestCase):
     def test_normalize_inserts_missing_round_marker(self) -> None:
         value = self.module.normalize_review("body\n", 3)
         self.assertEqual(value, "<!-- Round 3 -->\n\nbody\n")
+
+    def _publish(self, response: str, round_num: int, existing: str | None = None):
+        """Run publish_review in a scratch directory; return what it left behind."""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "Review-Antigravity.md"
+            if existing is not None:
+                path.write_text(existing, encoding="utf-8")
+            published, error = self.module.publish_review(
+                response, path, round_num, int(time.time()) - 5, "nonce"
+            )
+            text = path.read_text(encoding="utf-8") if path.exists() else None
+            others = sorted(p.name for p in Path(temp).iterdir() if p != path)
+        return published, error, text, others
+
+    def test_publish_refuses_a_review_for_another_round(self) -> None:
+        body = "Finding text for the earlier round. " * 30
+        published, error, text, others = self._publish(
+            f"<!-- Round 1 -->\n\n{body}\n", 2
+        )
+        self.assertFalse(published)
+        self.assertEqual(error, "review answers Round 1, but this dispatch expects Round 2")
+        self.assertIsNone(text)
+        self.assertEqual(others, [])
+        # A review already on disk stays as it was.
+        previous = "<!-- Round 1 -->\n\nThe earlier review.\n"
+        published, error, text, others = self._publish(
+            f"Preface.\n\n<!-- Round 1 -->\n\n{body}\n", 2, existing=previous
+        )
+        self.assertFalse(published)
+        self.assertEqual(text, previous)
+        self.assertEqual(others, [])
+
+    def test_publish_cuts_a_preface_before_the_current_round_marker(self) -> None:
+        body = "Finding text for this round. " * 30
+        published, error, text, _ = self._publish(
+            f"Preface that is dropped.\n\n<!-- Round 2 -->\n\n{body}\n", 2
+        )
+        self.assertTrue(published, error)
+        self.assertTrue(text.startswith("<!-- Round 2 -->\n\n"))
+        self.assertNotIn("Preface that is dropped", text)
+        # The exact marker wins over a quoted marker for another round.
+        published, error, text, _ = self._publish(
+            f"<!-- Round 2 -->\n\n{body}\n\nThe last round opened with:\n<!-- Round 1 -->\n", 2
+        )
+        self.assertTrue(published, error)
+        self.assertTrue(text.startswith("<!-- Round 2 -->\n\n"))
+
+    def test_publish_adds_a_missing_round_marker(self) -> None:
+        body = ("Finding text without a marker. " * 30).strip()
+        published, error, text, _ = self._publish(f"{body}\n", 2)
+        self.assertTrue(published, error)
+        self.assertTrue(text.startswith("<!-- Round 2 -->\n\n" + body))
+
+    def test_round_markers_compare_as_integers(self) -> None:
+        other = self.module.other_round_marker
+        # Round 1 and round 11 never match by prefix, in either direction.
+        self.assertEqual(other("<!-- Round 11 -->\nbody\n", 1), "11")
+        self.assertEqual(other("<!-- Round 1 -->\nbody\n", 11), "1")
+        self.assertEqual(other("<!-- Round 10 -->\nbody\n", 1), "10")
+        body = "Finding text for round eleven. " * 30
+        published, error, text, _ = self._publish(f"<!-- Round 1 -->\n\n{body}\n", 11)
+        self.assertFalse(published)
+        self.assertEqual(error, "review answers Round 1, but this dispatch expects Round 11")
+        self.assertIsNone(text)
+
+    def test_a_variant_marker_for_the_same_round_is_not_a_mismatch(self) -> None:
+        other = self.module.other_round_marker
+        for variant in (
+            "<!--Round 2-->",
+            "<!--  round   2  -->",
+            "  <!-- ROUND 2 -->  ",
+            "<!-- Round 02 -->",
+        ):
+            with self.subTest(variant):
+                self.assertIsNone(other(f"{variant}\nbody\n", 2))
+        # A marker inside a sentence is not a standalone marker line.
+        self.assertIsNone(other("Earlier we saw <!-- Round 1 --> in the log.\n", 2))
+        body = "Finding text under a variant marker. " * 30
+        published, error, text, _ = self._publish(f"<!--  round 2 -->\n\n{body}\n", 2)
+        self.assertTrue(published, error)
+        self.assertTrue(text.startswith("<!-- Round 2 -->\n\n"))
+
+    def test_a_variant_current_marker_wins_over_a_quoted_older_marker(self) -> None:
+        other = self.module.other_round_marker
+        for response in (
+            "<!--  ROUND 02  -->\n\nFinding.\n\n<!-- Round 1 -->\n",
+            "<!-- round 2 -->\r\nFinding.\r\n<!-- Round 1 -->\r\n",
+            "<!-- Round 1 -->\nquoted first\n<!--Round 2-->\nbody\n",
+        ):
+            with self.subTest(response=response):
+                self.assertIsNone(other(response, 2))
+        body = "Finding text that quotes an older marker. " * 30
+        published, error, text, _ = self._publish(
+            f"<!--  ROUND 02  -->\n\n{body}\n\n<!-- Round 1 -->\n", 2
+        )
+        self.assertTrue(published, error)
+        self.assertTrue(text.startswith("<!-- Round 2 -->\n\n"))
+
+    def test_another_round_is_found_through_variant_spelling_and_crlf(self) -> None:
+        other = self.module.other_round_marker
+        self.assertEqual(other("  <!--round 3-->  \r\nbody\r\n", 2), "3")
+        self.assertEqual(other("Preface.\r\n<!-- ROUND 007 -->\r\nbody\r\n", 2), "7")
+        self.assertIsNone(other("<!-- Round 3 -->\r\n<!-- Round 2 -->\r\nbody\r\n", 2))
 
     def test_failure_reason_rejects_a_non_success_status(self) -> None:
         # Antigravity exits 0 when it stops on a quota limit, and that ERROR
@@ -999,6 +1106,26 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(error, "Quota exceeded for gemini-3.8-flash-high")
         self.assertFalse((state_dir / "backend-failure").exists())
+
+    def test_a_review_for_another_round_is_rejected_and_the_previous_review_stays(self) -> None:
+        review = self.repo / "Review-Antigravity.md"
+        review.write_text("<!-- Round 1 -->\n\nEarlier round.\n", encoding="utf-8")
+        before = review.read_bytes()
+        result = self._run({"MOCK_AGY_RESPONSE": "other-round"})
+        self.assertEqual(
+            result.returncode,
+            70,
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
+        )
+        self.assertIn(
+            "review answers Round 1, but this dispatch expects Round 2", result.stderr
+        )
+        self.assertIn("review rejected", result.stderr)
+        self.assertEqual(review.read_bytes(), before)
+        review.unlink()
+        result = self._run({"MOCK_AGY_RESPONSE": "other-round"})
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertFalse(review.exists())
 
     def test_error_status_publishes_a_whole_review_and_records_the_error(self) -> None:
         # Measured on 2026-09-15: four Agy reviews ended this way, each result

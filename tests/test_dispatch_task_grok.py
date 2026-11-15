@@ -1,6 +1,7 @@
 """Contract tests for prun's Grok task dispatcher (dispatch-task-grok.py)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -57,6 +58,10 @@ import time
 from pathlib import Path
 
 args = sys.argv[1:]
+_launch_log = os.environ.get("FAKE_GROK_LOG_DIR")
+if _launch_log and os.path.isdir(_launch_log):
+    with open(os.path.join(_launch_log, "invocations.log"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(args) + "\n")
 if args == ["--version"]:
     print("0.0.10-fake-grok")
     raise SystemExit(0)
@@ -183,6 +188,33 @@ if mode == "worker_writes_result":
         "total_cost_usd": 0.015,
     })
     raise SystemExit(0)
+
+if mode in ("worker_writes_then_fails", "worker_writes_then_stall"):
+    target = Path(os.environ["FAKE_GROK_RESULT_TARGET"])
+    target.write_text(
+        os.environ.get(
+            "FAKE_GROK_RESULT_BODY",
+            "# unit_a result\nConclusion: worker wrote file directly\nFiles: a.py\nOpen items: none\nVerification: pytest\n",
+        ),
+        encoding="utf-8",
+    )
+    if mode == "worker_writes_then_stall":
+        emit({"type": "thought", "sessionId": session_id, "data": "starting"})
+        time.sleep(300)
+        raise SystemExit(0)
+    if os.environ.get("FAKE_GROK_EMIT_RESPONSE", "1") == "1":
+        emit({
+            "type": "text",
+            "sessionId": session_id,
+            "data": "# unit_a result\nConclusion: stream summary text\nFiles: a.py\nOpen items: none\nVerification: pytest\n",
+        })
+        emit({
+            "type": "end",
+            "sessionId": session_id,
+            "stopReason": "end_turn",
+            "modelUsage": {model_id: {"inputTokens": 80, "outputTokens": 40}},
+        })
+    raise SystemExit(int(os.environ.get("FAKE_GROK_EXIT_CODE", "3")))
 
 stop_reason = os.environ.get("FAKE_GROK_STOP_REASON", "end_turn")
 emit({
@@ -431,6 +463,122 @@ class DispatchTaskGrokTests(unittest.TestCase):
             "Conclusion: stream summary text",
             sibling.read_text(encoding="utf-8"),
         )
+
+    WORKER_BODY = (
+        "# unit_a result\nConclusion: worker wrote file directly\nFiles: a.py\n"
+        "Open items: none\nVerification: pytest\n"
+    )
+
+    def test_worker_result_survives_a_nonzero_exit(self) -> None:
+        proc, _ = self.run_dispatch(
+            env_overrides={
+                "FAKE_GROK_MODE": "worker_writes_then_fails",
+                "FAKE_GROK_RESULT_TARGET": str(self.result_path),
+                "FAKE_GROK_EXIT_CODE": "3",
+            }
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("Grok exited with code 3", proc.stderr)
+        self.assertEqual(
+            self.result_path.read_text(encoding="utf-8"), self.WORKER_BODY
+        )
+        sibling = self.root / "unit_a.result.response.md"
+        self.assertTrue(sibling.is_file())
+        self.assertIn(
+            "Conclusion: stream summary text",
+            sibling.read_text(encoding="utf-8"),
+        )
+
+    def test_worker_result_survives_a_nonzero_exit_with_no_response(self) -> None:
+        proc, _ = self.run_dispatch(
+            env_overrides={
+                "FAKE_GROK_MODE": "worker_writes_then_fails",
+                "FAKE_GROK_RESULT_TARGET": str(self.result_path),
+                "FAKE_GROK_EMIT_RESPONSE": "0",
+                "FAKE_GROK_EXIT_CODE": "5",
+            }
+        )
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertIn("Grok exited with code 5", proc.stderr)
+        self.assertEqual(
+            self.result_path.read_text(encoding="utf-8"), self.WORKER_BODY
+        )
+        self.assertFalse((self.root / "unit_a.result.response.md").exists())
+
+    def test_worker_result_survives_the_idle_reaper(self) -> None:
+        proc, _ = self.run_dispatch(
+            env_overrides={
+                "FAKE_GROK_MODE": "worker_writes_then_stall",
+                "FAKE_GROK_RESULT_TARGET": str(self.result_path),
+                "PRUN_STALL_THRESHOLD": "1",
+                "GROK_KILL_GRACE_SECONDS": "0.2",
+            }
+        )
+        self.assertEqual(proc.returncode, 124, proc.stderr)
+        self.assertIn("reaped after 1s", proc.stderr)
+        self.assertEqual(
+            self.result_path.read_text(encoding="utf-8"), self.WORKER_BODY
+        )
+
+    def test_empty_worker_result_is_still_replaced_by_the_fallback(self) -> None:
+        proc, _ = self.run_dispatch(
+            env_overrides={
+                "FAKE_GROK_MODE": "worker_writes_then_fails",
+                "FAKE_GROK_RESULT_TARGET": str(self.result_path),
+                "FAKE_GROK_RESULT_BODY": "",
+                "FAKE_GROK_EXIT_CODE": "3",
+            }
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertRegex(
+            self.result_path.read_text(encoding="utf-8").splitlines()[0],
+            r"^# unit_a result \(FALLBACK, ",
+        )
+
+    def test_add_dir_is_refused_before_any_state_or_launch(self) -> None:
+        extra = self.root / "extra-tree"
+        extra.mkdir()
+        repo_hash = hashlib.sha256(
+            str(self.root.resolve()).encode("utf-8")
+        ).hexdigest()[:8]
+        cases = {
+            "path": ["--add-dir", str(extra)],
+            "equals-form": [f"--add-dir={extra}"],
+            "repeated": ["--add-dir", str(extra), "--add-dir", str(extra)],
+            "with-mode": ["--mode", "plan", "--add-dir", str(extra)],
+            "empty-path": ["--add-dir", ""],
+            "no-path": ["--add-dir"],
+            "with-continue-from": [
+                "--add-dir", str(extra), "--continue-from", str(self.root),
+            ],
+        }
+        for label, extra_args in cases.items():
+            with self.subTest(case=label):
+                proc, state_dir = self.run_dispatch(extra_args=extra_args)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn("--add-dir is not supported", proc.stderr)
+                self.assertIn("working directory", proc.stderr)
+                self.assertIn("PRUN_SCRATCH_CWD", proc.stderr)
+                self.assertNotIn("STATE-DIR", proc.stdout)
+                self.assertIsNone(state_dir)
+                self.assertFalse(self.result_path.exists())
+                self.assertFalse((self.log_dir / "invocations.log").exists())
+                self.assertEqual(
+                    list(Path(tempfile.gettempdir()).glob(f"prun-task-{repo_hash}-*")),
+                    [],
+                )
+
+    def test_add_dir_is_never_passed_to_grok(self) -> None:
+        scratch = self.root / "caller-scratch"
+        scratch.mkdir()
+        proc, _ = self.run_dispatch(
+            extra_args=["--mode", "plan"],
+            env_overrides={"PRUN_SCRATCH_CWD": str(scratch)},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        recorded_args = json.loads((self.log_dir / "args.json").read_text(encoding="utf-8"))
+        self.assertNotIn("--add-dir", recorded_args)
+        self.assertEqual(recorded_args[recorded_args.index("--cwd") + 1], str(scratch.resolve()))
 
     def test_narration_before_tool_calls_is_excluded(self) -> None:
         proc, _ = self.run_dispatch(

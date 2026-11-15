@@ -98,6 +98,8 @@ LEADING_VERDICT_VALUE_RE = re.compile(
     r"^[\s*_:=\u2013\u2014-]*(BLOCK(?:ED)?|PASS(?:ED)?|UNVERIFIED)\b", re.IGNORECASE
 )
 VERDICT_DECORATION = " \t*_:=\u2013\u2014-"
+# A standalone round-marker line in any spelling, with the round number captured.
+ROUND_MARKER_LINE_RE = re.compile(r"^\s*<!--\s*Round\s+([0-9]+)\s*-->\s*$", re.IGNORECASE)
 
 
 def fail(message: str, code: int = 2) -> int:
@@ -676,6 +678,30 @@ def normalize_review(response: str, round_num: int) -> str:
     return "\n".join(lines[marker_index:]).rstrip() + "\n"
 
 
+def other_round_marker(response: str, round_num: int) -> str | None:
+    """Return the first round number a marker line names when it is not round_num.
+
+    None means the response is not for another round: it carries a standalone
+    marker for round_num in any spelling (case, spacing, leading zeros), or
+    no standalone marker line for a different round. A current-round marker
+    therefore wins over an older one the review quotes. Round numbers compare
+    as digit strings with leading zeros dropped, so round 1 never matches
+    round 11 by prefix.
+    """
+    lines = response.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    wanted = str(round_num).lstrip("0") or "0"
+    other: str | None = None
+    for line in lines:
+        match = ROUND_MARKER_LINE_RE.match(line)
+        if match:
+            found = match.group(1).lstrip("0") or "0"
+            if found == wanted:
+                return None
+            if other is None:
+                other = found
+    return other
+
+
 def has_review_structure(response: str, round_num: int) -> bool:
     """Return whether the response has this round's review structure outside quoted code.
 
@@ -733,6 +759,9 @@ def publish_review(
     dispatch_time: int,
     nonce: str,
 ) -> tuple[bool, str]:
+    wrong_round = other_round_marker(response, round_num)
+    if wrong_round is not None:
+        return False, f"review answers Round {wrong_round}, but this dispatch expects Round {round_num}"
     normalized = normalize_review(response, round_num)
     payload = normalized.encode("utf-8")
     if len(payload) < MIN_REVIEW_BYTES:

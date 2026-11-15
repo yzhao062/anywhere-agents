@@ -4,7 +4,7 @@ This reference documents the Grok executor for `prun` (`skills/prun/scripts/disp
 
 ## Command Contract and Flags
 
-Invoke the dispatcher in the background with the same arguments `dispatch-task-agy.py` takes:
+Invoke the dispatcher in the background with the arguments `dispatch-task-agy.py` takes, except `--add-dir`:
 
 ```bash
 python3 "$PRUN_GROK" \
@@ -18,8 +18,8 @@ Supported arguments:
 - `--prompt-file <path>`: path to the unit prompt file. The dispatcher prepends a worker preamble instructing the Grok worker to skip the bootstrap, banner, session-start, and router steps of any rule file it finds, apply the substantive policy and local overrides carried in the unit prompt, never commit, push, run destructive git commands, rewrite Git history, or modify a remote system, and end with a `# <unit-id> result` block (the dispatcher does not check that block).
 - `--result-file <path>`: fresh output path; the dispatcher refuses to overwrite an existing file.
 - `--unit-id <id>`: identifier matching `^[A-Za-z0-9_-]+$`.
-- `--mode <plan|accept-edits>`: defaults to `accept-edits` (`--always-approve`) when the dispatcher creates its own scratch directory (`<state-dir>/work`). When `PRUN_SCRATCH_CWD` or `--add-dir` is supplied, `--mode` must be passed explicitly (`--mode accept-edits` for a disposable throwaway clone, or `--mode plan` for read-only work using `--permission-mode plan`).
-- `--add-dir <dir>`: repeatable option that adds an existing directory to Grok's workspace; an empty path argument or a path that is not an existing directory exits `2` before launch. Cannot be combined with `--continue-from`.
+- `--mode <plan|accept-edits>`: defaults to `accept-edits` (`--always-approve`) when the dispatcher creates its own scratch directory (`<state-dir>/work`). When `PRUN_SCRATCH_CWD` is supplied, `--mode` must be passed explicitly (`--mode accept-edits` for a disposable throwaway clone, or `--mode plan` for read-only work using `--permission-mode plan`).
+- `--add-dir`: refused. The Grok CLI lists the flag in `--help`, but a session created with it fails with `additionalDirectories is not supported: a session works only in its cwd` (checked against grok 1.0.77). The dispatcher exits `2` before it creates any state directory or launches `grok`, with a message saying the Grok CLI works only in its working directory. A unit that needs another tree runs inside it: point `PRUN_SCRATCH_CWD` at a throwaway clone and pass an explicit `--mode`.
 - `--continue-from <prev-state-dir>`: resumes the session recorded in `<prev-state-dir>/session-id`, or in `conversation-id` when `session-id` is absent, by passing `-r <sessionId>` to `grok`. An empty, unreadable, or malformed id exits `2`. The resumed session runs in a fresh `<state-dir>/work` (or `PRUN_SCRATCH_CWD`), so the previous scratch tree is not reused.
 
 Under the hood, the dispatcher resolves `<model>` and `<effort>` from `user/agent-models.json` via `scripts/agent_models.py resolve --family grok --role prun-worker` and runs, in accept-edits mode:
@@ -45,7 +45,7 @@ The dispatcher prints one line to stdout (`STATE-DIR <abs-path>`) and populates 
 
 Text accumulation buffers `text` events and resets the buffer at every `tool_call` event so narration between tool calls is excluded from the final response. If nothing follows the last `tool_call`, full-stream text is used as the fallback. Unknown event types update `tail` liveness only.
 
-A unit succeeds only when the stream contains an `end` event with `stopReason == "end_turn"`, the process exits `0`, and either the worker wrote a non-empty `--result-file` itself or the final response is at least 20 UTF-8 bytes. Any other outcome (an `error` event, a missing `end` event, another `stopReason` such as `max_tokens`, `max_turn_requests`, `refusal`, or `cancelled`, or a shorter response) writes a `FALLBACK` result file whose first line matches `^# [A-Za-z0-9_-]+ result \(FALLBACK, `. The dispatcher then exits `70`, or with Grok's own status when `grok` itself exited non-zero. On success, a non-empty `--result-file` the worker wrote itself is kept, and a non-empty final response goes beside it as `<stem>.response<suffix>`.
+A unit succeeds only when the stream contains an `end` event with `stopReason == "end_turn"`, the process exits `0`, and either the worker wrote a non-empty `--result-file` itself or the final response is at least 20 UTF-8 bytes. Any other outcome (an `error` event, a missing `end` event, another `stopReason` such as `max_tokens`, `max_turn_requests`, `refusal`, or `cancelled`, or a shorter response) exits `70`, or with Grok's own status when `grok` itself exited non-zero, and prints the reason on stderr. Unless the worker already wrote a non-empty `--result-file`, it also writes a `FALLBACK` result file whose first line matches `^# [A-Za-z0-9_-]+ result \(FALLBACK, `. A worker-written file is kept in every outcome, and a non-empty final response goes beside it as `<stem>.response<suffix>`, on a failed run too. Such a file carries no `FALLBACK` header, so `monitor` counts the unit as done; treat a nonzero dispatcher exit as a failed unit whatever the file says.
 
 ## Child Environment and Authentication Scrubbing
 

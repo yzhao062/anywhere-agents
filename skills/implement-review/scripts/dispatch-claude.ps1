@@ -721,20 +721,47 @@ if ($claudeExit -eq 0) {
             $tailText = Get-Content -LiteralPath $tailPath -Raw -ErrorAction Stop
             $tailLines = $tailText -split "\r?\n"
             $markerIndex = [Array]::IndexOf($tailLines, $marker)
-            if ($markerIndex -ge 0) {
-                $selected = $tailLines[$markerIndex..($tailLines.Length - 1)] -join "`n"
-                $normalizedReview = $selected.TrimEnd() + "`n"
-            } else {
-                $normalizedReview = $marker + "`n`n" + (($tailLines -join "`n").TrimStart())
+            # The first round number a standalone marker line names when no
+            # marker line in any spelling names this round; $null when the
+            # output is not for another round, so a current-round marker wins
+            # over a quoted older one. Round numbers compare as digit strings
+            # without leading zeros, so round 1 never matches round 11.
+            $otherRound = $null
+            if ($markerIndex -lt 0) {
+                $wantedRound = ([string]$Round).TrimStart('0')
+                if ($wantedRound -eq '') { $wantedRound = '0' }
+                $currentRoundSeen = $false
+                foreach ($tailLine in $tailLines) {
+                    if ($tailLine -match '^\s*<!--\s*Round\s+([0-9]+)\s*-->\s*$') {
+                        $foundRound = $Matches[1].TrimStart('0')
+                        if ($foundRound -eq '') { $foundRound = '0' }
+                        if ($foundRound -eq $wantedRound) {
+                            $currentRoundSeen = $true
+                            break
+                        }
+                        if ($null -eq $otherRound) { $otherRound = $foundRound }
+                    }
+                }
+                if ($currentRoundSeen) { $otherRound = $null }
             }
-            [System.IO.File]::WriteAllText($reviewCandidatePath, $normalizedReview, $utf8NoBom)
+            if ($null -ne $otherRound) {
+                $reviewFailure = "review answers Round $otherRound, but this dispatch expects Round $Round"
+            } else {
+                if ($markerIndex -ge 0) {
+                    $selected = $tailLines[$markerIndex..($tailLines.Length - 1)] -join "`n"
+                    $normalizedReview = $selected.TrimEnd() + "`n"
+                } else {
+                    $normalizedReview = $marker + "`n`n" + (($tailLines -join "`n").TrimStart())
+                }
+                [System.IO.File]::WriteAllText($reviewCandidatePath, $normalizedReview, $utf8NoBom)
 
-            $candidateItem = Get-Item -LiteralPath $reviewCandidatePath -ErrorAction Stop
-            $candidateFirstLine = Get-Content -LiteralPath $reviewCandidatePath -TotalCount 1 -ErrorAction Stop
-            if ($candidateFirstLine.TrimEnd("`r") -ne $marker) {
-                $reviewFailure = 'normalized review lacks the current round marker'
-            } elseif ($strictChecks -and $candidateItem.Length -lt 500) {
-                $reviewFailure = "normalized review is only $($candidateItem.Length) bytes"
+                $candidateItem = Get-Item -LiteralPath $reviewCandidatePath -ErrorAction Stop
+                $candidateFirstLine = Get-Content -LiteralPath $reviewCandidatePath -TotalCount 1 -ErrorAction Stop
+                if ($candidateFirstLine.TrimEnd("`r") -ne $marker) {
+                    $reviewFailure = 'normalized review lacks the current round marker'
+                } elseif ($strictChecks -and $candidateItem.Length -lt 500) {
+                    $reviewFailure = "normalized review is only $($candidateItem.Length) bytes"
+                }
             }
         }
     } catch {

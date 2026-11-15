@@ -8,8 +8,10 @@ final response text (after the last ``tool_call`` event, or full-stream text
 when nothing follows the last tool call) is published atomically to the fresh
 result path. If the worker wrote a non-empty result file at that path itself,
 the dispatcher keeps the worker's file and writes the final response beside it
-as ``<stem>.response<suffix>``. Any failure writes a ``FALLBACK`` result file
-whose first line matches ``^# [A-Za-z0-9_-]+ result \\(FALLBACK, ``.
+as ``<stem>.response<suffix>``, on a failed run too. Any other failure writes a
+``FALLBACK`` result file whose first line matches
+``^# [A-Za-z0-9_-]+ result \\(FALLBACK, ``. ``--add-dir`` is refused with exit 2:
+a Grok session works only in its working directory.
 """
 from __future__ import annotations
 
@@ -146,9 +148,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Grok execution mode. Default: accept-edits with --always-approve "
-            "in a dispatcher-created scratch directory. PRUN_SCRATCH_CWD or "
-            "--add-dir requires an explicit mode, because accept-edits can "
-            "write there; the caller must provide disposable directories. "
+            "in a dispatcher-created scratch directory. PRUN_SCRATCH_CWD "
+            "requires an explicit mode, because accept-edits can write there; "
+            "the caller must provide a disposable directory. "
             "plan is the read-only opt-in and runs with --permission-mode plan."
         ),
     )
@@ -156,9 +158,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--add-dir",
         dest="add_dir",
         action="append",
-        default=[],
+        nargs="*",
+        default=None,
         metavar="PATH",
-        help="Add an extra directory to Grok's workspace (repeatable)",
+        help=(
+            "Refused with exit 2: the Grok CLI works only in its working "
+            "directory. Set PRUN_SCRATCH_CWD to the tree the unit needs."
+        ),
     )
     parser.add_argument(
         "--continue-from",
@@ -608,6 +614,10 @@ def publish_fallback(
     stderr_path: Path,
     nonce: str,
 ) -> None:
+    # The dispatcher refuses a result path that exists at start, so a non-empty
+    # file here is the worker's own result; keep it.
+    if result_path.is_file() and result_path.stat().st_size > 0:
+        return
     chunks: list[str] = []
     for label, path in (("stdout events", tail_path), ("stderr", stderr_path)):
         try:
@@ -724,6 +734,13 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if exc.code is not None else 2
 
+    if args.add_dir is not None:
+        return fail(
+            "--add-dir is not supported: the Grok CLI works only in its working "
+            "directory; run a unit that needs another tree inside it "
+            "(set PRUN_SCRATCH_CWD to the clone, with an explicit --mode)"
+        )
+
     if not UNIT_RE.fullmatch(args.unit_id):
         return fail("--unit-id must contain only letters, digits, dashes, or underscores")
 
@@ -748,30 +765,16 @@ def main(argv: list[str] | None = None) -> int:
 
     scratch_raw = os.environ.get("PRUN_SCRATCH_CWD")
     if args.mode is None:
-        if scratch_raw or args.add_dir:
+        if scratch_raw:
             return fail(
-                "PRUN_SCRATCH_CWD and --add-dir require an explicit "
-                "--mode plan or --mode accept-edits; use accept-edits only "
-                "with disposable directories"
+                "PRUN_SCRATCH_CWD requires an explicit --mode plan or "
+                "--mode accept-edits; use accept-edits only with a "
+                "disposable directory"
             )
         args.mode = "accept-edits"
 
-    add_dirs: list[Path] = []
-    for raw_dir in args.add_dir:
-        if not raw_dir or not raw_dir.strip():
-            return fail("--add-dir requires a non-empty directory path")
-        candidate = Path(raw_dir)
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        candidate = candidate.resolve()
-        if not candidate.is_dir():
-            return fail(f"--add-dir path is not an existing directory: {candidate}")
-        add_dirs.append(candidate)
-
     continue_session_id: str | None = None
     if args.continue_from is not None:
-        if add_dirs:
-            return fail("--add-dir cannot be combined with --continue-from")
         if not args.continue_from.strip():
             return fail("--continue-from requires a non-empty state directory path")
         continue_from = Path(args.continue_from)
@@ -913,8 +916,6 @@ def main(argv: list[str] | None = None) -> int:
             effort,
         ]
     )
-    for add_dir in add_dirs:
-        command.extend(["--add-dir", str(add_dir)])
     if continue_session_id:
         command.extend(["-r", continue_session_id])
 

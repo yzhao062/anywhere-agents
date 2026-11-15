@@ -463,6 +463,114 @@ class _DispatchContractMixin:
             self.assertTrue(review_text.startswith("<!-- Round 1 -->\n\n"))
             self.assertNotIn("Preface that should not be saved", review_text)
 
+    def test_dispatch_refuses_a_review_for_another_round(self) -> None:
+        """A review that answers a different round is rejected, not republished."""
+        cases = (
+            # (round asked for, marker the review carries)
+            ("2", "<!-- Round 1 -->"),
+            ("1", "<!-- Round 11 -->"),
+            ("11", "<!-- Round 1 -->"),
+            ("2", "  <!--round 1-->  "),
+        )
+        for round_arg, marker in cases:
+            with self.subTest(round=round_arg, marker=marker):
+                with _temp_dir() as td:
+                    tmpdir = Path(td)
+                    claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+                    review = tmpdir / "Review-Claude-Code.md"
+                    previous = "<!-- Round 1 -->\n\nThe earlier review.\n"
+                    review.write_text(previous, encoding="utf-8")
+                    result = self._run_dispatch(
+                        tmpdir, prompt, round_arg, "Review-Claude-Code.md", claude, log_dir,
+                        extra_env={
+                            "MOCK_CLAUDE_STDOUT": f"{marker}\n\nVerification notes: none.\n",
+                        },
+                    )
+                    self.assertEqual(
+                        result.returncode, 70,
+                        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
+                    )
+                    found = re.search(r"\d+", marker).group(0)
+                    self.assertIn(
+                        f"review answers Round {found}, but this dispatch expects Round {round_arg}",
+                        result.stderr,
+                    )
+                    self.assertIn("review rejected", result.stderr)
+                    self.assertEqual(review.read_text(encoding="utf-8"), previous)
+                    self.assertEqual(
+                        sorted(p.name for p in tmpdir.glob(".Review-Claude-Code.md*")), []
+                    )
+
+    def test_dispatch_refuses_another_round_when_no_review_exists(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "2", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={
+                    "MOCK_CLAUDE_STDOUT": (
+                        "Preface.\r\n<!-- Round 1 -->\r\n\r\nVerification notes: none.\r\n"
+                    ),
+                },
+            )
+            self.assertEqual(result.returncode, 70, result.stderr)
+            self.assertFalse((tmpdir / "Review-Claude-Code.md").exists())
+
+    def test_dispatch_keeps_a_review_with_the_current_marker_and_a_quoted_other(self) -> None:
+        """The exact marker for this round wins over a marker for another round."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "2", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={
+                    "MOCK_CLAUDE_STDOUT": (
+                        "Preface that should not be saved.\n\n"
+                        "<!-- Round 2 -->\n\n"
+                        "Verification notes: none.\n\n"
+                        "Round 1 opened with:\n<!-- Round 1 -->\n"
+                    ),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            review_text = (tmpdir / "Review-Claude-Code.md").read_text(encoding="utf-8")
+            self.assertTrue(review_text.startswith("<!-- Round 2 -->\n\n"))
+            self.assertNotIn("Preface that should not be saved", review_text)
+
+    def test_dispatch_adds_the_marker_for_a_variant_spelling_of_this_round(self) -> None:
+        """A variant marker for the same round is not a mismatch; the marker is prepended."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "2", "Review-Claude-Code.md", claude, log_dir,
+                extra_env={
+                    "MOCK_CLAUDE_STDOUT": "<!--  ROUND 02  -->\n\nVerification notes: none.\n",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            review_text = (tmpdir / "Review-Claude-Code.md").read_text(encoding="utf-8")
+            self.assertTrue(review_text.startswith("<!-- Round 2 -->\n\n"))
+            self.assertIn("Verification notes: none.", review_text)
+
+    def test_dispatch_keeps_a_variant_current_marker_beside_a_quoted_older_one(self) -> None:
+        """A current-round marker in any spelling wins over an older marker the review quotes."""
+        for stdout in (
+            "<!--  ROUND 02  -->\n\nVerification notes: none.\n\n<!-- Round 1 -->\n",
+            "<!-- round 2 -->\r\nVerification notes: none.\r\n<!-- Round 1 -->\r\n",
+        ):
+            with self.subTest(stdout=stdout):
+                with _temp_dir() as td:
+                    tmpdir = Path(td)
+                    claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+                    result = self._run_dispatch(
+                        tmpdir, prompt, "2", "Review-Claude-Code.md", claude, log_dir,
+                        extra_env={"MOCK_CLAUDE_STDOUT": stdout},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    review_text = (tmpdir / "Review-Claude-Code.md").read_text(encoding="utf-8")
+                    self.assertTrue(review_text.startswith("<!-- Round 2 -->\n\n"))
+
     def test_pre_mtime_zero_when_review_file_missing(self) -> None:
         with _temp_dir() as td:
             tmpdir = Path(td)
