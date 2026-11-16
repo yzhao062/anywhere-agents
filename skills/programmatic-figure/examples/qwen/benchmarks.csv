@@ -1,0 +1,7 @@
+benchmark,domain,Qwen4-Max,Qwen3.8-Max-0902,Opus5.5,GPT6.1-Sol,GPT6-Astra,Kimi K3.1
+DeepSWE v1.1,Agentic coding,75.7,69.3,74.2,75.2,74.1,75.5
+Terminal-Bench 4.0,Terminal coding,48.5,38.9,59.6,56.1,59.1,67.2
+ProgramBench,Software replication,31.5,28.0,65.0,52.5,55.0,25.0
+Agents' Last Exam v1.1,Long-horizon tasks,46.7,27.9,43.4,,42.6,43.4
+JobBench,Professional tasks,68.5,65.3,75.4,66.2,66.1,61.2
+BioMysteryBench,Bioinformatics research,85.0,84.1,81.9,84.4,78.9,80.6

@@ -64,9 +64,9 @@ bash ../agent-config/scripts/check-parity.sh
 #        user/agent-models.json, .claude/settings.json, .githooks/pre-push,
 #        .github/workflows/{real-agent-smoke.yml, validate.yml},
 #        bootstrap/bootstrap.{sh,ps1}, .claude/commands/*.md
-#        for all 7 shipped skills, and the STRICT skill trees (recursive)
+#        for all 8 shipped skills, and the STRICT skill trees (recursive)
 #        skills/{implement-review,ci-mockup-figure,readme-polish,prun,
-#        editable-figure,agent-models} (skills/my-router is BY-DESIGN below).
+#        editable-figure,programmatic-figure,agent-models} (skills/my-router is BY-DESIGN below).
 #        scripts/check-parity.sh is the authoritative membership list.
 #      BY-DESIGN (expected to differ; both sides must exist; a +/- line delta is
 #      reported per file for eyeball):

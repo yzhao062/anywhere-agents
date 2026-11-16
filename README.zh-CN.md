@@ -65,7 +65,7 @@ anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
 
 一个 **pack** 就是一个小包：一组规则、一个 skill、或者一份权限策略。`composer` 把它送到该到的位置 —— `AGENTS.md`、`.claude/skills/`、`.claude/commands/`、`~/.claude/hooks/`、或 `~/.claude/settings.json`。
 
-`bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`，其中 `aa-core-skills` 目前包含七个 skill：`agent-models`、`ci-mockup-figure`、`editable-figure`、`implement-review`、`my-router`、`prun`、`readme-polish`；`editable-figure` 要交付完整的 PPTX 需要 Windows 或 macOS 上的桌面版 PowerPoint，随附的导出脚本仅限 Windows），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
+`bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`，其中 `aa-core-skills` 目前包含八个 skill：`agent-models`、`ci-mockup-figure`、`editable-figure`、`implement-review`、`my-router`、`programmatic-figure`、`prun`、`readme-polish`；`editable-figure` 要交付完整的 PPTX 需要 Windows 或 macOS 上的桌面版 PowerPoint，随附的导出脚本仅限 Windows），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
 
 从 v0.6.0 起，bundled 默认 policy 表是：`agent-style`（passive）→ `auto`（静默刷新 + stderr 摘要），`aa-core-skills`（active）→ `prompt`（默认应用 + stderr 摘要）。第三方 pack 默认 `prompt`。裸 `anywhere-agents` 对 mutable ref 上的 prompt-policy drift 走 inline apply；每个被命中的 pack 输出一行 stderr 摘要（`applied 1 update for <pack> @ <ref>: <old> -> <new>`)。每次跑要跳过：用 `ANYWHERE_AGENTS_UPDATE=skip` 环境变量（v0.5.0 契约）或 `--no-apply-drift` CLI flag（两者都设时 flag 优先）。需要长期 fail-closed：在 `agent-config.yaml` 里 pin `update_policy: locked`。`anywhere-agents pack add | remove | list` CLI 写一份用户级 manifest 到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`。从 v0.5.2 起，`pack add` 是一步到位：写行 + 跑 composer + 部署，全在一个命令里。
 
@@ -320,7 +320,7 @@ rule_packs:
 
 完整参考在 **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**：
 
-- 每个 skill 的深度文档（`implement-review`、`my-router`、`ci-mockup-figure`、`prun`、`readme-polish`、`editable-figure`、`agent-models`）
+- 每个 skill 的深度文档（`implement-review`、`my-router`、`ci-mockup-figure`、`prun`、`readme-polish`、`editable-figure`、`programmatic-figure`、`agent-models`）
 - `AGENTS.md` 一节一节的说明
 - 定制指南（fork、override、扩展）
 - FAQ、troubleshooting、各平台注意事项（Windows、macOS、Linux）
@@ -402,6 +402,7 @@ anywhere-agents/
 │   ├── agent-models/              # 通过唯一的 registry 查看、检查和修改每个 agent 的模型与 effort
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # 为论文/proposal/README 生成原生可编辑 PowerPoint 图
+│   ├── programmatic-figure/       # 从数据和代码绘制科研图
 │   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
 │   ├── prun/                      # Agy worker 并行委派 fan-out

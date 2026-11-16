@@ -115,6 +115,7 @@ nav:
       - State recovery: skills/references/state-recovery.md
       - Web units: skills/references/web-units.md
     - agent-models: skills/agent-models.md
+    - programmatic-figure: skills/programmatic-figure.md
     - editable-figure:
       - skills/editable-figure.md
       - Document contexts: skills/references/document-contexts.md

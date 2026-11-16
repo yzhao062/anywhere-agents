@@ -1,0 +1,10 @@
+configuration,seed,auroc,latency_ms
+Full,1,0.87,24
+Full,2,0.85,26
+Full,3,0.86,25
+Without retrieval,1,0.78,18
+Without retrieval,2,0.80,17
+Without retrieval,3,0.79,19
+Without reranking,1,0.83,15
+Without reranking,2,0.82,16
+Without reranking,3,0.84,

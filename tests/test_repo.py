@@ -41,6 +41,7 @@ SHIPPED_SKILLS = {
     "prun",
     "readme-polish",
     "editable-figure",
+    "programmatic-figure",
     "agent-models",
 }
 

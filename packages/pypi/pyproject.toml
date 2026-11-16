@@ -66,6 +66,7 @@ anywhere_agents = [
   "composer/bootstrap/*.yaml",
   "composer/.claude/commands/*.md",
   "composer/skills/**/*",
+  "composer/skills/**/.gitattributes",
 ]
 
 [tool.pytest.ini_options]

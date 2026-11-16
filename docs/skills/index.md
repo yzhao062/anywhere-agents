@@ -1,6 +1,6 @@
 # Skills
 
-`anywhere-agents` ships seven skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically for routing-table matches; `prun` is invoked by explicit parallel fan-out intent.
+`anywhere-agents` ships eight skills. Each is a self-contained capability with its own `SKILL.md` definition. The router (`my-router`) dispatches automatically for routing-table matches; `prun` is invoked by explicit parallel fan-out intent.
 
 <div class="grid cards" markdown>
 
@@ -52,6 +52,14 @@
 
     [:octicons-arrow-right-24: Deep docs](editable-figure.md)
 
+-   :material-chart-line:{ .lg .middle } &nbsp; __`programmatic-figure`__
+
+    ---
+
+    Draw scientific plots from data and runnable code.
+
+    [:octicons-arrow-right-24: Deep docs](programmatic-figure.md)
+
 -   :material-tune-vertical:{ .lg .middle } &nbsp; __`agent-models`__
 
     ---
@@ -82,4 +90,4 @@ In a fork of `anywhere-agents`:
 3. Register the skill in `skills/my-router/references/routing-table.md` with triggering keywords, file types, and directory hints.
 4. Add regression tests where appropriate under `tests/`.
 
-See the seven shipped skills for reference structure.
+See the eight shipped skills for reference structure.

@@ -1,0 +1,13 @@
+benchmark,model,effort,tokens_per_task_k,score
+Work360,Qwen4-Max,Low,91,46.6
+Work360,Qwen4-Max,High,96,48.0
+Work360,Qwen4-Max,Xhigh,127,52.7
+Work360,Qwen3.8-Max-0902,Low,135,42.3
+Work360,Qwen3.8-Max-0902,High,148,43.5
+Work360,Qwen3.8-Max-0902,Xhigh,166,47.7
+Terminal-Bench 4.0,Qwen4-Max,Low,121,29.5
+Terminal-Bench 4.0,Qwen4-Max,High,128,31.6
+Terminal-Bench 4.0,Qwen4-Max,Xhigh,152,48.5
+Terminal-Bench 4.0,Qwen3.8-Max-0902,Low,203,19.3
+Terminal-Bench 4.0,Qwen3.8-Max-0902,High,250,31.6
+Terminal-Bench 4.0,Qwen3.8-Max-0902,Xhigh,289,37.9

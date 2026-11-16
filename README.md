@@ -65,7 +65,7 @@ The auth chain handles private repos automatically: SSH agent → `gh` CLI → `
 
 A **pack** is a small bundle (a rule set, a skill, or a permission policy) that the composer deploys to wherever it needs to land: `AGENTS.md`, `.claude/skills/`, `.claude/commands/`, `~/.claude/hooks/`, or `~/.claude/settings.json`.
 
-`bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`, which currently ships seven skills: `agent-models`, `ci-mockup-figure`, `editable-figure`, `implement-review`, `my-router`, `prun`, and `readme-polish`; completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS, and its bundled export script is Windows-only) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
+`bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`, which currently ships eight skills: `agent-models`, `ci-mockup-figure`, `editable-figure`, `implement-review`, `my-router`, `programmatic-figure`, `prun`, and `readme-polish`; completing an `editable-figure` PPTX deliverable requires desktop PowerPoint on Windows or macOS, and its bundled export script is Windows-only) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
 
 Since v0.6.0, the bundled-default policy table is `agent-style` (passive) → `auto` (silent refresh + stderr summary) and `aa-core-skills` (active) → `prompt` (apply-by-default + stderr summary). Third-party packs default to `prompt`. Bare `anywhere-agents` applies prompt-policy drift on mutable refs inline; the run prints one stderr summary line per affected pack (`applied 1 update for <pack> @ <ref>: <old> -> <new>`). Per-run skip is available via `ANYWHERE_AGENTS_UPDATE=skip` (v0.5.0 contract) or the `--no-apply-drift` CLI flag (the flag wins when both are set). Durable fail-closed: pin `update_policy: locked` in `agent-config.yaml`. The `anywhere-agents pack add | remove | list` CLI writes a user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`. Since v0.5.2, `pack add` is one-shot: it writes the entry, runs the composer, and deploys in a single command.
 
@@ -318,7 +318,7 @@ The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the
 
 Full reference lives at **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**:
 
-- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `prun`, `readme-polish`, `editable-figure`, `agent-models`)
+- Per-skill deep documentation (`implement-review`, `my-router`, `ci-mockup-figure`, `prun`, `readme-polish`, `editable-figure`, `programmatic-figure`, `agent-models`)
 - `AGENTS.md` section-by-section reference
 - Customization guide (fork, override, extend)
 - FAQ, troubleshooting, platform notes (Windows, macOS, Linux)
@@ -400,6 +400,7 @@ anywhere-agents/
 │   ├── agent-models/              # show, check, and change each agent's model and effort through the one registry
 │   ├── ci-mockup-figure/          # HTML mockups + TikZ/skia-canvas for figures
 │   ├── editable-figure/           # native editable PowerPoint figures for papers, proposals, READMEs
+│   ├── programmatic-figure/       # scientific plots from data and code
 │   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
 │   ├── prun/                      # parallel fan-out across Agy workers

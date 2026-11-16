@@ -9,7 +9,7 @@ Every session opens with a seven-line banner that says which agent versions are 
    ├── OS: win32
    ├── Claude Code: 2.1.275 → 2.1.280 (auto-update: on) · <model> · effort=<level>
    ├── Codex: 0.155.0 · <model> · <effort> · standard · fast_mode=false
-   ├── Skills: 1 local (paper-tools) + 2 pack (bibref-filler, dual-pass-workflow) + 7 shared (agent-models, ci-mockup-figure, editable-figure, implement-review, my-router, prun, readme-polish)
+   ├── Skills: 1 local (paper-tools) + 2 pack (bibref-filler, dual-pass-workflow) + 8 shared (agent-models, ci-mockup-figure, editable-figure, implement-review, my-router, programmatic-figure, prun, readme-polish)
    ├── Hooks: PreToolUse guard.py (agent-style 0.7.0), SessionStart session_bootstrap.py
    └── Session check: all clear
 ```

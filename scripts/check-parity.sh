@@ -28,7 +28,7 @@
 #               the aa raw URLs, and ac-only lines live in
 #               ac/AGENTS.local.md),
 #               skills/{implement-review,ci-mockup-figure,readme-polish,
-#               prun,editable-figure,agent-models} as recursive trees, and the shared-contract test files
+#               prun,editable-figure,programmatic-figure,agent-models} as recursive trees, and the shared-contract test files
 #               tests/test_{dispatch_codex,dispatch_claude,
 #               health_check,guard,session_bootstrap,pointer_files,
 #               prompt_byte_parity,bootstrap_preflight,
@@ -58,8 +58,8 @@
 #               pack_identity.py, bootstrap/packs.yaml,
 #               scripts/packs/ recursive (excluding __pycache__/),
 #               skills/{implement-review,my-router,ci-mockup-figure,
-#               readme-polish,prun,editable-figure,agent-models}/ recursive,
-#               the seven shipped .claude/commands/*.md pointers, and the
+#               readme-polish,prun,editable-figure,programmatic-figure,agent-models}/ recursive,
+#               the eight shipped .claude/commands/*.md pointers, and the
 #               vet.md alias pointer for implement-review. v0.6.0 promotes this
 #               from the v0.5.x manual diff -rq gate to a release gate.
 #
@@ -227,6 +227,7 @@ strict_test_files=(
   # console with no window on Windows. It is shared test infrastructure for
   # shared tests, so it belongs under the same gate.
   tests/_quiet_spawn.py
+  tests/test_programmatic_figure.py
   tests/test_dispatch_codex.py
   tests/test_dispatch_gemini.py
   tests/test_dispatch_grok.py
@@ -335,7 +336,7 @@ done
 # implement-review scripts, so the gap was reachable well before prun added
 # one; it simply went unnoticed until a verification run left a cache here.
 $AA_INTERNAL_ONLY || printf '\n== shared skills (recursive byte-identical) ==\n'
-cross_repo_skills="implement-review ci-mockup-figure readme-polish prun editable-figure agent-models"
+cross_repo_skills="implement-review ci-mockup-figure readme-polish prun editable-figure programmatic-figure agent-models"
 $AA_INTERNAL_ONLY && cross_repo_skills=""
 for skill in $cross_repo_skills; do
   if [ ! -d "$AC_ROOT/skills/$skill" ] || [ ! -d "$AA_ROOT/skills/$skill" ]; then
@@ -387,6 +388,7 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
     .claude/commands/readme-polish.md
     .claude/commands/prun.md
     .claude/commands/editable-figure.md
+    .claude/commands/programmatic-figure.md
     .claude/commands/agent-models.md
   )
   for f in "${aa_internal_files[@]}"; do
@@ -416,8 +418,8 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
       diff -rq --exclude=__pycache__ "$AA_ROOT/scripts/packs" "$AA_MIRROR/scripts/packs" 2>&1 | sed 's/^/    /'
     fi
   fi
-  # All seven shipped skill trees, including my-router.
-  for skill in implement-review my-router ci-mockup-figure readme-polish prun editable-figure agent-models; do
+  # All eight shipped skill trees, including my-router.
+  for skill in implement-review my-router ci-mockup-figure readme-polish prun editable-figure programmatic-figure agent-models; do
     if [ ! -d "$AA_ROOT/skills/$skill" ] || [ ! -d "$AA_MIRROR/skills/$skill" ]; then
       fail "skills/$skill/ (missing on one side: aa source vs wheel mirror)"
       continue

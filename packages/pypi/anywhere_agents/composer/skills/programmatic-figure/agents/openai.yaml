@@ -1,0 +1,4 @@
+interface:
+  display_name: "Programmatic Figure"
+  short_description: "Draw reproducible scientific plots in the lab palette"
+  default_prompt: "Use $programmatic-figure to select a chart for my comparison, draw it from the supplied data, and deliver the plotting code and verified exports."

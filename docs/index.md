@@ -105,7 +105,7 @@ anywhere-agents pack remove profile
 
 - **[Install](install.md)** — PyPI, npm, raw shell. Prerequisites and troubleshooting.
 - **[Rule packs](rule-pack-composition.md)** — the always-on instruction layer. Covers the default `agent-style` writing pack, opt-out, pin-a-version, and how to register a new pack.
-- **[Skills](skills/index.md)** — deep documentation for the seven shipped skills: `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`, `agent-models`.
+- **[Skills](skills/index.md)** — deep documentation for the eight shipped skills: `implement-review`, `my-router`, `ci-mockup-figure`, `readme-polish`, `prun`, `editable-figure`, `programmatic-figure`, `agent-models`.
 - **[AGENTS.md reference](agents-md.md)** — section-by-section tour of the shared configuration, what bootstrap shares, the consumer layout, and which files each agent discovers.
 - **[Session banner](session-banner.md)** — the seven-line banner, how each field is derived, the report file, and the fallback.
 - **[Guard hook](guard-hook.md)** — why each PreToolUse gate denies, asks, or advises, and the escape hatches.
