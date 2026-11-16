@@ -13,6 +13,7 @@ Run this grid against a candidate README before editing. Mark each row `✓` (pr
 | Hero image, diagram, or screenshot | At least one visual above the elevator pitch. |
 | Maintainer credibility as `> [!NOTE]` callout, not paragraph | Keep to 2-3 sentences, verifiable claims only. |
 | Elevator pitch paragraph (1-3 sentences) | What the project is, who it is for. |
+| Organizing concept visible (category table or a one-line map of the parts) | A feature list without structure reads as unfocused. Library READMEs use a category table. |
 
 ## Install section
 
@@ -84,9 +85,10 @@ Run this grid against a candidate README before editing. Mark each row `✓` (pr
 | Pushed to a branch and viewed on GitHub | PyCharm / VS Code previews miss `> [!NOTE]` and Mermaid. |
 | `> [!NOTE]` renders as a colored box (not a plain blockquote) | If it looks like a quote, the syntax is wrong. |
 | Mermaid diagrams render (not as raw text) | If raw text, the fence language is wrong or renderer disabled. |
-| Hero image loads (not a broken-image icon) | Relative path must be correct from repo root. |
+| Hero image loads (not a broken-image icon) | A relative path must be correct from the repo root; use an absolute URL when the README is also the PyPI long description. |
 | Badges show live data (not "image not found") | Shield.io URL must be well-formed. |
 | Collapsibles expand cleanly | No content leaks outside the `<details>` tag. |
+| PyPI long description renders (when the README is one) | Absolute URLs for images and repository files, heading links (`#section-slug`) left as they are, no links to hand-written `id` or `name` anchors, no relative paths in the built `METADATA`, a `readme_renderer[md]` preview. |
 
 ## Hygiene
 
@@ -97,6 +99,7 @@ Run this grid against a candidate README before editing. Mark each row `✓` (pr
 | Code blocks have language hints (` ```bash `, ` ```python `) | Syntax highlighting only fires with hints. |
 | Line lengths reasonable (under ~120 chars for prose) | Long lines are fine in code blocks. |
 | Title Case across all H2 and H3 (agent-style RULE-G) | Sentence case mixed with Title Case reads as machine-generated. |
+| Generated blocks match the code | The drift test passes after the last edit (method counts, result tables, numbers in hero alt text). |
 | No casual em-dash (agent-style RULE-B) | Appositives use commas, parens, or colons. En-dash in numeric ranges is fine. |
 
 ## Visual identity (when a brand color is in play)
@@ -112,10 +115,10 @@ Run this grid against a candidate README before editing. Mark each row `✓` (pr
 
 | Item | Notes |
 |------|-------|
-| Source file (HTML, vhs tape) committed alongside the rendered output | Without the source, the asset becomes a static artifact no one can update. |
-| Render helper script committed (`docs/_render_*.py` / `_render_*.sh`) | One-shot reproducibility for future maintainers. |
+| Source file (HTML, vhs tape, PPTX) committed alongside the rendered output | Without the source, the asset becomes a static artifact no one can update. |
+| Render helper script committed, when one is used (`docs/_render_*.py` / `_render_*.sh`, a figure builder) | One-shot reproducibility for future maintainers. A PPTX edited by hand needs recorded export steps instead. |
 | Docker images pinned by content digest, not `:latest` | `vhs@sha256:...` not `vhs:latest`; otherwise the next render pulls a different image. |
-| Render command works on a clean clone | Confirm by re-running the helper script after the rewrite. |
+| Render command or export steps work on a clean clone | Confirm by re-running the helper, or repeating the export, after the rewrite. |
 
 ## Cross-surface parity (multi-surface projects)
 
@@ -132,8 +135,9 @@ Run this grid against a candidate README before editing. Mark each row `✓` (pr
 
 | Item | Notes |
 |------|-------|
-| Every version number mentioned matches the current release | Package version, minimum versions, release-date claims. |
+| Every version number mentioned matches the current release | Package version, minimum versions, release-date claims, a `New in X.Y` line under the header. |
 | Every feature claim matches what the code actually does | A README promising X must correspond to shipped X. |
+| Citations match their records | Author lists checked against arXiv or DOI. README BibTeX and `CITATION.cff` agree when they describe the same work. |
 | Every install command has been tested on a clean machine | Fresh-machine test before shipping. |
 | No personal identifiers leaked in public README | Usernames, paths, institutional affiliations that should not be public. |
 
