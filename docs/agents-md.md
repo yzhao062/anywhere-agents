@@ -24,7 +24,7 @@ Why the diet: the file had grown by patching to 74.6 KB in one repo and 66.0 KB 
 
 **Shell Command Style, Writing Defaults, Formatting Defaults.** The seven shell rules: no compound `cd`, the read-only and always-confirm lists, scratch moves, PowerShell nesting, scratch directories, inline Python. The banned-word list is a default AI-tell list to trim or extend in a fork. The formatting rules include the copy-paste block rule and the rule that a document-length draft goes in a file.
 
-**Skills, Task Routing, Memory and Persistence, Tool-Use Reliability.** The three-path skill lookup order, the single-source rule for `SKILL.md`, and the slash-command pointers and aliases. Then the router and the no-fan-out rule, version-controlled files as the memory that travels, and the one-retry rule before reporting a file unreadable.
+**Skills, Task Routing, Memory and Persistence, Tool-Use Reliability.** The three-path skill lookup order, the single-source rule for `SKILL.md`, the slash-command pointers and aliases, and the rule that a request for a skill or alias by `/<name>`, even mid-sentence, loads its current `SKILL.md`. Then the router and the no-fan-out rule, version-controlled files as the memory that travels, and the one-retry rule before reporting a file unreadable.
 
 **Environment.** Python discovery and `gh`. The Claude Code native installer and effort persistence ([Install](install.md)). The Codex policy lines ([Codex](codex.md)). The GitHub Actions minimums the session check compares pins against.
 
