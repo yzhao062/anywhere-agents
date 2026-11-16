@@ -1,7 +1,7 @@
 # Review Lenses
 Read this when picking the lens for item 4 of section 1b, which is every round.
 
-Content-type-specific criteria for Codex reviews. Each lens is grounded in established review frameworks so the reviewer applies recognized standards rather than ad-hoc checks. The review request should include the relevant lens so Codex knows what to focus on. For any prose diff, regardless of lens, also apply the Writing rules audit (General lens, item 7) so banned words and the "X, not Y" antithesis are caught on papers, proposals, and docs alike.
+Content-type-specific criteria for Codex reviews. Each lens is grounded in established review frameworks so the reviewer applies recognized standards rather than ad-hoc checks. The review request should include the relevant lens so Codex knows what to focus on. For any prose diff, regardless of lens, also apply the Writing rules audit (General lens, item 7) so banned words and the "X, not Y" antithesis are caught on papers, proposals, and docs alike. Code item 12 (temporary-artifact hygiene) also applies to every diff, regardless of lens, so a build output, trial copy, or generated data staged with a paper or proposal is caught when the repository does not need it.
 
 ## Code
 
@@ -18,7 +18,7 @@ Based on Google's eng-practices code review guidelines and Microsoft's Engineeri
 9. **Performance** -- Obvious inefficiencies, unnecessary allocations, or algorithmic complexity issues? (Microsoft)
 10. **Documentation** -- If the change affects how users build, test, or interact with the code, is documentation updated? (Google)
 11. **Long-term maintainability** (durable code only) -- For code expected to live and change over time, not throwaway scripts or one-off migrations, how will it age? Look at hidden coupling and global state, unnamed magic constants, and implicit invariants a future editor could break. Check whether error paths are debuggable and whether tests and docs let the next person change it safely. Down-weight for explicitly short-lived code, and state which longevity assumption you applied.
-12. **Temporary-artifact hygiene** -- Flag anything in the diff that should not ship: debug prints or leftover logging, commented-out code, dead scaffolding or unused placeholders, scratch or backup files staged by accident (for example `PLAN-*.md`, `Review-*.md`, `*.tmp`, `*_old.*`, one-off probe scripts), and stray TODO stubs with no follow-up. Recommend removal or a gitignore entry. Routine intentional logging is not a hit.
+12. **Temporary-artifact hygiene** -- Flag anything in the diff that should not ship: debug prints or leftover logging, commented-out code, dead scaffolding or unused placeholders, scratch or backup files staged by accident (for example `PLAN-*.md`, `Review-*.md`, `*.tmp`, `*_old.*`, one-off probe scripts), and stray TODO stubs with no follow-up. Also flag build outputs, trial copies of source files, and generated data or binaries when the repository does not need them. Recommend removal, a gitignore entry, or a home outside the repository. Routine intentional logging is not a hit, and neither is a file the repository keeps on purpose, such as experiment records a paper needs.
 
 Overarching standard: approve once the change *definitely improves overall code health*, even if it is not perfect. Seek continuous improvement, not perfection. (Google)
 
@@ -99,7 +99,7 @@ If unsure which to use, use the full parent lens and add an "additional focus" t
 | `plan` | General | items 1-7 in the Plan subsection | Methodology docs, roadmaps, research backlogs, migration plans, phased-development design docs, superpowers-style spec docs |
 | `skill` | General | items 1-6 in the Skill subsection | Editing `SKILL.md` files, adding references/scripts to a skill, meta-skill work |
 
-When using a focused sub-lens, include only the referenced parent criteria in the review prompt, not the full lens. For `paper/submission-ready`, also add: verify no author-identifying information remains and confirm the paper meets venue page limits.
+When using a focused sub-lens, put the referenced parent criteria and Code item 12 in the review prompt, and leave the rest of that lens out. For `paper/submission-ready`, also add: verify no author-identifying information remains and confirm the paper meets venue page limits.
 
 ### Website
 

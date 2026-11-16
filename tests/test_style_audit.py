@@ -1231,5 +1231,127 @@ class CoverageReportTests(unittest.TestCase):
         self.assertIn("Suppressed by policy", out)
         self.assertIn("--include-rule-g", out)
 
+
+class BannedWordTests(unittest.TestCase):
+    """The audit reports the AGENTS.md banned list, which the guard holds.
+
+    The guard checks only the text an agent writes, and RULE-06 matches the
+    base words but not their close variants, so a variant already in a draft
+    reached no check: a /polish run found four in a proposal by reading after
+    the audit had passed them.
+    """
+
+    def setUp(self) -> None:
+        self.mod = load_module(AUDIT, "_style_audit_banned")
+        self.match = self.mod._load_banned_matcher([str(GUARD)])
+
+    def test_the_guard_supplies_the_matcher(self) -> None:
+        self.assertIsNotNone(self.match)
+
+    def test_a_close_variant_is_reported_with_its_line(self) -> None:
+        hits = self.match("A clean first line.\nThe pages have garnered stars.\n", ".md")
+        self.assertEqual([(h[0], h[2].lower(), h[3]) for h in hits],
+                         [(2, "garnered", "garner")])
+
+    def test_code_spans_and_latex_comments_are_skipped(self) -> None:
+        self.assertEqual(self.match("Quote `delve` as an example.\n", ".md"), [])
+        self.assertEqual(self.match("Kept text. % we delve here\n", ".tex"), [])
+        self.assertEqual(len(self.match("We delve here. % note\n", ".tex")), 1)
+
+    def test_a_percent_is_a_comment_only_after_an_even_run_of_backslashes(self) -> None:
+        cases = [
+            ("Cost 5\\% garnered here.\n", 1),     # \% is a literal percent
+            ("A cell \\\\% garnered in a comment\n", 0),  # \\ ends the row, % comments
+            ("Odd \\\\\\% garnered stays.\n", 1),  # \\ then \% stays literal
+            ("\\begin{verbatim}\n50% delve\n\\end{verbatim}\nWe delve.\n", 1),
+            ("Code \\verb|%| then we delve.\n", 1),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(len(self.match(text, ".tex")), expected)
+
+    def test_a_guard_without_the_two_names_is_passed_over(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "old_guard.py"
+            old.write_text("PROSE_EXTENSIONS = {'.md'}\n", encoding="utf-8")
+            self.assertIsNone(self.mod._load_banned_matcher([str(old)]))
+            self.assertIsNotNone(self.mod._load_banned_matcher([str(old), str(GUARD)]))
+
+    def test_no_guard_gives_no_matcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self.mod._load_banned_matcher([str(Path(tmp) / "none.py")]))
+
+    def _audit(self, text, banned):
+        try:
+            import agent_style.review  # noqa: F401
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "notes.md", text)
+            return self.mod.audit_files(["notes.md"], str(repo), from_index=True,
+                                        hook_rules=(None, frozenset()), banned=banned)
+
+    def test_a_staged_banned_word_is_a_finding_and_counts_as_covered(self) -> None:
+        findings, coverage, error = self._audit("The team garnered support.\n", self.match)
+        self.assertIsNone(error)
+        self.assertIn((1, "BANNED"), {(f["line"], f["rule"]) for f in findings})
+        self.assertIn("BANNED", coverage["covered"])
+
+    def test_a_word_rule_06_reported_is_not_reported_twice(self) -> None:
+        findings, _, _ = self._audit("This result was pivotal for the team.\n", self.match)
+        rules = [f["rule"] for f in findings if f["line"] == 1]
+        self.assertEqual(sum(r in ("BANNED", "RULE-06") for r in rules), 1, rules)
+
+    def test_a_shorter_inflection_beside_the_reported_word_is_still_reported(self) -> None:
+        """RULE-06 quoting 'burgeoning' must not hide 'burgeon' on the same line."""
+        findings, _, _ = self._audit("The burgeoning fields burgeon.\n", self.match)
+        hits = {f["detail"].split("'")[1].lower() for f in findings
+                if f["line"] == 1 and f["rule"] in ("BANNED", "RULE-06")}
+        self.assertIn("burgeon", hits)
+        self.assertIn("burgeoning", hits)
+
+    def test_a_hit_outside_the_staged_lines_is_dropped_by_the_diff_scope(self) -> None:
+        try:
+            import agent_style.review  # noqa: F401
+        except Exception as exc:
+            if os.environ.get("CI"):
+                self.fail(f"agent_style must be importable in CI: {exc!r}")
+            self.skipTest("agent_style not importable in this environment")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "repo")
+            stage(repo, "notes.md", "They garnered praise.\n\nA plain line.\n")
+            git(repo, "commit", "-qm", "base")
+            stage(repo, "notes.md", "They garnered praise.\n\nWe garnered more.\n")
+            findings, _, _ = self.mod.audit_files(
+                ["notes.md"], str(repo), from_index=True,
+                hook_rules=(None, frozenset()), banned=self.match)
+            kept, _, _ = self.mod.scope_to_changed_lines(findings, str(repo))
+            findings_by_line = [f["line"] for f in kept if f["rule"] == "BANNED"]
+        self.assertEqual(findings_by_line, [3])
+
+    def test_turning_the_check_off_leaves_it_out_of_the_coverage(self) -> None:
+        _, coverage, _ = self._audit("Short and clean.\n", False)
+        self.assertFalse(any("BANNED" in rules for rules in coverage.values()))
+
+    def test_without_a_guard_the_list_is_reported_as_not_covered(self) -> None:
+        with unittest.mock.patch.object(self.mod, "_load_banned_matcher", return_value=None):
+            _, coverage, _ = self._audit("Short and clean.\n", None)
+        self.assertIn("BANNED", coverage["uncovered"])
+
+
+class BannedListParityTests(unittest.TestCase):
+    """AGENTS.md states the banned list; guard.py and this audit enforce it."""
+
+    def test_agents_md_and_the_guard_list_the_same_words(self) -> None:
+        import re
+        line = next(l for l in (ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+                    if "Avoid the following words" in l)
+        guard = load_module(GUARD, "_guard_banned_parity")
+        self.assertEqual(set(re.findall(r"`([^`]+)`", line)), set(guard.BANNED_WORDS))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -107,6 +108,64 @@ def _load_scope_predicates(candidates=None):
 
 
 PROSE_EXTENSIONS, AGENT_IO_SEGMENT = _load_scope_predicates()
+
+# The banned-word list of AGENTS.md lives in guard.py, which checks only the
+# text an agent writes. A draft under review carries words written before the
+# guard existed or outside it. The agent-style RULE-06 detector matches the
+# base words but not their close variants (`garnered`, `underscores`). On
+# 2026-11-15 a /polish run found four such variants in a proposal by reading
+# after this audit had passed them.
+BANNED_LABEL = "BANNED"
+
+
+def _load_banned_matcher(candidates=None):
+    """Return match(text, ext) -> [(line, column, text, word, excerpt)], or None.
+
+    The guard's own patterns (close variants included) and its stripping of
+    code spans are reused, so the audit and the write gate cannot disagree on
+    a word. A LaTeX comment is skipped, since a pass keeps comments as they
+    are. None when no guard is reachable or the guard predates either name.
+    """
+    if candidates is None:
+        candidates = list(reversed(_guard_candidates()))
+    patterns = strip = None
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location("_ir_guard_banned", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            patterns = getattr(module, "_BANNED_PATTERNS", None)
+            strip = getattr(module, "_content_for_style_check", None)
+            if patterns and callable(strip):
+                break
+        except Exception:
+            pass
+        patterns = strip = None
+    if not patterns:
+        return None
+
+    # A percent after an even run of backslashes starts a comment (`\\%` is a
+    # line break and then a comment); after an odd run it is a literal `\%`.
+    tex_comment = re.compile(r"(?<!\\)((?:\\\\)*)%.*$")
+
+    def match(text, ext):
+        hits = []
+        raw = text.split("\n")
+        for number, line in enumerate(strip(text, ext).split("\n"), 1):
+            if ext == ".tex":
+                line = tex_comment.sub(r"\1", line)
+            for word, pattern in patterns:
+                for found in pattern.finditer(line):
+                    excerpt = raw[number - 1].strip() if number <= len(raw) else ""
+                    hits.append((number, found.start() + 1, found.group(0), word,
+                                 excerpt[:160]))
+        return hits
+
+    return match
 
 
 def _load_hook_detectors(candidates=None):
@@ -322,13 +381,15 @@ def _materialize_index_blob(repo, rel, tmpdir):
 
 
 def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
-                hook_rules=None):
+                hook_rules=None, banned=None):
     """Run the deterministic audit over paths.
 
     `hook_rules` is `(rules, path_aware)` as `_load_hook_detectors` returns
     it, and is loaded from the guard when None. Each of those rules runs only
     where `audit()` did not already run its mechanical detector, so no rule is
-    reported twice.
+    reported twice. `banned` is a matcher from `_load_banned_matcher`, loaded
+    when None; False turns the banned-word check off. A word RULE-06 already
+    reported on the same line is not reported again.
 
     With `from_index`, each file is audited as it is STAGED rather than as it
     sits in the working tree. Returns (findings, coverage, error). `coverage`
@@ -348,12 +409,18 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
 
     if hook_rules is None:
         hook_rules = _load_hook_detectors()
+    banned_missing = False
+    if banned is None:
+        banned = _load_banned_matcher()
+        banned_missing = banned is None
     extra_rules, path_aware = hook_rules
     replaced = _replaced_cli_rules(extra_rules or [])
 
     findings = []
     ran_detectors = {}
-    skipped_detectors = {}
+    # With no guard to ask, the list went unchecked, and the report says so.
+    skipped_detectors = ({BANNED_LABEL: {"mechanical"}}
+                         if banned_missing and paths else {})
 
     def problem(rel, detail):
         # Line 0 marks a finding about the file rather than about a line in
@@ -397,7 +464,7 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
                         "detail": v.get("detail", ""),
                         "excerpt": v.get("excerpt", ""),
                     })
-            if not extra_rules:
+            if not extra_rules and not banned:
                 continue
             already = {
                 r.get("rule") for r in result.get("rule_results", [])
@@ -409,8 +476,29 @@ def audit_files(paths, repo, noisy_rules=NOISY_RULES, from_index=False,
                     text = handle.read()
             except OSError as exc:
                 problem(rel, f"could not read for hook-only rules: {exc.__class__.__name__}")
-                for label, _ in extra_rules:
+                for label, _ in extra_rules or []:
                     skipped_detectors.setdefault(label, set()).add("mechanical")
+                if banned:
+                    skipped_detectors.setdefault(BANNED_LABEL, set()).add("mechanical")
+                continue
+            if banned:
+                # RULE-06 quotes the word it matched; compare whole words, so a
+                # shorter inflection beside a longer jargon word still counts.
+                said = {(f["line"], token.lower()) for f in findings
+                        if f["file"] == rel and f["rule"] == "RULE-06"
+                        for token in re.findall(r"'([^']+)'", f["detail"] or "")}
+                ext = os.path.splitext(rel)[1].lower()
+                for line, column, hit, word, excerpt in banned(text, ext):
+                    if (line, hit.lower()) in said:
+                        continue
+                    findings.append({
+                        "file": rel, "line": line, "column": column,
+                        "rule": BANNED_LABEL,
+                        "detail": f"banned word '{hit}' (AGENTS.md Writing Defaults: {word})",
+                        "excerpt": excerpt,
+                    })
+                ran_detectors.setdefault(BANNED_LABEL, set()).add("mechanical")
+            if not extra_rules:
                 continue
             for label, fn in extra_rules:
                 if label in already:
