@@ -159,9 +159,10 @@ class PrunLongRunningScriptsReleaseDeployedPath(unittest.TestCase):
     def test_monitor_reads_a_live_dispatch_pid_as_stalled(self) -> None:
         """A quiet unit whose dispatcher is alive is stalled, not dead.
 
-        monitor.sh consults dispatch-pid only after a unit has been quiet for
-        the stall threshold, so the threshold drops to one second to enter that
-        branch at all. The Codex dispatcher's contract test used to cover this
+        monitor.sh probes dispatch-pid on every poll and enters the stall
+        branch only after a unit has been quiet for the stall threshold, so
+        the threshold drops to one second to reach that branch within the
+        short timeout. The Codex dispatcher contract test used to cover this
         with a real worker, and retired with it; a sleeping shell supplies the
         same live PID. The shell writes its own pid, because Git Bash and
         Windows do not agree on process ids and `kill -0` reads the Bash one.

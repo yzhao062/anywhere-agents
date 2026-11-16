@@ -5,8 +5,8 @@ A background-task notification carrying `killed` describes the harness's task
 wrapper, not the reviewer. The dispatched reviewer is detached, so it outlives
 its wrapper and keeps writing. This script answers the only question Phase 2
 needs at that moment: is the round's review published, is the reviewer still
-working, or did it provably end. See skills/implement-review/SKILL.md > Phase 1d
-for when to run it.
+working, or did it provably end. See skills/implement-review/SKILL.md > Round
+checklist (step 6) and references/failover-and-recovery.md for when to run it.
 
 **Silence is never death here.** The round's own timeout is what bounds a
 reviewer that has gone quiet; `stall-watch` already treats ten minutes of

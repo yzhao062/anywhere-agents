@@ -1,5 +1,5 @@
 # health-check.ps1 -- PowerShell wrapper that delegates to health-check.py.
-# See skills/implement-review/SKILL.md > Phase 2.0 prologue for the contract.
+# See skills/implement-review/references/health-check.md > Phase 2.0 prologue for the contract.
 # All real logic lives in health-check.py to keep the pattern list / regex /
 # code-span exclusion in one place (avoids drift between sh and ps1).
 

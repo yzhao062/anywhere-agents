@@ -177,8 +177,8 @@ accident; it is not a sandbox, and a worker can still read any file the user can
    unit **failed** (`FALLBACK` result or dead dispatch), printing a per-unit digest. On a stall,
    surface it to the user with a likely cause (capacity or concurrency pressure; suggest lowering the
    worker count or re-dispatching) rather than waiting silently; act, then re-launch the monitor on
-   the still-running units until all are done. `monitor` only observes, and the Agy dispatcher relies
-   on the CLI's bounded `--print-timeout`. (`gather.sh` remains for the plain wait-for-all case; see
+   the still-running units until all are done. `monitor` only observes; each dispatcher reaps its
+   own idle worker (exit 124, `FALLBACK`). (`gather.sh` remains for the plain wait-for-all case; see
    `references/state-recovery.md`.)
 6. **Reconcile, then integrate.** Reconcile every dispatched unit before integrating the set. A
    nonzero dispatcher exit fails the unit even when its worker wrote a result. For Agy, an explicit

@@ -1115,6 +1115,88 @@ class _DispatchContractMixin:
                              f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
             self.assertTrue((log_dir / "args").exists())
 
+    def test_supplied_plan_reaches_a_snapshot_reviewer_once_with_the_boundary_stated(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+            repo = tmpdir / "repo"
+            repo.mkdir()
+            for cmd in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "test@example.com"],
+                ["git", "config", "user.name", "Test User"],
+            ):
+                subprocess.run(
+                    cmd, cwd=repo, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            (repo / "tracked.txt").write_text("line 1\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "tracked.txt"],
+                cwd=repo, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "initial"],
+                cwd=repo, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            (repo / "tracked.txt").write_text(
+                "line 1\nline 2 staged\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "add", "tracked.txt"],
+                cwd=repo, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            exclude_path = repo / ".git" / "info" / "exclude"
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            exclude_path.write_text("PLAN-*.md\n", encoding="utf-8")
+            plan_body = "# PLAN\n\nMove the mechanism text.\n"
+            (repo / "PLAN-diet.md").write_text(plan_body, encoding="utf-8")
+            prompt.write_text(
+                f"PLAN REVIEW in {repo}. Round 1.\n"
+                "--- SUPPLIED INPUT: PLAN-diet.md ---\n"
+                f"{plan_body}"
+                "--- END SUPPLIED INPUT: PLAN-diet.md ---\n",
+                encoding="utf-8",
+            )
+            result = self._run_dispatch(
+                repo,
+                prompt,
+                "1",
+                "Review-Claude-Code.md",
+                claude,
+                log_dir,
+                extra_env={
+                    "TMPDIR": str(tmpdir),
+                    "TEMP": str(tmpdir),
+                    "TMP": str(tmpdir),
+                    "AGENT_MODELS_FILE": str(tmpdir / REGISTRY_NAME),
+                    "CLAUDE_CONFIG_DIR": str(tmpdir / "claude-config"),
+                },
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f"dispatch failed unexpectedly\nSTDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}",
+            )
+            reviewer_cwd = Path((log_dir / "cwd").read_text(encoding="utf-8").strip())
+            self.assertEqual(reviewer_cwd.name, "staged-snapshot")
+            self.assertFalse((reviewer_cwd / "PLAN-diet.md").exists())
+
+            relay = self._read_stdin(log_dir)
+            self.assertEqual(relay.count("--- SUPPLIED INPUT: PLAN-diet.md ---"), 1)
+            self.assertEqual(relay.count(plan_body.strip()), 1)
+
+            preamble, request_section = relay.split("Original review prompt:", 1)
+            self.assertIn("SUPPLIED INPUT", preamble)
+            self.assertNotIn(str(repo), preamble)
+            self.assertLess(
+                request_section.index("--- SUPPLIED INPUT: PLAN-diet.md ---"),
+                request_section.index("Dispatcher-provided staged diff:"),
+            )
+
 
 @unittest.skipIf(
     sys.platform.startswith("win"),

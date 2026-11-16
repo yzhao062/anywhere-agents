@@ -1,8 +1,10 @@
 # gather.ps1 -- prun result collector (PowerShell variant).
 # Generalized from implement-review/scripts/auto-watch.ps1. Polls a fixed list of
-# result files and emits "DONE <abs-path>" for each as it lands (exists, non-empty,
-# and quiet for the stable window). Exits 0 once every file has landed, or 2 on
-# timeout.
+# result files and emits "DONE <abs-path>" or "FALLBACK <abs-path>" (when line 1
+# matches "^# [A-Za-z0-9_-]+ result \(FALLBACK, ") for each as it lands (exists,
+# non-empty, and quiet for the stable window). Exits 0 when every file landed
+# without a FALLBACK, 3 when every file landed and at least one was a FALLBACK,
+# or 2 on timeout / usage error.
 #
 # Like gather.sh, it does NOT require an mtime advance past a startup snapshot
 # (prun uses a fresh result path per run), so a unit that finished before gather
@@ -19,8 +21,14 @@
 #
 # Stdout (schema matches gather.sh):
 #   GATHER-START count=<N> timeout=<seconds>s
-#   DONE <abs-path>          (one line per file, as it lands)
+#   DONE <abs-path>          (one line per non-FALLBACK file, as it lands)
+#   FALLBACK <abs-path>      (one line per FALLBACK file, as it lands)
 #   TIMEOUT remaining=<k>    (if timeout hits before all land)
+#
+# Exit:
+#   0  every file landed and none was a FALLBACK
+#   3  every file landed and at least one was a FALLBACK
+#   2  timeout or usage error
 
 [CmdletBinding()]
 param(
@@ -54,6 +62,7 @@ $done = New-Object 'bool[]' $n
 
 $startEpoch = Get-EpochSeconds
 $remaining = $n
+$hasFallback = $false
 while ($remaining -gt 0) {
     $now = Get-EpochSeconds
     if (($now - $startEpoch) -ge $timeout) {
@@ -69,10 +78,18 @@ while ($remaining -gt 0) {
         $cur = Get-EpochSeconds -Utc $item.LastWriteTimeUtc
         if (($now - $cur) -lt $stableWindow) { continue }
         $abs = (Resolve-Path -LiteralPath $f).Path
-        [Console]::Out.WriteLine("DONE $abs")
+        # FALLBACK only when line 1 matches the FALLBACK header (anchored, case-sensitive).
+        $firstLine = (Get-Content -LiteralPath $f -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($firstLine -and ($firstLine -cmatch '^# [A-Za-z0-9_-]+ result \(FALLBACK, ')) {
+            [Console]::Out.WriteLine("FALLBACK $abs")
+            $hasFallback = $true
+        } else {
+            [Console]::Out.WriteLine("DONE $abs")
+        }
         $done[$idx] = $true
         $remaining--
     }
     if ($remaining -gt 0) { Start-Sleep -Seconds $pollSeconds }
 }
+if ($hasFallback) { exit 3 }
 exit 0

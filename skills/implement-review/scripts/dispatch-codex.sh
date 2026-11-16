@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dispatch-codex.sh -- Auto-terminal channel dispatch for implement-review skill.
-# See skills/implement-review/SKILL.md > Phase 1c Auto-terminal path for the contract.
+# See skills/implement-review/references/codex-backend.md > Auto-terminal path for the contract.
 #
 # Self-review guard: refuses to dispatch when the invoking orchestrator is
 # Codex itself (would be self-review, which the fungibility principle
@@ -298,6 +298,13 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "dispatch-codex: no working Python interpreter found (checked ANYWHERE_AGENTS_PYTHON, project virtualenvs, conda/Miniforge, py -3, and non-WindowsApps PATH entries); dispatching without a pre-resolved interpreter" >&2
 fi
 
+# Detect Windows Git Bash/MSYS/Cygwin hosts once so missing pwsh warnings stay
+# scoped to Windows where Store execution aliases are a real hazard.
+IS_WINDOWS_HOST=0
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS_HOST=1 ;;
+esac
+
 # Probe pwsh structurally because a Store execution alias succeeds here but can
 # fail only from Codex's spawn context, so executing it would prove nothing.
 # Unlike the Python probe, this performs only PATH lookups and file stat checks.
@@ -317,7 +324,7 @@ while IFS= read -r candidate; do
     PWSH_BIN=$candidate
     break
 done < <(type -a -p pwsh 2>/dev/null || true)
-if [ -z "$PWSH_BIN" ]; then
+if [ -z "$PWSH_BIN" ] && [ "$IS_WINDOWS_HOST" -eq 1 ]; then
     echo "dispatch-codex: no usable pwsh found${PWSH_REJECTED:+ (rejected Store-alias or zero-length candidate: $PWSH_REJECTED)}; the reviewer will be told to avoid pwsh" >&2
 fi
 
@@ -396,7 +403,9 @@ fi
 # Emit STATE-DIR on stdout (first and only machine-readable line)
 printf 'STATE-DIR %s\n' "$STATE_DIR"
 
-# Launch stall-watch in background if present (B2 will land the script)
+# Define the stall-watch launcher here; it is called right before the reviewer
+# launch so stall-watch freezes the reviewer, not an earlier helper, as the
+# dispatcher's first live child.
 SCRIPT_DIR="${IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR:-$(dirname -- "$0")}"
 STALL_WATCH="${SCRIPT_DIR}/stall-watch.sh"
 STALL_WATCH_PID=""
@@ -407,7 +416,6 @@ _start_stall_watch() {
         STALL_WATCH_PID=$!
     fi
 }
-_start_stall_watch
 unset IMPLEMENT_REVIEW_DISPATCH_REEXEC IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR
 
 # Run codex exec with prompt via stdin (NOT positional arg; not codex exec review).
@@ -608,11 +616,19 @@ else
 fi
 if [ -n "$PWSH_BIN" ]; then
     PWSH_INSTRUCTION="PowerShell 7 was resolved at this absolute path: $PWSH_BIN. If a command needs it, invoke that exact path rather than bare pwsh."
-else
+elif [ "$IS_WINDOWS_HOST" -eq 1 ]; then
     PWSH_INSTRUCTION="No usable PowerShell 7 was found on this machine; a bare pwsh call may be a Microsoft Store execution alias that fails instantly under this spawn context and retries forever. Do not shell out to pwsh. Use bash, Windows PowerShell 5.1 (powershell.exe), or plain git commands instead."
+else
+    PWSH_INSTRUCTION=""
 fi
 
 CHILD_SESSION_INSTRUCTIONS="The parent agent session already completed the repository bootstrap at startup. Skip bootstrap and shared configuration refresh commands in this child review session. Skip the session-start banner as well: no human reads a dispatched child's terminal, so rendering it only spends shell spawns. Use the shared configuration currently on disk. This session is an assigned reviewer. Its task, lens, and response format are already supplied. Skip router dispatch and coordinator-workflow discovery at all skill lookup locations (skills/implement-review/, .claude/skills/implement-review/, .agent-config/repo/skills/implement-review/, .agents/skills/implement-review/). Do not load coordinator skill files or example reviews to discover the workflow or response format. Files under review remain readable. A targeted read outside the review scope is permitted when it supplies missing context, resolves truncation, or answers a concrete verification question. Apply the substantive project instructions supplied in context, including applicable local overrides. Read an applicable instruction file once only when its rules have not been supplied. For a staged-change review, obtain the selected diff once with the command in the request; if the request embeds that diff, use it and do not obtain another copy. For a plan review, the named plan and evidence files are the review input: read each once from the repository or from the supplied copy, as the request directs. Do not read the same content twice. $PYTHON_INSTRUCTION $PWSH_INSTRUCTION Before issuing a PASS or BLOCK commit verdict, execute relevant verification commands. In $EXPECTED_REVIEW_FILE, add one standalone line exactly 'Verification status: VERIFIED' if at least one relevant verification command completed, otherwise add 'Verification status: UNVERIFIED'. If the status is UNVERIFIED, write 'Commit verdict: UNVERIFIED'; never issue PASS or BLOCK. Verification notes must list the exact commands and outcomes."
+if [ -z "$PWSH_INSTRUCTION" ]; then
+    # An empty pwsh slot leaves a doubled space; close it without changing
+    # the string literal above, which must match the PowerShell twin.
+    _csi_marker="  Before issuing a PASS or BLOCK commit verdict,"
+    CHILD_SESSION_INSTRUCTIONS="${CHILD_SESSION_INSTRUCTIONS%%"${_csi_marker}"*} Before issuing a PASS or BLOCK commit verdict,${CHILD_SESSION_INSTRUCTIONS#*"${_csi_marker}"}"
+fi
 # Codex injects at most project_doc_max_bytes of discovered instruction files
 # (AGENTS.md and the like) and silently truncates the rest; the default is
 # 32 KiB, which a consumer's composed AGENTS.md exceeds once the passive packs
@@ -642,6 +658,10 @@ _archive_stream_attempt() {
     done
     return 0
 }
+
+# stall-watch freezes the first live children of the dispatcher as the worker
+# roots, so start it here with the reviewer as the dispatcher's next child.
+_start_stall_watch
 
 while :; do
     "$CODEX_BIN" exec --sandbox "$CODEX_DISPATCH_SANDBOX" ${CODEX_ISOLATE_ARGS[@]+"${CODEX_ISOLATE_ARGS[@]}"} ${CODEX_CHILD_ARGS[@]+"${CODEX_CHILD_ARGS[@]}"} - < "$PROMPT_FILE" > "$STATE_DIR/tail" 2>&1

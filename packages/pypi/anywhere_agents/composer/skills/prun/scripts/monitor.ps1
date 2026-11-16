@@ -102,31 +102,39 @@ while ($true) {
                 # done/fallback. Never stall- or dead-classify a unit that produced a result.
                 $status[$i] = 'finishing'
             } else {
-                $tailF = Join-Path $sd 'tail'
-                $csize = Get-FileSize $tailF
-                $cmt   = Get-FileMtime $tailF
-                if (($csize -gt $lastSize[$i]) -or ($cmt -gt $lastMtime[$i])) {
-                    $lastSize[$i] = $csize; $lastMtime[$i] = $cmt; $lastGrowth[$i] = $now
-                    $status[$i] = 'growing'
-                } else {
-                    $elapsed = $now - $lastGrowth[$i]
-                    if ($elapsed -ge $threshold) {
-                        $dpid = ''
-                        $pidFile = Join-Path $sd 'dispatch-pid'
-                        if (Test-Path -LiteralPath $pidFile -PathType Leaf) {
-                            $dpid = (Get-Content -LiteralPath $pidFile -TotalCount 1 -ErrorAction SilentlyContinue)
-                        }
-                        $alive = $false
-                        if ($dpid -and ($dpid -match '^\d+$')) {
-                            if (Get-Process -Id ([int]$dpid) -ErrorAction SilentlyContinue) { $alive = $true }
-                        }
-                        if ($dpid -and (-not $alive)) {
-                            $status[$i] = 'failed(dispatch-dead)'; $hasFail = $true
-                        } else {
-                            $status[$i] = "stalled($($elapsed)s)"; $hasStall = $true
-                        }
+                # Probe dispatcher liveness on every poll before checking tail growth:
+                # a dead dispatcher with no result will never be collected, even while
+                # an orphaned worker keeps the tail moving.
+                $dpid = ''
+                $pidFile = Join-Path $sd 'dispatch-pid'
+                if (Test-Path -LiteralPath $pidFile -PathType Leaf) {
+                    $dpid = (Get-Content -LiteralPath $pidFile -TotalCount 1 -ErrorAction SilentlyContinue)
+                }
+                if (-not ($dpid -and ($dpid -match '^\d+$'))) {
+                    $dpid = ''
+                }
+                if ($dpid -and (-not (Get-Process -Id ([int]$dpid) -ErrorAction SilentlyContinue))) {
+                    # Re-check the result file in case the dispatcher published it and
+                    # exited between the first check and the probe.
+                    if ($rf -and (Test-Path -LiteralPath $rf -PathType Leaf) -and ((Get-Item -LiteralPath $rf).Length -gt 0)) {
+                        $status[$i] = 'finishing'
                     } else {
+                        $status[$i] = 'failed(dispatch-dead)'; $hasFail = $true
+                    }
+                } else {
+                    $tailF = Join-Path $sd 'tail'
+                    $csize = Get-FileSize $tailF
+                    $cmt   = Get-FileMtime $tailF
+                    if (($csize -gt $lastSize[$i]) -or ($cmt -gt $lastMtime[$i])) {
+                        $lastSize[$i] = $csize; $lastMtime[$i] = $cmt; $lastGrowth[$i] = $now
                         $status[$i] = 'growing'
+                    } else {
+                        $elapsed = $now - $lastGrowth[$i]
+                        if ($elapsed -ge $threshold) {
+                            $status[$i] = "stalled($($elapsed)s)"; $hasStall = $true
+                        } else {
+                            $status[$i] = 'growing'
+                        }
                     }
                 }
             }

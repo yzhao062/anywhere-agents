@@ -1,6 +1,6 @@
 # Agy Dispatcher Reference: Models, Quota, and Sandbox
 
-Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`, when a `MODEL-*` line appears or a dispatch exits 75, or when the sandbox (Agy's `--sandbox` flag) needs changing.
+Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`, when a `MODEL-*` line appears, a dispatch exits 75, or a unit exits 124, or when the sandbox (Agy's `--sandbox` flag) needs changing.
 
 - The Agy dispatcher (`dispatch-task-agy.py`) defaults to the registry's `prun-worker` row for Agy: stem plus effort tier gives the slug, and
   `second_model` gives the second group's slug. `DEFAULT_MODEL`, `DEFAULT_EFFORT`, and
@@ -16,10 +16,12 @@ Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAV
   reason=template-unlisted`. The Gemini group's quota is checked again first, so a fallback into an
   empty group exits `75` without launching. A model named in `ANTIGRAVITY_DISPATCH_MODEL` runs
   verbatim, and `ANTIGRAVITY_PREFLIGHT=off` skips the listing, so the templates run as written.
-  `ANTIGRAVITY_DISPATCH_EFFORT` overrides the effort. The dispatcher passes `--effort` for the
-  Gemini models only: Agy rejected the flag for the older Claude models, and since 1.2.16 it
-  rejects any effort that conflicts with the tier in a Claude slug, so the second group runs
-  without it.
+  `ANTIGRAVITY_DISPATCH_EFFORT` moves the registry's slugs for both groups to that tier (the
+  Claude and GPT group still gets no `--effort` flag and takes the tier from its slug). A tier
+  the family does not list floats to `high`, and the Gemini `--effort` follows the floated
+  slug. The dispatcher passes `--effort` for the Gemini models only: Agy rejected the flag for
+  the older Claude models, and since 1.2.16 it rejects any effort that conflicts with the tier
+  in a Claude slug, so the second group runs without it.
 - **The dispatcher checks which model Agy really ran.** Every unit passes
   `--log-file <state-dir>/agy.log`, and after the run the resolver's Agy reader takes the model
   label Agy propagated to its backend from it (the earlier `not in local config` line is noise).
@@ -77,3 +79,4 @@ Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAV
   launch. Scratch directories and throwaway clones reduce accidental changes to the working
   repository. They do not enforce filesystem or network isolation; the worker must follow the
   prompt's ban on commit, push, and destructive git.
+- **Idle reaper (`PRUN_STALL_THRESHOLD`).** When `PRUN_STALL_THRESHOLD` seconds (default 600) pass without stdout or stderr output, the dispatcher sends SIGTERM and then SIGKILL (after 2 s) to the Agy process and its descendants. The unit exits 124, writes a `FALLBACK` (a result the worker already wrote is kept), and appends a `[reaper]` line to the tail. The conversation id is kept, so `--continue-from` can resume the unit. Set `PRUN_STALL_THRESHOLD` on the dispatch command, not only on `monitor.sh`, for units that run a single command longer than ten minutes. `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` / `--print-timeout` stays the wall-clock cap.

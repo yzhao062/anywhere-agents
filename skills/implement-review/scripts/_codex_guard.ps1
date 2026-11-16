@@ -2,7 +2,7 @@
 # Returns nothing (exits 2 with stderr message) when the invoking runtime is
 # Codex itself (which would be self-review, disallowed by the
 # fungibility principle in AGENTS.md). Returns silently (exit 0) otherwise.
-# See skills/implement-review/SKILL.md > Auto-terminal path > Self-review guard.
+# See skills/implement-review/references/codex-backend.md > Auto-terminal path.
 #
 # Factored out of dispatch-codex.ps1 to decouple the env-check pattern from
 # the cmdBody-construction pattern; combining the two in one file scores as

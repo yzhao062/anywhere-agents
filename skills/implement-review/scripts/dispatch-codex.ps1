@@ -1,5 +1,5 @@
 # dispatch-codex.ps1 -- Auto-terminal channel dispatch for implement-review skill.
-# See skills/implement-review/SKILL.md > Phase 1c Auto-terminal path for the contract.
+# See skills/implement-review/references/codex-backend.md > Auto-terminal path for the contract.
 #
 # Self-review guard: refuses to dispatch when the invoking orchestrator is
 # Codex itself (would be self-review, which the fungibility principle
@@ -139,7 +139,7 @@ if (-not ($Round -match '^\d+$')) {
 }
 
 # Self-review safety check. Logic lives in a small helper to keep this
-# launcher focused on dispatch mechanics. See SKILL.md for the contract.
+# launcher focused on dispatch mechanics. See references/codex-backend.md for the contract.
 $guardScript = Join-Path $sourceScriptDir '_codex_guard.ps1'
 if (Test-Path -LiteralPath $guardScript -PathType Leaf) {
     & $guardScript
@@ -675,7 +675,7 @@ $ErrorActionPreference = 'Continue'
 #
 # 1. Byte-parity: cmd's `< file > tail 2>&1` are byte-level OS-handle
 #    redirections that preserve the byte-identical prompt invariant
-#    declared in SKILL.md Phase 1c (no BOM injection, no CRLF drift).
+#    declared in references/codex-backend.md (no BOM injection, no CRLF drift).
 #    Matches the .sh path's `< \$PROMPT_FILE > tail 2>&1` semantics.
 #
 # 2. Session-token preservation: PowerShell's `Start-Process` with

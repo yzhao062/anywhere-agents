@@ -2,10 +2,12 @@
 # gather.sh -- prun result collector (Bash variant).
 # Generalized from implement-review/scripts/auto-watch.sh.
 #
-# Polls a fixed list of result files every 5s and emits `DONE <abs-path>` for
-# each as it lands: it exists, is non-empty, and has been quiet for the stable
-# window (so a file still being written does not fire early). Exits 0 once every
-# file has landed, or 2 on timeout.
+# Polls a fixed list of result files every 5s and emits `DONE <abs-path>` or
+# `FALLBACK <abs-path>` (when line 1 matches `^# [A-Za-z0-9_-]+ result \(FALLBACK, `)
+# for each as it lands: it exists, is non-empty, and has been quiet for the
+# stable window (so a file still being written does not fire early). Exits 0
+# when every file landed without a FALLBACK, 3 when every file landed and at
+# least one was a FALLBACK, or 2 on timeout / usage error.
 #
 # Unlike auto-watch, gather does NOT require an mtime advance past a startup
 # snapshot. prun gives each unit a FRESH result path per run (the caller removes
@@ -26,8 +28,14 @@
 #
 # Stdout (schema):
 #   GATHER-START count=<N> timeout=<seconds>s
-#   DONE <abs-path>          (one line per file, as it lands)
+#   DONE <abs-path>          (one line per non-FALLBACK file, as it lands)
+#   FALLBACK <abs-path>      (one line per FALLBACK file, as it lands)
 #   TIMEOUT remaining=<k>    (if the timeout hits before all land)
+#
+# Exit:
+#   0  every file landed and none was a FALLBACK
+#   3  every file landed and at least one was a FALLBACK
+#   2  timeout or usage error
 
 set -eu
 
@@ -110,6 +118,7 @@ printf 'GATHER-START count=%s timeout=%ss\n' "$N" "$TIMEOUT"
 
 start_epoch="$(date +%s)"
 remaining="$N"
+has_fallback=0
 while [ "$remaining" -gt 0 ]; do
   now="$(date +%s)"
   if [ $((now - start_epoch)) -ge "$TIMEOUT" ]; then
@@ -126,7 +135,13 @@ while [ "$remaining" -gt 0 ]; do
       if [ $((now - cur)) -ge "$STABLE_WINDOW" ]; then
         abs_dir="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)"
         [ -n "$abs_dir" ] || abs_dir="$(dirname "$f")"
-        printf 'DONE %s/%s\n' "$abs_dir" "$(basename "$f")"
+        # FALLBACK only when line 1 matches the FALLBACK header (anchored, case-sensitive).
+        if head -n 1 "$f" 2>/dev/null | grep -Eq '^# [A-Za-z0-9_-]+ result \(FALLBACK, '; then
+          printf 'FALLBACK %s/%s\n' "$abs_dir" "$(basename "$f")"
+          has_fallback=1
+        else
+          printf 'DONE %s/%s\n' "$abs_dir" "$(basename "$f")"
+        fi
         DONE[$i]=1
         remaining=$((remaining - 1))
       fi
@@ -137,4 +152,7 @@ while [ "$remaining" -gt 0 ]; do
   [ "$remaining" -gt 0 ] && sleep "$POLL"
 done
 
+if [ "$has_fallback" -eq 1 ]; then
+  exit 3
+fi
 exit 0

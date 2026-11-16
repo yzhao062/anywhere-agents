@@ -4,7 +4,8 @@ Validates the result-collector contract in skills/prun/references/state-recovery
 gather must fire on a result file that already exists + is non-empty + stable
 when it starts (a unit that finished BEFORE gather began) -- the prun fix for
 the auto-watch startup-snapshot race. Also: empty files are ignored, missing
-files time out (exit 2), and the schema is GATHER-START / DONE / TIMEOUT.
+files time out (exit 2), a FALLBACK first-line header reports FALLBACK and exits
+3, and the schema is GATHER-START / DONE / FALLBACK / TIMEOUT.
 
 bash runs on Linux (Spark/CI); powershell on Windows. bash is skipped on Windows
 because Git Bash does not resolve backslash Windows temp paths passed as args.
@@ -40,6 +41,16 @@ def _temp_dir():
     if sys.version_info >= (3, 10):
         return tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
     return tempfile.TemporaryDirectory()
+
+
+def _has_line(lines, kind, path):
+    """True when a `<kind> <abs-path>` line names this file.
+
+    Compares the prefix and the file name only: on Windows, Resolve-Path and
+    Path.resolve() can spell the same temp directory differently.
+    """
+    return any(line.startswith(kind + " ") and line.rstrip().endswith(path.name)
+               for line in lines)
 
 
 class _GatherContractMixin:
@@ -126,6 +137,45 @@ class _GatherContractMixin:
             r = self._run_gather([f])
             self.assertTrue(r.stdout.startswith("GATHER-START count=1 timeout="),
                             f"first line schema:\n{r.stdout}")
+
+    def test_fallback_result_reports_fallback_and_exits_three(self) -> None:
+        with _temp_dir() as td:
+            f = Path(td) / "u1.md"
+            f.write_text("# u1 result (FALLBACK, Agy wrote no final result)\nbody\n",
+                         encoding="utf-8")
+            r = self._run_gather([f])
+            self.assertEqual(r.returncode, 3, f"{r.stdout}\n{r.stderr}")
+            lines = r.stdout.splitlines()
+            self.assertTrue(_has_line(lines, "FALLBACK", f), r.stdout)
+            self.assertFalse(any(line.startswith("DONE ") for line in lines), r.stdout)
+
+    def test_mixed_done_and_fallback_exits_three(self) -> None:
+        with _temp_dir() as td:
+            f_ok = Path(td) / "u1.md"
+            f_ok.write_text("# u1 result\nConclusion: ok\n", encoding="utf-8")
+            f_fb = Path(td) / "u2.md"
+            f_fb.write_text("# u2 result (FALLBACK, Agy wrote no final result)\n",
+                            encoding="utf-8")
+            r = self._run_gather([f_ok, f_fb])
+            self.assertEqual(r.returncode, 3, f"{r.stdout}\n{r.stderr}")
+            lines = r.stdout.splitlines()
+            self.assertTrue(_has_line(lines, "DONE", f_ok), r.stdout)
+            self.assertTrue(_has_line(lines, "FALLBACK", f_fb), r.stdout)
+            self.assertEqual(sum(line.startswith("DONE ") for line in lines), 1, r.stdout)
+            self.assertEqual(sum(line.startswith("FALLBACK ") for line in lines), 1, r.stdout)
+
+    def test_fallback_text_on_second_line_is_done(self) -> None:
+        with _temp_dir() as td:
+            f = Path(td) / "u1.md"
+            f.write_text(
+                "# u1 result\n# u1 result (FALLBACK, mentioned in body)\n",
+                encoding="utf-8",
+            )
+            r = self._run_gather([f])
+            self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+            lines = r.stdout.splitlines()
+            self.assertTrue(_has_line(lines, "DONE", f), r.stdout)
+            self.assertFalse(any(line.startswith("FALLBACK ") for line in lines), r.stdout)
 
 
 @unittest.skipIf(

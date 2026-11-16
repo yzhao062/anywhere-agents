@@ -4,14 +4,18 @@ Read this when a run was interrupted, or when `gather` replaces `monitor`.
 
 ## gather usage
 
-`gather` prints `DONE` for any non-empty quiet file, a `FALLBACK` included; `DONE` is not a usable result.
+`gather` reports `FALLBACK <abs-path>` when a landed file's first line matches
+`^# [A-Za-z0-9_-]+ result \(FALLBACK, `, and `DONE <abs-path>` otherwise. A `DONE` line still does
+not prove the dispatcher exited 0, so check dispatcher completion before accepting the result (see
+`SKILL.md` flow step 6).
 
 ```
 scripts/gather.sh <result-file-1> <result-file-2> ...
 ```
 
-- Prints `GATHER-START count=N timeout=Ss`, then `DONE <abs-path>` per file as it lands; exits 0 when
-  all land, exits 2 with `TIMEOUT remaining=<k>`.
+- Prints `GATHER-START count=N timeout=Ss`, then `DONE <abs-path>` or `FALLBACK <abs-path>` per file
+  as it lands. Exits 0 when every file landed with no `FALLBACK`, exits 3 when every file landed and
+  at least one was a `FALLBACK`, or exits 2 with `TIMEOUT remaining=<k>`.
 - A file is "landed" when it exists, is non-empty, and has been quiet for the stable window
   (default 10s); no startup-snapshot race.
 - **Use a fresh result path per unit per run** (delete any stale file before dispatch). Have each unit

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -196,8 +197,8 @@ def _parse_state_dir(stdout: str) -> Path:
     return Path(match.group(1).strip())
 
 
-class _DispatchContractMixin:
-    """Shared assertions; concrete subclasses pick the shell."""
+class _DispatchHarnessMixin:
+    """Shared subprocess harness; concrete subclasses pick the shell."""
 
     SHELL_KIND: str = ""  # "bash" or "powershell" -- subclass overrides
 
@@ -305,6 +306,10 @@ class _DispatchContractMixin:
         )
         _write_registry(tmpdir)
         return codex_bin, prompt, log_dir
+
+
+class _DispatchContractMixin(_DispatchHarnessMixin):
+    """Shared contract assertions across Bash and PowerShell dispatchers."""
 
     # --- contract assertions ---------------------------------------------
 
@@ -1583,6 +1588,131 @@ class DispatchPwshResolutionContract(unittest.TestCase):
                 self.assertNotIn("-1073741502", body)
 
 
+@unittest.skipIf(
+    sys.platform.startswith("win"),
+    "POSIX host tests for dispatch-codex.sh pwsh suppression",
+)
+@unittest.skipUnless(BASH, "bash not on PATH")
+class DispatchPwshHostBehaviorTests(_DispatchHarnessMixin, unittest.TestCase):
+    """Runtime behavior of the Bash pwsh probe on POSIX and Windows-like hosts."""
+
+    SHELL_KIND = "bash"
+
+    def _path_without_pwsh(self, tmpdir: Path) -> str:
+        clean_entries: list[str] = []
+        shadow_root = tmpdir / "no-pwsh-path"
+        for idx, raw in enumerate(os.environ.get("PATH", "").split(os.pathsep)):
+            if not raw:
+                continue
+            entry = Path(raw)
+            if not entry.is_dir():
+                clean_entries.append(raw)
+                continue
+            has_pwsh = any(
+                (entry / name).exists() for name in ("pwsh", "pwsh.exe")
+            )
+            if not has_pwsh:
+                clean_entries.append(raw)
+                continue
+            shadow_dir = shadow_root / str(idx)
+            shadow_dir.mkdir(parents=True)
+            for child in entry.iterdir():
+                if child.name in ("pwsh", "pwsh.exe"):
+                    continue
+                try:
+                    (shadow_dir / child.name).symlink_to(child)
+                except OSError:
+                    pass
+            clean_entries.append(str(shadow_dir))
+        return os.pathsep.join(clean_entries)
+
+    def _dev_instructions(self, log_dir: Path) -> str:
+        args = json.loads((log_dir / "args").read_text(encoding="utf-8"))
+        return next(
+            a[len("developer_instructions="):]
+            for a in args
+            if a.startswith("developer_instructions=")
+        )
+
+    def test_no_pwsh_on_non_windows_suppresses_warning_and_instruction(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
+                extra_env={"PATH": self._path_without_pwsh(tmpdir)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("no usable pwsh", result.stderr)
+            state_dir = _parse_state_dir(result.stdout)
+            self.assertFalse((state_dir / "pwsh-interpreter").exists())
+            dev_inst = self._dev_instructions(log_dir)
+            self.assertNotIn("Microsoft Store", dev_inst)
+            self.assertNotIn("Do not shell out to pwsh", dev_inst)
+            self.assertNotIn("  ", dev_inst)
+
+    def test_no_pwsh_on_mingw_uname_keeps_warning_and_instruction(self) -> None:
+        real_uname = shutil.which("uname")
+        self.assertIsNotNone(real_uname, "uname must exist on POSIX PATH")
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            shim_dir = tmpdir / "uname-shim"
+            shim_dir.mkdir()
+            uname_shim = shim_dir / "uname"
+            uname_shim.write_text(
+                "#!/bin/sh\n"
+                'if [ "${1:-}" = "-s" ] || [ "$#" -eq 0 ]; then\n'
+                "    printf 'MINGW64_NT-10.0\\n'\n"
+                "    exit 0\n"
+                "fi\n"
+                f'exec "{real_uname}" "$@"\n',
+                encoding="utf-8",
+            )
+            uname_shim.chmod(uname_shim.stat().st_mode | stat.S_IXUSR)
+            base_path = self._path_without_pwsh(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
+                extra_env={"PATH": f"{shim_dir}{os.pathsep}{base_path}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dispatch-codex: no usable pwsh found", result.stderr)
+            state_dir = _parse_state_dir(result.stdout)
+            self.assertFalse((state_dir / "pwsh-interpreter").exists())
+            dev_inst = self._dev_instructions(log_dir)
+            self.assertIn("Microsoft Store execution alias", dev_inst)
+            self.assertIn("Do not shell out to pwsh", dev_inst)
+
+    def test_pwsh_found_on_non_windows_is_recorded_and_instructed(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            codex, prompt, log_dir = self._fresh_fixture(tmpdir)
+            shim_dir = tmpdir / "pwsh-shim"
+            shim_dir.mkdir()
+            fake_pwsh = shim_dir / "pwsh"
+            fake_pwsh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_pwsh.chmod(fake_pwsh.stat().st_mode | stat.S_IXUSR)
+            base_path = self._path_without_pwsh(tmpdir)
+            result = self._run_dispatch(
+                tmpdir, prompt, "1", "Review-Codex.md", codex, log_dir,
+                extra_env={"PATH": f"{shim_dir}{os.pathsep}{base_path}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("no usable pwsh", result.stderr)
+            state_dir = _parse_state_dir(result.stdout)
+            pwsh_marker = state_dir / "pwsh-interpreter"
+            self.assertTrue(pwsh_marker.exists())
+            self.assertEqual(
+                pwsh_marker.read_text(encoding="utf-8").strip(),
+                str(fake_pwsh),
+            )
+            dev_inst = self._dev_instructions(log_dir)
+            self.assertIn(
+                f"PowerShell 7 was resolved at this absolute path: {fake_pwsh}",
+                dev_inst,
+            )
+
+
 class DispatchReexecContract(unittest.TestCase):
     def test_sh_reexec_copy_is_guarded_scrubbed_and_cleaned(self) -> None:
         text = DISPATCH_SH.read_text(encoding="utf-8")
@@ -1982,6 +2112,153 @@ class DispatchStallIntegrationTests(unittest.TestCase):
                 "tail must contain the appended stderr content "
                 "(diagnostic completeness check)",
             )
+
+
+@unittest.skipUnless(
+    BASH and not sys.platform.startswith("win"),
+    "Stall-watch capture tests target the Bash dispatcher on POSIX",
+)
+class DispatchStallWatchCaptureTests(unittest.TestCase):
+    """Verify stall-watch freezes the reviewer, not an earlier helper."""
+
+    def test_reap_marker_is_published_for_the_reviewer_not_a_helper(self) -> None:
+        with _temp_dir() as td:
+            tmp = Path(td)
+            tree = tmp / "tree"
+            scripts_dir = tree / "skills" / "implement-review" / "scripts"
+            scripts_dir.mkdir(parents=True)
+
+            tree_script = scripts_dir / "dispatch-codex.sh"
+            shutil.copy2(DISPATCH_SH, tree_script)
+            tree_script.chmod(tree_script.stat().st_mode | stat.S_IXUSR)
+
+            stall_copy = scripts_dir / "stall-watch.sh"
+            shutil.copy2(SCRIPTS_DIR / "stall-watch.sh", stall_copy)
+            stall_copy.chmod(stall_copy.stat().st_mode | stat.S_IXUSR)
+
+            (tree / "scripts").mkdir(parents=True)
+            (tree / "scripts" / "agent_models.py").write_text(
+                "import sys, time\n"
+                "cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+                "if cmd == 'resolve':\n"
+                "    time.sleep(1.5)\n"
+                "    print('fixture-codex low')\n"
+                "elif cmd == 'actual':\n"
+                "    print('actual=fixture-codex status=ok')\n",
+                encoding="utf-8",
+            )
+            (tree / "user").mkdir(parents=True)
+            (tree / "user" / "agent-models.json").write_text("{}", encoding="utf-8")
+
+            mock_py = tmp / "mock_codex_stream_death.py"
+            mock_py.write_text(
+                "import os, sys, time\n"
+                "sys.stdin.read()\n"
+                'with open(os.environ["MOCK_PID_FILE"], "w", encoding="utf-8") as f:\n'
+                "    f.write(str(os.getpid()))\n"
+                "time.sleep(3)\n"
+                "sys.stdout.write(\n"
+                '    "ERROR: stream disconnected before completion: "\n'
+                '    "https://chatgpt.com/backend-api/codex/responses/x\\n"\n'
+                '    "tokens used\\n"\n'
+                '    "1,234\\n"\n'
+                ")\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            shim = tmp / "codex-mock.sh"
+            shim.write_text(
+                "#!/usr/bin/env bash\n"
+                f'exec "{sys.executable}" "{mock_py}" "$@"\n',
+                encoding="utf-8",
+            )
+            shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+            prompt = tmp / "prompt.txt"
+            prompt.write_text("stall-watch capture test\n", encoding="utf-8")
+            empty_codex_home = tmp / ".empty-codex-home"
+            empty_codex_home.mkdir()
+            pid_file = tmp / "mock-codex.pid"
+
+            env = os.environ.copy()
+            for key in list(env):
+                if key.startswith("CODEX_DISPATCH_"):
+                    env.pop(key, None)
+            for key in (
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "IMPLEMENT_REVIEW_DISPATCH_REEXEC",
+                "IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR",
+                "AGENT_MODELS_FILE",
+            ):
+                env.pop(key, None)
+            env.update({
+                "CODEX_BIN": str(shim),
+                "IMPLEMENT_REVIEW_ORCHESTRATOR": "claude",
+                "ANYWHERE_AGENTS_PYTHON": sys.executable,
+                "CODEX_HOME": str(empty_codex_home),
+                "TMPDIR": str(tmp),
+                "TEMP": str(tmp),
+                "TMP": str(tmp),
+                "STALL_POLL_INTERVAL_SECONDS": "1",
+                "STALL_THRESHOLD_SECONDS": "999999",
+                "IMPLEMENT_REVIEW_STREAM_RETRY_LIMIT": "0",
+                "MOCK_PID_FILE": str(pid_file),
+            })
+
+            proc = subprocess.Popen(
+                [
+                    BASH,
+                    str(tree_script),
+                    "--prompt-file", str(prompt),
+                    "--round", "1",
+                    "--expected-review-file", "Review-Codex.md",
+                ],
+                cwd=str(tmp),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                state_dir = _parse_state_dir(proc.stdout.readline())
+                reap_complete = state_dir / "stream-reap-complete"
+                deadline = time.monotonic() + STALL_WAIT_TIMEOUT_SECONDS
+                while time.monotonic() < deadline and not reap_complete.is_file():
+                    time.sleep(0.1)
+                self.assertTrue(
+                    reap_complete.is_file(),
+                    f"stream-reap-complete did not appear within {STALL_WAIT_TIMEOUT_SECONDS}s",
+                )
+                self.assertTrue(pid_file.is_file(), "mock reviewer did not write its PID")
+                reviewer_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                worker_roots = (state_dir / "worker-roots").read_text(encoding="utf-8")
+                root_pids = [
+                    int(line.split("\t", 1)[0])
+                    for line in worker_roots.splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(
+                    root_pids,
+                    [reviewer_pid],
+                    "stall-watch recorded something other than the reviewer",
+                )
+                with self.assertRaises(OSError):
+                    os.kill(reviewer_pid, 0)
+            finally:
+                if pid_file.is_file():
+                    try:
+                        reviewer_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                        os.kill(reviewer_pid, signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=5)
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
 
 
 class ReexecFailureCleanupReachable(unittest.TestCase):

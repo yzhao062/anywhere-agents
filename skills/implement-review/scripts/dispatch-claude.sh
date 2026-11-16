@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dispatch-claude.sh -- Auto-terminal Claude Code (`claude -p`) reviewer backend.
-# See skills/implement-review/SKILL.md > Auto-terminal Claude backend for the contract.
+# See skills/implement-review/references/claude-backend.md > Auto-terminal Claude backend for the contract.
 #
 # Cross-vendor reviewer path: when Codex (or the user) is the primary
 # implementer and Claude is preferred as the reviewer voice, this dispatches
@@ -449,6 +449,7 @@ fi
     printf '%s\n' "- The dispatch wrapper saves your final answer to ${EXPECTED_REVIEW_FILE}; do not write that review file yourself."
     printf '%s\n' "- You have unattended tool permission. Run relevant tests, experiments, benchmarks, shell commands, and network verification needed to support the review."
     printf '%s\n' "- The current working directory is a disposable staged snapshot when git export succeeds: ${VALIDATION_DIR}"
+    printf '%s\n' "- The snapshot holds only the exported Git index. Inputs it lacks, such as a gitignored plan or an untracked note, arrive in the original review prompt under SUPPLIED INPUT headings: read those copies and never the original worktree."
     printf '%s\n' "- You may create or modify generated files inside the disposable snapshot as part of verification."
     printf '%s\n' "- Do not commit, push, publish, alter external systems, or perform destructive cleanup."
     printf '%s\n' "- Return the complete review as your final answer, starting with the required Round marker."

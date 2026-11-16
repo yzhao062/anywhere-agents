@@ -1,5 +1,5 @@
 # dispatch-claude.ps1 -- Auto-terminal Claude Code (`claude -p`) reviewer backend.
-# See skills/implement-review/SKILL.md > Auto-terminal Claude backend for the contract.
+# See skills/implement-review/references/claude-backend.md > Auto-terminal Claude backend for the contract.
 #
 # Cross-vendor reviewer path: when Codex (or the user) is the primary
 # implementer and Claude is preferred as the reviewer voice, this dispatches
@@ -25,7 +25,7 @@
 #                                    refusal; see the Self-review guard block below
 #                                    for the exact names (assembled from fragments
 #                                    to keep file-content AV scanners happy) and
-#                                    SKILL.md > Auto-terminal Claude backend for
+#                                    references/claude-backend.md > Auto-terminal Claude backend for
 #                                    the full two-signal contract.
 #   CLAUDE_PREFLIGHT                  auto (default), force, or off. auto runs a
 #                                    no-model auth check for the official Claude
@@ -173,7 +173,7 @@ if ([System.IO.Path]::IsPathRooted($ExpectedReviewFile)) {
 }
 
 # Self-review safety check. Logic lives in a small helper to keep this
-# launcher focused on dispatch mechanics. See SKILL.md for the contract.
+# launcher focused on dispatch mechanics. See references/claude-backend.md for the contract.
 $guardScript = Join-Path $sourceScriptDir '_claude_guard.ps1'
 if (Test-Path -LiteralPath $guardScript -PathType Leaf) {
     & $guardScript
@@ -548,6 +548,7 @@ $relayPrompt = @(
     "- The dispatch wrapper saves your final answer to $ExpectedReviewFile; do not write that review file yourself."
     ("- You have unattended tool permission. Run relevant tests, experiments, benchmarks, " + $shellToolName + " commands, and network verification needed to support the review.")
     "- The current working directory is a disposable staged snapshot when git export succeeds: $validationDir"
+    '- The snapshot holds only the exported Git index. Inputs it lacks, such as a gitignored plan or an untracked note, arrive in the original review prompt under SUPPLIED INPUT headings: read those copies and never the original worktree.'
     '- You may create or modify generated files inside the disposable snapshot as part of verification.'
     '- Do not commit, push, publish, alter external systems, or perform destructive cleanup.'
     '- Return the complete review as your final answer, starting with the required Round marker.'

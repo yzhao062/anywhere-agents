@@ -2,8 +2,8 @@
 """health-check.py -- 10 structural Health checks + 3 Substance heuristics.
 
 Cross-platform implementation invoked by health-check.sh / health-check.ps1
-wrappers. See skills/implement-review/SKILL.md > Phase 2.0 prologue for the
-contract.
+wrappers. See skills/implement-review/references/health-check.md > Phase 2.0
+prologue for the checks, and SKILL.md > Phase 2.0 for the outcomes.
 
 Usage:
   health-check.py --state-dir <abs-path> --round <N>
@@ -45,8 +45,8 @@ SUSPICIOUS_PHRASES = [
     r"sandbox.*fail",
 ]
 
-# Check 8 failure vocabulary, split into two tiers (Fix B; see SKILL.md
-# Phase 2.0 and the W3 plan). INTRINSIC patterns are failure FORMS a runtime
+# Check 8 failure vocabulary, split into two tiers (Fix B; see the Check 8 row
+# of references/health-check.md and the W3 plan). INTRINSIC patterns are failure FORMS a runtime
 # emits; they count on their own. GENERIC patterns are ambiguous words that also
 # appear in benign prose; they count only when an error-frame token sits on the
 # same or an adjacent (non-echo) line. The split closes the false-negative class
@@ -137,8 +137,8 @@ REGEX_SOURCE_MARKERS = [
 ]
 
 # Documentation source sentences (W1b). These are exact prose fragments from
-# this skill's own SKILL.md and from the shared AGENTS.md that bootstrap installs
-# at the root of every consuming project. A reviewer that reads those files
+# this skill's own SKILL.md and references, and from the shared AGENTS.md that
+# bootstrap installs at the root of every consuming project. A reviewer that reads those files
 # carries the sentences into its stdout tail, where the check 8 patterns above
 # then match benign documentation rather than a real failure.
 #
@@ -157,9 +157,10 @@ REGEX_SOURCE_MARKERS = [
 # hit as grounds to skip the whole line, which would hide a real failure that
 # happens to share the line with quoted documentation.
 #
-# Drift warning: these are exact strings, so one character of edit in SKILL.md or
-# AGENTS.md silently disables the matching entry. The source-coupled tests in
-# tests/test_health_check.py scan the live SKILL.md and AGENTS.md and exist to
+# Drift warning: these are exact strings, so one character of edit in SKILL.md,
+# its references, or AGENTS.md silently disables the matching entry. The
+# source-coupled tests in tests/test_health_check.py scan the live SKILL.md, the
+# references, and AGENTS.md and exist to
 # catch that; the inline fixtures alone would stay green straight through it.
 DOC_ECHO_FRAGMENTS = [
     # Legacy pre-W1a shape from the SKILL.md Phase 2.0 check 8 row. W1a
@@ -177,7 +178,7 @@ DOC_ECHO_FRAGMENTS = [
     # still live: AGENTS.md is deliberately not edited, and bootstrap installs it
     # at the root of every consuming project. It matches the intrinsic
     # ``tool .* failed`` pattern because "tool failures" carries the required
-    # space, whereas SKILL.md's "tools silently failed" does not.
+    # space, whereas references/health-check.md's "tools silently failed" does not.
     "transient-looking tool failures: a single failed attempt is weak evidence",
 ]
 
@@ -304,7 +305,7 @@ def strip_code_spans(text: str) -> str:
     Codex meta-discussing the pattern list (e.g., quoting
     `CreateProcessAsUserW failed: 1312` in its reasoning text or echoing a
     SKILL.md snippet that names the patterns) does not count as real
-    failure narration. The same SKILL.md FP-tuning principle that
+    failure narration. The same FP-tuning principle (references/health-check.md) that
     motivated this for the review body (Check 7) applies to the dispatch
     tail (Check 8) -- whenever /implement-review runs on the
     implement-review skill itself (or any review prompt that names the
@@ -508,7 +509,7 @@ def read_int_file(path: Path) -> int | None:
 
 def emit_check_8(tail_file: Path, tail_stderr_file: Path) -> None:
     # ----- Check 8: dispatch-tail tool failures (line classifier + two-tier) -----
-    # Fix A (echo classifier) + Fix B (intrinsic/generic) per SKILL.md Phase 2.0
+    # Fix A (echo classifier) + Fix B (intrinsic/generic) per references/health-check.md
     # and the W3 plan. Scan line by line: skip modeled pattern-echo lines, count
     # intrinsic failure patterns on their own, and count generic words only when
     # an error-frame token sits on the same or an adjacent non-echo line.

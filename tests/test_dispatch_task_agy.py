@@ -90,7 +90,9 @@ WORKER_RESULT_TEXT = (
 MOCK_AGY = r'''#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = Path(os.environ["MOCK_AGY_LOG"])
@@ -103,6 +105,15 @@ if sys.argv[1:] == ["models"]:
     raise SystemExit(0)
 
 (log / "args.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+(log / "pid.txt").write_text(str(os.getpid()), encoding="utf-8")
+if os.environ.get("MOCK_AGY_SPAWN_CHILD") == "1":
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    (log / "child.pid").write_text(str(child.pid), encoding="utf-8")
 
 
 def display_label(slug, default_tier=None):
@@ -150,6 +161,8 @@ if "--model" in argv and "--effort" in argv:
         print(f"error: --model {slug} conflicts with --effort={effort}", file=sys.stderr)
         raise SystemExit(2)
 (log / "cwd.txt").write_text(os.getcwd(), encoding="utf-8")
+if os.environ.get("MOCK_AGY_STALL") == "before_stdin":
+    time.sleep(60)
 event = json.loads(sys.stdin.readline())
 (log / "prompt.txt").write_text(event["message"]["content"], encoding="utf-8")
 init_event = {"event": "init", "model": "gemini-3.8-flash-high"}
@@ -157,12 +170,20 @@ if os.environ.get("MOCK_AGY_NO_INIT_CONVERSATION_ID") != "1":
     init_event["conversation_id"] = os.environ.get(
         "MOCK_AGY_CONVERSATION_ID", "conv-fixed-0001"
     )
-print(json.dumps(init_event))
+print(json.dumps(init_event), flush=True)
 worker_result = os.environ.get("MOCK_AGY_WRITE_RESULT")
 if worker_result:
     Path(worker_result).write_text(
         os.environ["MOCK_AGY_WORKER_TEXT"], encoding="utf-8"
     )
+if os.environ.get("MOCK_AGY_STALL") == "after_init":
+    time.sleep(60)
+stream_seconds = float(os.environ.get("MOCK_AGY_STREAM_SECONDS", "0"))
+if stream_seconds > 0:
+    deadline = time.monotonic() + stream_seconds
+    while time.monotonic() < deadline:
+        print(json.dumps({"event": "step_update", "step": "working"}), flush=True)
+        time.sleep(0.2)
 if os.environ.get("MOCK_AGY_NO_RESULT") != "1":
     response = os.environ.get(
         "MOCK_AGY_RESPONSE",
@@ -1797,6 +1818,77 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         record = (self._state_dir(result) / "model-actual").read_text(encoding="utf-8")
         self.assertIn("status=ok", record)
 
+    def test_an_effort_override_alone_moves_the_registry_slug_to_that_tier(self) -> None:
+        result, target = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_EFFORT": "low",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high\ngemini-3.8-flash-low",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-low")
+        self.assertEqual(argv[argv.index("--effort") + 1], "low")
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertTrue(target.is_file())
+
+    def test_an_effort_override_alone_moves_the_second_group_slug_too(self) -> None:
+        result, _ = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_EFFORT": "low",
+                "AGY_QUOTA_CACHE": self._quota(gemini=0.0, second=1.0),
+                "MOCK_AGY_MODELS": (
+                    "gemini-3.8-flash-high\n"
+                    "claude-sonnet-5-5-high\n"
+                    "claude-sonnet-5-5-low"
+                ),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-5-5-low")
+        self.assertNotIn("--effort", argv)
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+
+    def test_an_effort_override_that_names_no_tier_leaves_the_slug_alone(self) -> None:
+        result, _ = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_EFFORT": "bogus",
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
+
+    def test_an_effort_override_for_an_unlisted_tier_follows_the_floated_slug(self) -> None:
+        # The low template is unlisted, so preflight floats it to high; the
+        # effort must follow, or Agy rejects the pair.
+        result, target = self._run(
+            extra_env={
+                "ANTIGRAVITY_DISPATCH_EFFORT": "low",
+                "MOCK_AGY_MODELS": "gemini-3.8-flash-high",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.log / "args.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertNotIn("MODEL-MISMATCH", result.stderr)
+        self.assertNotRegex(
+            target.read_text(encoding="utf-8").splitlines()[0], r"\(FALLBACK, "
+        )
+
+    def test_an_agy_exit_before_it_reads_a_large_prompt_keeps_its_exit_code(self) -> None:
+        # The prompt overfills the pipe and the mock exits 2 on the conflicting
+        # effort before reading it; the broken pipe must not replace that code.
+        self.prompt.write_text("x" * 1_000_000 + "\n", encoding="utf-8")
+        result, target = self._run(extra_env={"ANTIGRAVITY_DISPATCH_EFFORT": "bogus"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Agy exited with code 2", result.stderr)
+        self.assertRegex(
+            target.read_text(encoding="utf-8").splitlines()[0], r"\(FALLBACK, "
+        )
+
     def test_a_registry_without_a_second_model_never_balances_into_that_group(self) -> None:
         registry = write_registry(self.root, "no-second.json", second_model=None)
         result, _ = self._run(
@@ -1909,6 +2001,148 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         extra["MOCK_AGY_LABEL"] = "Gemini 3.8 Flash (High)"
         result, _ = self._run(extra_env=extra, result_path=self.root / "second.md")
         self.assertIn("MODEL-MISMATCH", result.stderr)
+
+    def _pid_alive(self, name: str) -> bool:
+        pid = int((self.log / name).read_text(encoding="utf-8").strip())
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-tree reaper")
+    def test_an_idle_unit_is_reaped_with_its_children_and_gets_a_fallback(self) -> None:
+        result, target = self._run(
+            extra_env={
+                "MOCK_AGY_STALL": "after_init",
+                "MOCK_AGY_SPAWN_CHILD": "1",
+                "PRUN_STALL_THRESHOLD": "1",
+            }
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("reaped after 1s", result.stderr)
+        first_line = target.read_text(encoding="utf-8").splitlines()[0]
+        self.assertRegex(first_line, r"^# unit_a result \(FALLBACK, ")
+        self.assertFalse(self._pid_alive("pid.txt"))
+        self.assertFalse(self._pid_alive("child.pid"))
+        conversation_id = (
+            self._state_dir(result) / "conversation-id"
+        ).read_text(encoding="utf-8").strip()
+        self.assertEqual(conversation_id, "conv-fixed-0001")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-tree reaper")
+    def test_the_idle_reaper_keeps_a_result_the_worker_wrote(self) -> None:
+        target = self.root / "unit-result.md"
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_STALL": "after_init",
+                "MOCK_AGY_WRITE_RESULT": str(target),
+                "PRUN_STALL_THRESHOLD": "1",
+            },
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-tree reaper")
+    def test_a_unit_that_keeps_streaming_is_not_reaped(self) -> None:
+        result, target = self._run(
+            extra_env={
+                "MOCK_AGY_STREAM_SECONDS": "2.5",
+                "PRUN_STALL_THRESHOLD": "1",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FALLBACK", target.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-tree reaper")
+    def test_a_cli_that_never_reads_a_large_prompt_is_still_reaped(self) -> None:
+        self.prompt.write_text("x" * 1_000_000 + "\n", encoding="utf-8")
+        result, target = self._run(
+            extra_env={
+                "MOCK_AGY_STALL": "before_stdin",
+                "PRUN_STALL_THRESHOLD": "1",
+            }
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertFalse(self._pid_alive("pid.txt"))
+        # The reap broke the pipe, so no stdin failure is reported.
+        self.assertNotIn("stdin failure", result.stderr)
+        self.assertNotIn("stdin failure", target.read_text(encoding="utf-8"))
+
+    def test_a_malformed_stall_threshold_fails_before_launch(self) -> None:
+        for value in ("0", "abc", "-5"):
+            with self.subTest(value=value):
+                result, _ = self._run(
+                    result_path=self.root / f"unit-result-stall-{value}.md",
+                    extra_env={"PRUN_STALL_THRESHOLD": value},
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("PRUN_STALL_THRESHOLD", result.stderr)
+                self.assertFalse((self.log / "pid.txt").exists())
+
+    def test_reaper_helpers_match_the_grok_dispatcher(self) -> None:
+        grok = ROOT / "skills" / "prun" / "scripts" / "dispatch-task-grok.py"
+        names = ("descendant_pids", "terminate_process_tree", "_pid_alive", "StreamTracker")
+
+        def strip_docstrings(node: ast.AST) -> None:
+            for item in ast.walk(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if (
+                        item.body
+                        and isinstance(item.body[0], ast.Expr)
+                        and isinstance(item.body[0].value, ast.Constant)
+                        and isinstance(item.body[0].value.value, str)
+                    ):
+                        item.body = item.body[1:]
+
+        def extract(path: Path) -> dict[str, str]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            found: dict[str, str] = {}
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names:
+                    strip_docstrings(node)
+                    found[node.name] = ast.dump(node)
+            return found
+
+        self.assertEqual(extract(DISPATCH), extract(grok))
+
+    def _load_grok_module(self):
+        grok_path = ROOT / "skills" / "prun" / "scripts" / "dispatch-task-grok.py"
+        spec = importlib.util.spec_from_file_location("dispatch_task_grok", grok_path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _skip_bootstrap_lines(self, prompt_text: str) -> list[str]:
+        lines = prompt_text.splitlines()
+        start = next(i for i, line in enumerate(lines) if "bootstrap" in line.lower())
+        end = next(
+            i for i in range(start, len(lines)) if "never commit" in lines[i].lower()
+        )
+        return lines[start:end]
+
+    def test_worker_preamble_carries_the_same_skip_bootstrap_statement_as_grok(self) -> None:
+        grok = self._load_grok_module()
+        grok_lines = self._skip_bootstrap_lines(grok.build_prompt("TASK", "unit_a"))
+        agy_lines = self._skip_bootstrap_lines(self.module.build_prompt("TASK", "unit_a"))
+        self.assertTrue(grok_lines)
+        self.assertEqual(agy_lines, grok_lines)
+
+    def test_prompt_relay_keeps_original_prompt_unchanged_after_preamble(self) -> None:
+        original = "Line one of unit task.\nLine two with details.\n"
+        self.prompt.write_text(original, encoding="utf-8")
+        result, _ = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        relay = (self.log / "prompt.txt").read_text(encoding="utf-8")
+        expected_tail = f"--- UNIT REQUEST ---\n{original.rstrip()}\n--- END UNIT REQUEST ---\n"
+        self.assertTrue(relay.endswith(expected_tail))
+        grok = self._load_grok_module()
+        grok_lines = self._skip_bootstrap_lines(grok.build_prompt("TASK", "unit_a"))
+        prefix = relay[: -len(expected_tail)]
+        for line in grok_lines:
+            self.assertIn(line, prefix)
 
 
 if __name__ == "__main__":

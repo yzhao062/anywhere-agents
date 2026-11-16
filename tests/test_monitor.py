@@ -217,6 +217,28 @@ class _MonitorContractMixin:
             self.assertEqual(r.returncode, 2, f"{r.stdout}\n{r.stderr}")
             self.assertIn("MONITOR-EVENT timeout", r.stdout)
 
+    def test_dead_dispatch_is_reported_before_the_stall_threshold(self) -> None:
+        # PR-10: a dead dispatcher with no result must fail before the stall
+        # threshold expires.
+        with _temp_dir() as td:
+            a = self._make_state_dir(td, "u1", tail="x\n",
+                                     dispatch_pid=_dead_pid())
+            r = self._run_monitor([a], threshold="600", poll="1", timeout_s="10")
+            self.assertEqual(r.returncode, 3, f"{r.stdout}\n{r.stderr}")
+            self.assertIn("MONITOR-EVENT fail", r.stdout)
+            self.assertIn("failed(dispatch-dead)", r.stdout)
+
+    def test_live_dispatch_with_a_quiet_tail_is_not_dead_below_threshold(self) -> None:
+        # PR-10: a live dispatcher with no tail growth below the stall threshold
+        # must time out rather than fail as dispatch-dead.
+        with _temp_dir() as td:
+            a = self._make_state_dir(td, "u1", tail="x\n",
+                                     dispatch_pid=os.getpid())
+            r = self._run_monitor([a], threshold="600", poll="1", timeout_s="3")
+            self.assertEqual(r.returncode, 2, f"{r.stdout}\n{r.stderr}")
+            self.assertIn("MONITOR-EVENT timeout", r.stdout)
+            self.assertNotIn("failed(dispatch-dead)", r.stdout)
+
 
 @unittest.skipIf(
     sys.platform.startswith("win"),

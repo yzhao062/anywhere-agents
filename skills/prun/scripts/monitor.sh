@@ -162,23 +162,33 @@ while :; do
                 # done/fallback. Never stall- or dead-classify a unit that produced a result.
                 STATUS[$i]="finishing"
             else
-                tail_f="$sd/tail"
-                csize=$(_size "$tail_f")
-                cmt=0; [ -f "$tail_f" ] && cmt=$(_mtime "$tail_f")
-                if [ "$csize" -gt "${LAST_SIZE[$i]}" ] || [ "$cmt" -gt "${LAST_MTIME[$i]}" ]; then
-                    LAST_SIZE[$i]="$csize"; LAST_MTIME[$i]="$cmt"; LAST_GROWTH[$i]="$now"
-                    STATUS[$i]="growing"
-                else
-                    elapsed=$((now - ${LAST_GROWTH[$i]}))
-                    if [ "$elapsed" -ge "$THRESHOLD" ]; then
-                        pid=""; [ -f "$sd/dispatch-pid" ] && pid=$(head -n 1 "$sd/dispatch-pid" 2>/dev/null)
-                        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-                            STATUS[$i]="failed(dispatch-dead)"; has_fail=1
-                        else
-                            STATUS[$i]="stalled(${elapsed}s)"; has_stall=1
-                        fi
+                # Probe dispatcher liveness on every poll before checking tail growth:
+                # a dead dispatcher with no result will never be collected, even while
+                # an orphaned worker keeps the tail moving.
+                pid=""; [ -f "$sd/dispatch-pid" ] && pid=$(head -n 1 "$sd/dispatch-pid" 2>/dev/null)
+                case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+                if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+                    # Re-check the result file in case the dispatcher published it and
+                    # exited between the first check and the probe.
+                    if [ -n "$rf" ] && [ -s "$rf" ]; then
+                        STATUS[$i]="finishing"
                     else
+                        STATUS[$i]="failed(dispatch-dead)"; has_fail=1
+                    fi
+                else
+                    tail_f="$sd/tail"
+                    csize=$(_size "$tail_f")
+                    cmt=0; [ -f "$tail_f" ] && cmt=$(_mtime "$tail_f")
+                    if [ "$csize" -gt "${LAST_SIZE[$i]}" ] || [ "$cmt" -gt "${LAST_MTIME[$i]}" ]; then
+                        LAST_SIZE[$i]="$csize"; LAST_MTIME[$i]="$cmt"; LAST_GROWTH[$i]="$now"
                         STATUS[$i]="growing"
+                    else
+                        elapsed=$((now - ${LAST_GROWTH[$i]}))
+                        if [ "$elapsed" -ge "$THRESHOLD" ]; then
+                            STATUS[$i]="stalled(${elapsed}s)"; has_stall=1
+                        else
+                            STATUS[$i]="growing"
+                        fi
                     fi
                 fi
             fi
