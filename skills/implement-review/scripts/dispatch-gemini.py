@@ -702,15 +702,54 @@ def other_round_marker(response: str, round_num: int) -> str | None:
     return other
 
 
+BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def code_span_bounds(text: str) -> list[tuple[int, int]]:
+    """Return the start and end offsets of each paired backtick span in text.
+
+    Backticks are read as whole runs: a span that opens with N backticks
+    closes at the next run of exactly N. A span of one or two backticks stays
+    on one line; three or more may cross lines, which covers fenced blocks and
+    a fence inside a one-line JSON tail. A run with no partner is left as
+    text. This is a stripping heuristic, not a Markdown parser: a fence closed
+    by a longer run than it opened with stays visible. One reverse pass finds
+    each run's next run of the same width, so the scan is linear in the text.
+    health-check.py and dispatch-gemini.py carry the same copy, and a test
+    keeps the two identical.
+    """
+    runs = list(BACKTICK_RUN_RE.finditer(text))
+    next_same = [-1] * len(runs)
+    last_by_width: dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        width = runs[index].end() - runs[index].start()
+        next_same[index] = last_by_width.get(width, -1)
+        last_by_width[width] = index
+    bounds: list[tuple[int, int]] = []
+    index = 0
+    while index < len(runs):
+        opener = runs[index]
+        partner = next_same[index]
+        if partner != -1 and opener.end() - opener.start() < 3:
+            if text.find("\n", opener.end(), runs[partner].start()) != -1:
+                partner = -1
+        if partner == -1:
+            index += 1
+            continue
+        bounds.append((opener.start(), runs[partner].end()))
+        index = partner + 1
+    return bounds
+
+
 def has_review_structure(response: str, round_num: int) -> bool:
     """Return whether the response has this round's review structure outside quoted code.
 
     The structure is this round's marker on its own line and, after it, a
-    standalone verification status and a labeled verdict. Closed triple-backtick
-    blocks and single-line inline code are masked first, the exclusions
-    health-check.py applies, so a template quoted in either cannot supply those
-    lines. A tilde fence or an unclosed fence is not recognized, which is one
-    more reason a recovery is only a candidate. Masking keeps line positions,
+    standalone verification status and a labeled verdict. The paired backtick
+    spans code_span_bounds finds are masked first, the same spans health-check.py
+    strips, so a template quoted in a fence or an inline span cannot supply
+    those lines. A tilde fence or an unclosed fence is not recognized, which is
+    one more reason a recovery is only a candidate. Masking keeps line positions,
     so the marker normalize_review would cut at must sit outside quoted code.
     Passing this check makes the response a recovery candidate; it does not
     show the findings are finished, which is why health-check.py warns on the
@@ -723,13 +762,14 @@ def has_review_structure(response: str, round_num: int) -> bool:
         marker_index = lines.index(marker)
     except ValueError:
         return False
-    prose = re.sub(
-        r"```.*?```",
-        lambda match: "\n" * match.group(0).count("\n"),
-        text,
-        flags=re.DOTALL,
-    )
-    prose = re.sub(r"`[^`\n]*`", "", prose)
+    pieces: list[str] = []
+    keep_from = 0
+    for start, end in code_span_bounds(text):
+        pieces.append(text[keep_from:start])
+        pieces.append("\n" * text.count("\n", start, end))
+        keep_from = end
+    pieces.append(text[keep_from:])
+    prose = "".join(pieces)
     visible_lines = prose.split("\n")
     if visible_lines[marker_index] != marker:
         return False

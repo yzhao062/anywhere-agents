@@ -574,6 +574,39 @@ class HealthCheckPython(unittest.TestCase):
             "End of skill quote.\n"
         )
 
+    def test_check8_code_stripping_hides_quoted_markers_and_keeps_real_ones(
+        self,
+    ) -> None:
+        """Raw tails meet the same whole-run stripping as reviews.
+
+        A marker inside a paired span is hidden, including a fence inside one
+        JSON line with escaped newlines; a marker outside every paired span
+        still warns, whatever unpaired runs or quoted fences come before it.
+        """
+        marker = "connection refused"
+        hidden = {
+            "single-backtick span": f"Reasoning names `{marker}` as a pattern.\n",
+            "fence inside one JSON line": (
+                '{"text":"```text\\n' + marker + '\\n```"}\n'
+            ),
+            "double-backtick span holding a backtick": (
+                f"Quoted ``a ` {marker}`` here.\n"
+            ),
+        }
+        shown = {
+            "after three single backticks": f"`example` then ` {marker}\n",
+            "after an unpaired four-backtick run": f"```` example\n{marker}\n",
+            "between a quoted fence and a fenced example": (
+                f"Quoted ```` ``` ```` fence.\n{marker}\n```\nexample\n```\n"
+            ),
+        }
+        for name, tail in hidden.items():
+            with self.subTest(case=name):
+                self._assert_check8_pass(tail)
+        for name, tail in shown.items():
+            with self.subTest(case=name):
+                self._assert_check8_warn(tail)
+
     def test_check8_warn_emits_pattern_breakdown(self) -> None:
         """When Check 8 WARNs, the line includes a `breakdown=` segment
         with per-pattern counts sorted by frequency. This is what lets
@@ -1267,6 +1300,69 @@ class HealthCheckPython(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(parsed["check-10"][0], "FAIL")
             self.assertIn("but-notes-report-none", parsed["check-10"][1])
+
+    def test_check10_reads_the_status_after_an_inline_span_quoting_a_fence(
+        self,
+    ) -> None:
+        """A four-backtick inline span that quotes a fence is one span.
+
+        Code stripping once split the four-backtick run into a three-backtick
+        fence, which then ran to the next fenced block and took the status
+        line with it, so a VERIFIED review failed Check 10.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Antigravity.md"
+            make_review(
+                review,
+                extra_body=(
+                    "- Rendered the README; the ```` ```python ```` fences "
+                    "display.\n\n"
+                    "Verification status: VERIFIED\n\n"
+                    "Example:\n\n```python\nprint(1)\n```\n\n"
+                    "Commit verdict: BLOCK"
+                ),
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(parsed["check-10"][0], "PASS")
+            self.assertIn("verdict=BLOCK verification=VERIFIED", parsed["check-10"][1])
+
+    def test_code_stripping_matches_backtick_runs_by_length(self) -> None:
+        """A longer fence holds a shorter one, and an unpaired run stays text.
+
+        Each case puts a Check 7 phrase where code stripping decides whether
+        it counts: inside code it must not warn, and after an unpaired run it
+        must still be seen.
+        """
+        phrase = "I was unable to run the tests here"
+        cases = {
+            "four-backtick fence holding a three-backtick fence": (
+                f"````md\n```\n{phrase}.\n```\n````\n\nRecommendation: BLOCK",
+                "PASS",
+            ),
+            "double-backtick span holding a single backtick": (
+                f"Quoted ``{phrase}` text`` once.\n\nRecommendation: BLOCK",
+                "PASS",
+            ),
+            "unpaired four-backtick run before the phrase and a fence": (
+                f"A stray ```` run. {phrase}.\n\n```\ncode\n```\n\n"
+                "Recommendation: BLOCK",
+                "WARN",
+            ),
+        }
+        for name, (body, outcome) in cases.items():
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as td:
+                    td_path = Path(td)
+                    review = td_path / "Review-Codex.md"
+                    make_review(review, extra_body=body)
+                    state = make_state_dir(td_path)
+                    result = run_health_py(state, review)
+                    parsed = parse_output(result.stdout)
+                    self.assertEqual(parsed["check-7"][0], outcome, result.stdout)
 
     # ----- State contract -----
     def test_state_contract_missing_pre_mtime_is_fail(self) -> None:

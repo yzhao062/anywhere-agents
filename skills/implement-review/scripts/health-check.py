@@ -298,6 +298,45 @@ VERIFICATION_NOTES_LABEL_RE = re.compile(
 )
 
 
+BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def code_span_bounds(text: str) -> list[tuple[int, int]]:
+    """Return the start and end offsets of each paired backtick span in text.
+
+    Backticks are read as whole runs: a span that opens with N backticks
+    closes at the next run of exactly N. A span of one or two backticks stays
+    on one line; three or more may cross lines, which covers fenced blocks and
+    a fence inside a one-line JSON tail. A run with no partner is left as
+    text. This is a stripping heuristic, not a Markdown parser: a fence closed
+    by a longer run than it opened with stays visible. One reverse pass finds
+    each run's next run of the same width, so the scan is linear in the text.
+    health-check.py and dispatch-gemini.py carry the same copy, and a test
+    keeps the two identical.
+    """
+    runs = list(BACKTICK_RUN_RE.finditer(text))
+    next_same = [-1] * len(runs)
+    last_by_width: dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        width = runs[index].end() - runs[index].start()
+        next_same[index] = last_by_width.get(width, -1)
+        last_by_width[width] = index
+    bounds: list[tuple[int, int]] = []
+    index = 0
+    while index < len(runs):
+        opener = runs[index]
+        partner = next_same[index]
+        if partner != -1 and opener.end() - opener.start() < 3:
+            if text.find("\n", opener.end(), runs[partner].start()) != -1:
+                partner = -1
+        if partner == -1:
+            index += 1
+            continue
+        bounds.append((opener.start(), runs[partner].end()))
+        index = partner + 1
+    return bounds
+
+
 def strip_code_spans(text: str) -> str:
     """Remove fenced ``` ... ``` blocks and inline `code` spans.
 
@@ -310,11 +349,21 @@ def strip_code_spans(text: str) -> str:
     tail (Check 8) -- whenever /implement-review runs on the
     implement-review skill itself (or any review prompt that names the
     pattern strings), Codex's stdout carries backticked references that
-    look like real tool errors without it.
+    look like real tool errors without it. Check 10 reads the verification
+    status and verdict from the same stripped text.
+
+    The spans come from :func:`code_span_bounds`. Matching runs whole fixed
+    the old failure: an inline four-backtick span quoting a fence was read as
+    a three-backtick fence that ran to the next fenced block and removed the
+    status line between them.
     """
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    text = re.sub(r"`[^`\n]*`", "", text)
-    return text
+    pieces: list[str] = []
+    keep_from = 0
+    for start, end in code_span_bounds(text):
+        pieces.append(text[keep_from:start])
+        keep_from = end
+    pieces.append(text[keep_from:])
+    return "".join(pieces)
 
 
 def strip_doc_fragments(text: str) -> str:

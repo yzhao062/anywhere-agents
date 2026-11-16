@@ -1,6 +1,7 @@
 """Contract tests for the Antigravity-backed Gemini reviewer dispatcher."""
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -442,6 +443,55 @@ class DispatchGeminiUnitTests(unittest.TestCase):
         self.assertTrue(
             self.module.has_review_structure(f"{whole}\n{fence}text\nexample\n{fence}\n", 6)
         )
+        # Backtick runs match whole. A four-backtick inline span that quotes a
+        # fence ahead of the status line does not hide it, and a four-backtick
+        # fence holding a template with three-backtick fences hides all of it.
+        long_fence = "`" * 4
+        quoted_fence = whole.replace(
+            status,
+            f"Rendered the {long_fence} {fence}python {long_fence} fences.\n\n{status}",
+        )
+        self.assertTrue(
+            self.module.has_review_structure(
+                f"{quoted_fence}\n{fence}python\nprint(1)\n{fence}\n", 6
+            )
+        )
+        template = f"{fence}text\nexample\n{fence}\n{whole}"
+        self.assertFalse(
+            self.module.has_review_structure(
+                f"<!-- Round 6 -->\n\nStill reading.\n\n{long_fence}markdown\n"
+                f"{template}{long_fence}\n",
+                6,
+            )
+        )
+
+    def test_code_span_bounds_matches_the_health_check_copy(self) -> None:
+        # The two scripts must mask the same spans, or recovery accepts a
+        # review Check 10 then refuses (or the reverse).
+        def extract(path: Path) -> dict[str, str]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            found: dict[str, str] = {}
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name == "code_span_bounds":
+                    body = node.body
+                    if (
+                        body
+                        and isinstance(body[0], ast.Expr)
+                        and isinstance(body[0].value, ast.Constant)
+                        and isinstance(body[0].value.value, str)
+                    ):
+                        node.body = body[1:]
+                    found[node.name] = ast.dump(node)
+                elif isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == "BACKTICK_RUN_RE"
+                    for target in node.targets
+                ):
+                    found["BACKTICK_RUN_RE"] = ast.dump(node)
+            return found
+
+        here = extract(DISPATCH)
+        self.assertEqual(set(here), {"code_span_bounds", "BACKTICK_RUN_RE"})
+        self.assertEqual(here, extract(HEALTH))
 
     def test_extract_result_keeps_a_status_a_later_event_omits(self) -> None:
         # A trailing event without the field must not erase the verdict, and a
