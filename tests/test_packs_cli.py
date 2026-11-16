@@ -21,8 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 # imports work (cli.py + packs.uninstall).
 sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
+# tests/ is on sys.path under `unittest discover -s tests` but not under
+# `python -m unittest tests.<module>`. Put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from anywhere_agents import cli  # noqa: E402
+from _isolated_cwd import enter_isolated_cwd, leave_isolated_cwd  # noqa: E402
+
+
+def setUpModule() -> None:
+    # `pack add` writes agent-config.yaml into a working directory that looks
+    # like a bootstrapped project, so no test here may run from the caller's.
+    enter_isolated_cwd()
+
+
+def tearDownModule() -> None:
+    leave_isolated_cwd()
 
 
 @contextmanager

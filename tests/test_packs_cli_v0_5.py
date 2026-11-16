@@ -26,13 +26,27 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
+# tests/ is on sys.path under `unittest discover -s tests` but not under
+# `python -m unittest tests.<module>`. Put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The ref the bundled manifest pins agent-style at. Read rather than
 # retyped: these fixtures have to match the manifest, and a literal here
 # turns any pin bump into unrelated test failures.
 from bundled_manifest_ref import agent_style_ref
+from _isolated_cwd import enter_isolated_cwd, leave_isolated_cwd
 
 BUNDLED_AGENT_STYLE_REF = agent_style_ref()
+
+
+def setUpModule() -> None:
+    # `pack add` writes agent-config.yaml into a working directory that looks
+    # like a bootstrapped project, so no test here may run from the caller's.
+    enter_isolated_cwd()
+
+
+def tearDownModule() -> None:
+    leave_isolated_cwd()
 
 
 def _build_archive(archive_dir: pathlib.Path) -> object:

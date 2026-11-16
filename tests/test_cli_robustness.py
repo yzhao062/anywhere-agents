@@ -26,12 +26,23 @@ from unittest.mock import patch, call, MagicMock
 # Sentinel redaction smoke. Put it there before the sibling import.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on Windows
+from _isolated_cwd import enter_isolated_cwd, leave_isolated_cwd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from anywhere_agents import cli  # noqa: E402
+
+
+def setUpModule() -> None:
+    # `_bootstrap_main` creates a relative `.agent-config/`, which a patched
+    # `Path.cwd` does not redirect, so no test here may run from the caller's.
+    enter_isolated_cwd()
+
+
+def tearDownModule() -> None:
+    leave_isolated_cwd()
 
 
 def _make_project(tmp: str) -> Path:
