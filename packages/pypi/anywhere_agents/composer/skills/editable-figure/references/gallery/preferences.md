@@ -120,7 +120,51 @@ Initial feedback was recorded on 2026-09-25; later additions carry their own dat
 
 **Boundary:** The lower objective strip remains in the complete reference, with optimization deferred by the author. This is not a separate endorsement of its density, small labels, or final polish. Do not redesign it merely to update this record. Future figures still need print-size legibility and clear response-arrow and pairing semantics. Those are review considerations, not new author dislikes.
 
+## 18 UMaine · Annotated glacier layers (original selection C)
+
+**作者反馈：** 2026-11-15：“C 我觉得可以收录，因为是真实图上进行 annotate，然后体现了一种巧思。”
+
+**Design implication:** Put the explanation directly on the domain image. Here one orange S2 cell crosses the stacked glacier maps; nearby labels show how a glacier outline, a velocity cell, a satellite segment and a fine radar trace refer to the same location at different scales. The approved detail is this spatial annotation. The original PDF’s footer linking time, variable and reason to a graph falls outside the approved crop. Prefer actual source imagery when available. In this particular figure the terrain plate is a generated illustration according to the project build record.
+
+## 19 UMaine · Glacier dataset overview (original selection H)
+
+**作者反馈：** 2026-11-15：“H 其实好在了上面的图吸引目光（结合 proposal 的 ai 生成）而下面对真实图进行了 annotate。”
+
+**Design implication:** Let a proposal-specific scene attract the reader, then use annotated source images to show what the research does. For example, placing the same radar view before and after layer picking lets the reader see what the annotation adds. Borrow the combination of visual appeal and scientific explanation when useful. The v13 builder reuses an artwork patch for its radar pair, so do not present this particular example as measured data.
+
+## 20 NeRF · Figure 2 (original selection X2)
+
+**作者反馈：** 2026-11-15：“X2 我喜欢立体感 -- 也喜欢这种 component 组合。”
+
+**Design implication:** For a mechanism that starts in physical space, use depth to show where sampling happens. Carry a recognizable element, such as the same two rays, across components so the reader can follow how a spatial input becomes a computed output.
+
+## 21 Generative Agents · Figure 1 (original selection Z3)
+
+**作者反馈：** 2026-11-15：“Z3 我觉得不错，但是就是适用性可能很差因为得更好适合的主题才能用吧？”
+
+**Design implication:** Use a shared scene when the locations of actors and events help explain the research question. The town locates each interaction shown in the enlarged windows.
+
+## 22 PaLM-E · Figure 1 (original selection Z4)
+
+**作者反馈：** 2026-11-15：“Z4 和 5 我感觉风格很像，都比较 elegant，而且有真实场景图”
+
+**Design implication:** Carry over the elegant treatment and real task photos shared with 23. In this example the central model is surrounded by tasks.
+
+## 23 RT-2 · Figure 1 (original selection Z5)
+
+**作者反馈：** 2026-11-15：“Z4 和 5 我感觉风格很像，都比较 elegant，而且有真实场景图”
+
+**Design implication:** Carry over the elegant treatment and real scene photos shared with 22. Here the photos show training examples on the left and robot actions on the right.
+
+## 24 BLIP-2 · Figure 2 (original selection Z6)
+
+**作者反馈：** 2026-11-15：“Z6 也还行，我更喜欢右边这种整齐，中间的黄色部分感觉配色不够 elegant。”
+
+**Design implication:** The whole figure is acceptable. Borrow the orderly comparison on the right and avoid copying the central yellow fill.
+
 ## Working Interpretation Across Examples
+
+The November additions pair real scenes with elegant presentation (22, 23), and use annotation to explain observations within domain imagery (18, 19). For mechanism detail inspect 20 for composed 3D views or the right panel of 24 for aligned comparisons. Use the scene in 21 when location matters to the question.
 
 **Workflow feedback, 2026-10-17:** “我发现没有经过 imagegen 或者 agy 生图的草稿的图都很没有 visual 和吸引力”。For new paper/proposal overviews, new standalone mechanism figures, and substantial redesigns, use a whole-figure generated concept before editable reconstruction, with the main skill's scoped exceptions. [Recent workflow feedback](../recent-workflow-feedback.md) records the project evidence, the strongly liked Meta center, and the later positive full-overview assessment with lower-strip optimization deferred.
 
