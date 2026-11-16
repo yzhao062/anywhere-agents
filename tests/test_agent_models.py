@@ -1147,6 +1147,143 @@ class MapTests(unittest.TestCase):
     def test_every_role_has_a_purpose(self) -> None:
         self.assertEqual(set(agent_models.PURPOSES), set(agent_models.ROLES))
 
+    def test_map_repo_reports_missing_reviewer_families_and_drops_vet_for_panels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "panel-repo"
+            panel = repo / "skills" / "panel"
+            panel.mkdir(parents=True)
+            (panel / "SKILL.md").write_text(
+                "resolve --family claude --role reviewer\n"
+                "resolve --family codex --role reviewer\n"
+                "dispatch-gemini.py --print-model\n"
+                "Run /vet afterwards.\n"
+                "Also dispatch /prun workers.\n",
+                encoding="utf-8",
+            )
+            full_panel = repo / "skills" / "full-panel"
+            full_panel.mkdir(parents=True)
+            (full_panel / "SKILL.md").write_text(
+                "resolve --family claude --role reviewer\n"
+                "resolve --family codex --role reviewer\n"
+                "resolve --family agy --role reviewer\n"
+                "resolve --family grok --role reviewer\n"
+                "Mention /vet in passing.\n",
+                encoding="utf-8",
+            )
+            single = repo / "skills" / "single"
+            single.mkdir(parents=True)
+            (single / "SKILL.md").write_text(
+                "resolve --family grok --role reviewer\n"
+                "Run /vet afterwards.\n",
+                encoding="utf-8",
+            )
+
+            with_grok = agent_models.map_repo(repo, expected_families=agent_models.FAMILIES)
+            without_grok = agent_models.map_repo(repo, expected_families=agent_models.REQUIRED_FAMILIES)
+
+        self.assertEqual(
+            with_grok["gaps"],
+            [{"file": "skills/panel/SKILL.md", "role": "reviewer", "missing": ["grok"]}],
+        )
+        self.assertEqual(without_grok["gaps"], [])
+
+        panel_readers = [(r["family"], r["role"], r["how"]) for r in with_grok["readers"]
+                         if r["file"] == "skills/panel/SKILL.md"]
+        self.assertNotIn(("*", "reviewer", "/vet"), panel_readers)
+        self.assertIn(("*", "prun-worker", "/prun"), panel_readers)
+
+        full_readers = [(r["family"], r["role"], r["how"]) for r in with_grok["readers"]
+                        if r["file"] == "skills/full-panel/SKILL.md"]
+        self.assertNotIn(("*", "reviewer", "/vet"), full_readers)
+
+        single_readers = [(r["family"], r["role"], r["how"]) for r in with_grok["readers"]
+                          if r["file"] == "skills/single/SKILL.md"]
+        self.assertIn(("*", "reviewer", "/vet"), single_readers)
+
+    def test_map_skips_agent_models_skill_and_prints_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            (repo / "skills" / "agent-models").mkdir(parents=True)
+            (repo / "skills" / "agent-models" / "SKILL.md").write_text(
+                "resolve --family codex --role reviewer\n"
+                "resolve --family agy --role reviewer\n"
+                "Run /vet.\n",
+                encoding="utf-8",
+            )
+            (repo / "skills" / "panel").mkdir(parents=True)
+            (repo / "skills" / "panel" / "SKILL.md").write_text(
+                "resolve --family claude --role reviewer\n"
+                "resolve --family codex --role reviewer\n"
+                "dispatch-gemini.py --print-model\n"
+                "Run /vet.\n",
+                encoding="utf-8",
+            )
+            reg_path = root / "agent-models.json"
+            reg_path.write_text(json.dumps(fixture_with_grok()), encoding="utf-8")
+
+            mapped = agent_models.map_repo(repo, expected_families=agent_models.FAMILIES)
+            self.assertFalse(any(r["file"].startswith("skills/agent-models/") for r in mapped["readers"]))
+
+            code, out, _ = run_main(["map", str(repo)], {"AGENT_MODELS_FILE": str(reg_path)})
+            self.assertEqual(code, 0)
+            self.assertIn(
+                "skills/panel/SKILL.md: agy/reviewer via dispatch-gemini.py --print-model; "
+                "claude/reviewer via resolver; codex/reviewer via resolver; no reader for: grok",
+                out,
+            )
+            self.assertNotIn("skills/agent-models/SKILL.md", out)
+
+            # map --json works without a loadable registry, falling back to REQUIRED_FAMILIES.
+            code_json, out_json, _ = run_main(
+                ["map", "--json", str(repo)],
+                {"AGENT_MODELS_FILE": str(root / "missing.json")},
+            )
+            self.assertEqual(code_json, 0)
+            self.assertEqual(json.loads(out_json)[0]["gaps"], [])
+
+    def test_map_expects_only_the_families_the_registry_has(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            (repo / "skills" / "panel").mkdir(parents=True)
+            (repo / "skills" / "panel" / "SKILL.md").write_text(
+                "resolve --family claude --role reviewer\n"
+                "resolve --family codex --role reviewer\n"
+                "dispatch-gemini.py --print-model\n",
+                encoding="utf-8",
+            )
+            (repo / "skills" / "pair").mkdir(parents=True)
+            (repo / "skills" / "pair" / "SKILL.md").write_text(
+                "resolve --family claude --role reviewer\n"
+                "resolve --family codex --role reviewer\n",
+                encoding="utf-8",
+            )
+            reg_path = root / "agent-models.json"
+            reg_path.write_text(json.dumps(fixture()), encoding="utf-8")
+
+            # A registry with no grok row expects no grok reader, so a three-family panel has no gap.
+            code, out, _ = run_main(["map", str(repo)], {"AGENT_MODELS_FILE": str(reg_path)})
+            self.assertEqual(code, 0)
+            panel_line = next(line for line in out.splitlines() if "skills/panel/SKILL.md" in line)
+            self.assertNotIn("no reader for", panel_line)
+            self.assertIn(
+                "skills/pair/SKILL.md: claude/reviewer via resolver; codex/reviewer via resolver; "
+                "no reader for: agy",
+                out,
+            )
+
+            # Without a loadable registry the required families are expected, never an empty set.
+            code_json, out_json, _ = run_main(
+                ["map", "--json", str(repo)],
+                {"AGENT_MODELS_FILE": str(root / "missing.json")},
+            )
+            self.assertEqual(code_json, 0)
+            self.assertEqual(
+                json.loads(out_json)[0]["gaps"],
+                [{"file": "skills/pair/SKILL.md", "role": "reviewer", "missing": ["agy"]}],
+            )
+
 
 class ScanTests(unittest.TestCase):
     def hits(self, text: str) -> list:

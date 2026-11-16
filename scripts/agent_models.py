@@ -997,14 +997,22 @@ def _map_files(repo: Path) -> list:
             continue
         if parts[-1] == "agent_models.py":           # the registry tool names every reader
             continue
+        if parts[:2] == ["skills", "agent-models"]:  # the skill documents the tool, not a reader
+            continue
         if MAP_SKIP_PARTS & set(parts[:-1]) or parts[0] == ".git" or any(DATED_PART.search(p) for p in parts):
             continue
         kept.append(name)
     return sorted(kept)
 
 
-def map_repo(repo: Path, registry_bytes: bytes | None = None) -> dict:
-    readers, launches = [], []
+def map_repo(
+    repo: Path,
+    registry_bytes: bytes | None = None,
+    expected_families: Iterable[str] = REQUIRED_FAMILIES,
+) -> dict:
+    readers, launches, gaps = [], [], []
+    expected_set = set(expected_families)
+    expected = [f for f in FAMILIES if f in expected_set]
     names = _map_files(repo)
     basenames = {name.rsplit("/", 1)[-1] for name in names}
 
@@ -1023,9 +1031,20 @@ def map_repo(repo: Path, registry_bytes: bytes | None = None) -> dict:
         except (OSError, UnicodeDecodeError):
             continue
         found, launched = map_text(text, Path(name).suffix)
-        for family, role, how in sorted(found):
-            if ships(how):
-                continue
+        file_readers = [(family, role, how) for family, role, how in sorted(found) if not ships(how)]
+        direct_reviewer = {
+            family
+            for family, role, how in file_readers
+            if role == "reviewer" and family != "*" and how not in SLASH_COMMANDS
+        }
+        if len(direct_reviewer) >= 2:
+            # A file resolving two or more reviewer rows dispatches its own panel,
+            # so a /vet mention is prose and any omitted registry family is a gap.
+            file_readers = [r for r in file_readers if r != ("*", "reviewer", "/vet")]
+            missing = [f for f in expected if f not in direct_reviewer]
+            if missing:
+                gaps.append({"file": name, "role": "reviewer", "missing": missing})
+        for family, role, how in file_readers:
             readers.append({"file": name, "family": family, "role": role, "how": how,
                             "purpose": PURPOSES[role]})
         if launched:
@@ -1040,7 +1059,7 @@ def map_repo(repo: Path, registry_bytes: bytes | None = None) -> dict:
                 same = False
             copy_state = "current" if same else "differs"
             break
-    return {"repo": repo.name, "registry_copy": copy_state, "readers": readers, "launches": launches}
+    return {"repo": repo.name, "registry_copy": copy_state, "readers": readers, "launches": launches, "gaps": gaps}
 
 
 def map_repos(paths: Iterable[str]) -> list:
@@ -1049,6 +1068,10 @@ def map_repos(paths: Iterable[str]) -> list:
         registry_bytes = registry.read_bytes()
     except OSError:
         registry_bytes = None
+    try:
+        expected_families = tuple(f for f in FAMILIES if f in load(registry)["families"])
+    except RegistryError:
+        expected_families = REQUIRED_FAMILIES
     repos: list = []
     for raw in paths:
         path = Path(raw).expanduser().resolve()
@@ -1058,7 +1081,7 @@ def map_repos(paths: Iterable[str]) -> list:
         children = sorted(c for c in path.iterdir() if c.is_dir() and not c.is_symlink()
                           and (c / ".git").exists()) if path.is_dir() else []
         repos.extend(children or ([path] if path.is_dir() else []))
-    return [map_repo(repo, registry_bytes) for repo in repos]
+    return [map_repo(repo, registry_bytes, expected_families=expected_families) for repo in repos]
 
 
 def cmd_map(args: argparse.Namespace) -> int:
@@ -1078,6 +1101,7 @@ def cmd_map(args: argparse.Namespace) -> int:
     for result in results:
         if not (result["readers"] or result["launches"]):
             continue
+        gaps_by_file = {gap["file"]: gap["missing"] for gap in result.get("gaps", [])}
         print(f"\n{result['repo']}  (registry copy: {result['registry_copy']})")
         for purpose in ("review", "general", "session"):
             rows: dict = {}
@@ -1086,7 +1110,10 @@ def cmd_map(args: argparse.Namespace) -> int:
                     rows.setdefault(reader["file"], []).append(
                         f"{reader['family']}/{reader['role']} via {reader['how']}")
             for name, found in sorted(rows.items()):
-                print(f"  {purpose:8} {name}: {'; '.join(found)}")
+                parts = list(found)
+                if purpose == "review" and name in gaps_by_file:
+                    parts.append(f"no reader for: {', '.join(gaps_by_file[name])}")
+                print(f"  {purpose:8} {name}: {'; '.join(parts)}")
         for item in result["launches"]:
             print(f"  launch   {item['file']}: {', '.join(item['launches'])}")
     if any(result["launches"] for result in results):

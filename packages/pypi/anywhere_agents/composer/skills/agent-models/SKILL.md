@@ -60,7 +60,7 @@ agent_models.py render [--check]          # keep user/settings.json equal to the
 agent_models.py set --family <family> [--role <role>] [--model <name>] [--effort <level>]
 agent_models.py set --family agy --role <role> --role-only --fallback-model <stem> [--fallback-effort <tier>]
 agent_models.py set --family claude --role advisor (--model <name> | --off)    # set or remove the advisor row
-agent_models.py map <dir>...              # which skills and scripts read which row, per repository
+agent_models.py map <dir>...              # which skills and scripts read which row; a file that resolves two or more reviewer rows gets its missing families listed
 agent_models.py actual --family <family> (--session-id ID | --stderr-file F | --log-file F | --json-file F)
 ```
 
