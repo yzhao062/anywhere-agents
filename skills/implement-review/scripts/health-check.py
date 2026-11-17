@@ -732,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
         r"^#{1,6}\s+Verification notes\b",
         r"^\*\*Verification notes[.:]?\*\*",
         r"Verification notes[.:]",
+        r"^[ \t]*Verification notes[ \t]*$",
     ]
     if any(re.search(p, review_text, re.MULTILINE | re.IGNORECASE) for p in vn_patterns):
         emit("PASS", "check-5", "verification-notes-present")

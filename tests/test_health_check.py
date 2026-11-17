@@ -293,6 +293,22 @@ class HealthCheckPython(unittest.TestCase):
             parsed = parse_output(result.stdout)
             self.assertEqual(parsed["check-5"][0], "PASS")
 
+    def test_check5_accepts_bare_label_line(self) -> None:
+        # The request template says "Begin with Verification notes listing
+        # exact commands and outcomes", and a Grok review wrote it that way.
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Grok.md"
+            make_review(
+                review,
+                include_verification_notes=False,
+                extra_body="Verification notes\n\n- `python -m unittest`: OK\n",
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(parsed["check-5"][0], "PASS")
+
     # ----- Check 6: scope correspondence -----
     def test_check6_prompt_files_not_mentioned_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
