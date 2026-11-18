@@ -12,7 +12,7 @@ Use that mapping to determine composition, visual variety, technical detail, col
 
 For domain-image annotation inspect 18 and 19. Use 20 for depth and component composition, and 21 when a shared location explains the topic. Compare 22 and 23 for elegant treatment with real scene photos. Use 24 for its orderly right panel.
 
-Also read [recent workflow feedback](../recent-workflow-feedback.md) for the 2026-10-17 concept-first preference, the Meta central illustration (16), the full overview (17), and cross-project reconstruction failures. The center is strongly liked, and the full figure is now a positive reference with explicit approval of the upper part. Optimization of the lower strip is deferred.
+Also read [recent workflow feedback](../recent-workflow-feedback.md) for the 2026-11-18 concept-selection gate, the 2026-10-17 concept-first preference, the Meta central illustration (16), the full overview (17), and cross-project reconstruction failures. The center is strongly liked, and the full figure is now a positive reference with explicit approval of the upper part. Optimization of the lower strip is deferred.
 
 Carry the mapping and available reference images into every authorized generator's brief and into the implementation plan. Actively imitate the approved visual qualities with the current project's own concepts, notation, data, and relevant logos. Preserve meaningful equations, real plots, and 3D objects when they serve the story. Do not invent results, affiliations, or mechanisms to reproduce a reference's appearance.
 

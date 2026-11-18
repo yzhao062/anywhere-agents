@@ -2,11 +2,19 @@
 
 Merged into the canonical skill on 2026-10-17 from `internal-writing/figure-preferences/index.md`, `NSF-Proposal-Template-Yue/figure-preferences/index.md`, and the associated figure revision records. These are Yue Zhao's preferences. Direct feedback is separate from design interpretation; accepted scientific content and reviewer PASS do not establish visual approval.
 
+## Multiple Concepts Before Reconstruction, 2026-11-18
+
+**Author feedback:** After requesting five complete AFOSR YIP overview concepts, the author said: “我觉得 1 是这几个里面最 clear 的”, and asked that the skill require presenting multiple versions before drawing.
+
+**Application:** The main skill's concept-selection gate owns the procedure. Five is the default batch size drawn from this iteration; a user-specified count or explicit waiver takes precedence. Concept 1 was preferred for clarity among this set, which does not approve every detail or establish a universal visual style.
+
+Project record: `NSF-Proposal-Template-Yue/proposals/afosr-yip-2026-due-1009/figure/full/concepts-five-2026-11-17/concept-1.png` and `NSF-Proposal-Template-Yue/figure-preferences/afosr-overview-2026-11-17.json`.
+
 ## Confirmed workflow preference, 2026-10-17
 
 **作者反馈：** “我发现没有经过 imagegen 或者 agy 生图的草稿的图都很没有 visual 和吸引力”。
 
-**Application:** Default new paper/proposal overviews, new standalone mechanism figures, and substantial redesigns to a whole-figure image-generation concept before native reconstruction. This records the author's experience and desired workflow, not a controlled comparison proving that one backend or image generation always wins. Keep accepted compositions during local edits. Apply the exceptions and authorization boundaries in the main skill.
+**Application:** Default new paper/proposal overviews, new standalone mechanism figures, and substantial redesigns to a whole-figure image-generation concept before native reconstruction. This records the author's experience and desired workflow, not a controlled comparison proving that one backend or image generation always wins. Keep accepted compositions during local edits. The main skill now owns the concept count and selection gate, as well as exceptions and authorization boundaries.
 
 ## Meta: preferred central illustration and full overview
 
