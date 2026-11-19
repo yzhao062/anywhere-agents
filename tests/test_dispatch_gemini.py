@@ -443,6 +443,12 @@ class DispatchGeminiUnitTests(unittest.TestCase):
         self.assertTrue(
             self.module.has_review_structure(f"{whole}\n{fence}text\nexample\n{fence}\n", 6)
         )
+        # Each closing fence ends its span, so a status line between two
+        # fenced blocks stays visible.
+        between = whole.replace(
+            status, f"{fence}text\nexample\n{fence}\n\n{status}\n\n{fence}text\nexample\n{fence}"
+        )
+        self.assertTrue(self.module.has_review_structure(between, 6))
         # Backtick runs match whole. A four-backtick inline span that quotes a
         # fence ahead of the status line does not hide it, and a four-backtick
         # fence holding a template with three-backtick fences hides all of it.
@@ -456,7 +462,7 @@ class DispatchGeminiUnitTests(unittest.TestCase):
                 f"{quoted_fence}\n{fence}python\nprint(1)\n{fence}\n", 6
             )
         )
-        template = f"{fence}text\nexample\n{fence}\n{whole}"
+        template = f"{fence}markdown\n{whole}{fence}\n"
         self.assertFalse(
             self.module.has_review_structure(
                 f"<!-- Round 6 -->\n\nStill reading.\n\n{long_fence}markdown\n"
@@ -1036,6 +1042,11 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         env.pop("MOCK_AGY_ACTUAL_LABEL", None)
         env.pop("MOCK_AGY_NO_LOG", None)
         env.pop("IMPLEMENT_REVIEW_ORCHESTRATOR", None)
+        # A per-run override in the caller's shell would replace the registry
+        # row or the preflight these cases rely on, so only a test that sets
+        # one gets it.
+        for name in ("ANTIGRAVITY_DISPATCH_MODEL", "ANTIGRAVITY_DISPATCH_EFFORT", "ANTIGRAVITY_PREFLIGHT"):
+            env.pop(name, None)
         # An inherited status would silently rewrite what the status-free
         # cases below are covering, so only a test that asks for one gets it.
         env.pop("MOCK_AGY_STATUS", None)

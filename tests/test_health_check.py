@@ -606,10 +606,13 @@ class HealthCheckPython(unittest.TestCase):
                 '{"text":"```text\\n' + marker + '\\n```"}\n'
             ),
             "double-backtick span holding a backtick": (
-                f"Quoted ``a ` {marker}`` here.\n"
+                f"Quoted ``{marker} ` a`` here.\n"
             ),
         }
         shown = {
+            "between two single-backtick spans": (
+                f"Ran `first` then {marker} while fetching `second`.\n"
+            ),
             "after three single backticks": f"`example` then ` {marker}\n",
             "after an unpaired four-backtick run": f"```` example\n{marker}\n",
             "between a quoted fence and a fenced example": (
@@ -1336,6 +1339,32 @@ class HealthCheckPython(unittest.TestCase):
                     "display.\n\n"
                     "Verification status: VERIFIED\n\n"
                     "Example:\n\n```python\nprint(1)\n```\n\n"
+                    "Commit verdict: BLOCK"
+                ),
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(parsed["check-10"][0], "PASS")
+            self.assertIn("verdict=BLOCK verification=VERIFIED", parsed["check-10"][1])
+
+    def test_check10_reads_the_status_between_two_fenced_blocks(self) -> None:
+        """Each closing fence ends its span.
+
+        A scan that resumed at the closing run would read it as the opener of
+        a span to the next fenced block and take the status line between the
+        two blocks with it.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Antigravity.md"
+            make_review(
+                review,
+                extra_body=(
+                    "Before:\n\n```text\nexample\n```\n\n"
+                    "Verification status: VERIFIED\n\n"
+                    "After:\n\n```text\nexample\n```\n\n"
                     "Commit verdict: BLOCK"
                 ),
             )

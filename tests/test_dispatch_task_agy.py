@@ -870,8 +870,12 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         target = result_path or (self.root / "unit-result.md")
         env = os.environ.copy()
-        # The default-argv assertions must not inherit an operator's opt-in.
-        env.pop("PRUN_AGY_SANDBOX", None)
+        # The default-argv assertions must not inherit an operator's opt-in,
+        # and a per-run override would replace the registry row or the
+        # preflight these cases rely on, so only a test that sets one gets it.
+        for name in ("PRUN_AGY_SANDBOX", "ANTIGRAVITY_DISPATCH_MODEL",
+                     "ANTIGRAVITY_DISPATCH_EFFORT", "ANTIGRAVITY_PREFLIGHT"):
+            env.pop(name, None)
         env.update(
             {
                 "ANTIGRAVITY_BIN": str(self.mock),
