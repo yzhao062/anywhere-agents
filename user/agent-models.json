@@ -11,7 +11,7 @@
       "effort": "medium"
     },
     "agy": {
-      "model": "gemini-4-argon",
+      "model": "gemini-4-neon",
       "effort": "high",
       "fallback_model": "gemini-4-hydrogen"
     },
@@ -24,10 +24,8 @@
     "interactive": {},
     "reviewer": {
       "agy": {
-        "model": "gemini-4-carbon",
-        "effort": "medium",
-        "fallback_model": "gemini-4-argon",
-        "fallback_effort": "high"
+        "fallback_model": "gemini-4-carbon",
+        "fallback_effort": "medium"
       }
     },
     "premium": {
