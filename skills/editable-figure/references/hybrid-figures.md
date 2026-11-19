@@ -1,6 +1,6 @@
 # Hybrid Figures and Concept Generation
 
-For new paper/proposal overviews, standalone mechanism figures, and substantial redesigns, explore visual expression before committing to PowerPoint geometry. For Yue Zhao, follow the mandatory [concept-selection gate](../SKILL.md#choose-how-to-draft): present multiple complete generated concepts and wait for author selection before reconstruction. One authorized generator can produce the entire set. Keep the main skill's source analysis, palette, print-size, and native PowerPoint checks. Small revisions can reuse the accepted composition.
+For new paper/proposal overviews, standalone mechanism figures, and substantial redesigns, explore visual expression before committing to PowerPoint geometry. For Yue Zhao, follow the mandatory concept-selection gate under "Choose how to draft" in `SKILL.md`: present multiple complete generated concepts and wait for author selection before reconstruction. One authorized generator can produce the entire set. Keep the main skill's source analysis, palette, print-size, and native PowerPoint checks. Small revisions can reuse the accepted composition.
 
 ## Generate the Composition Before Rebuilding
 
