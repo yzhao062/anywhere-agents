@@ -155,9 +155,9 @@ The first module governs a reply to a person; the other two govern a file, and d
 
 ## Task Routing
 
-- Before starting a task, read the router skill (`my-router`, resolved through the lookup order) to pick the domain skill; it inspects prompt keywords, file types, and project structure. Do not ask the user which skill to use when the routing table gives a clear match; when several skills could apply, state the detected context and the proposed skill, then ask. If the `superpowers` plugin is active, it runs the outer workflow and the router dispatches inside the execution phase.
-- `/vet` (alias of `implement-review`) is the review entry point for staged changes and for plan review.
-- Do not fan work out across subagents or a Workflow run on your own initiative; those workers bill the account the session runs on. When parallel work would help, propose it and let the user choose between `prun` (units run on Agy) and a Workflow. Honor a route the user already chose for the current task without asking again. A single helper agent for a bounded lookup is not a fan-out.
+- Before starting a task, read the router skill (`my-router`, through the lookup order) to pick the domain skill from prompt keywords, file types, and project structure. Do not ask which skill to use when the routing table gives a clear match; when several could apply, state the detected context and the proposed skill, then ask. The `superpowers` plugin, when active, runs the outer workflow, and the router dispatches during execution.
+- `/polish`, when installed, is the entry for drafting or revising prose a person will read; `/vet` (alias of `implement-review`) is the review entry for staged changes and plans.
+- Do not fan work out across subagents or a Workflow run on your own initiative; those workers bill the session's account. When parallel work would help, propose it and let the user choose between `prun` (units run on Agy) and a Workflow. Honor a route the user already chose for the task without asking again. A single helper agent for a bounded lookup is not a fan-out.
 
 ## Memory and Persistence
 
