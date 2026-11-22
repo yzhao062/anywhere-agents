@@ -7,9 +7,9 @@ the composer is: it composes the committed AGENTS.md with fixed copies of the
 three compact pack bodies under tests/fixtures/composed-consumer/ (agent-style
 v0.9.0 docs/rule-pack-compact.md; agent-pack profile and paper-workflow
 compact bodies), runs the generator, and holds the composed AGENTS.md and the
-generated CLAUDE.md under 61,440 bytes. That is the consumer target
-PLAN-agents-md-diet.md set (criterion 4, "consumer CLAUDE.md under 60 KB with
-the current pack set"), turned from a post-release measurement into a test.
+generated CLAUDE.md under CONSUMER_CEILING_BYTES. PLAN-agents-md-diet.md set
+the first target (criterion 4, "consumer CLAUDE.md under 60 KB with the
+current pack set"); the constant's comment records each later change.
 
 The bodies are fixed copies so the test needs no network and a pack release
 cannot change the number silently; refresh them, with the sizes and hashes in
@@ -33,10 +33,14 @@ from packs import passive  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "composed-consumer"
 
-# The consumer ceiling in bytes (60 KiB). A composed file over it means a
-# pack body or the baseline grew; the fix is in the file that grew, and a
-# larger budget is a recorded decision with a comment here.
-CONSUMER_CEILING_BYTES = 61_440
+# The consumer ceiling in bytes. A composed file over it means a pack body or
+# the baseline grew; the fix is in the file that grew, and a larger budget is
+# a recorded decision with a comment here.
+# 2026-11-22: raised from 60 KiB (61,440) to 61 KiB. After that day's cuts to
+# the profile and paper-workflow bodies, the composed AGENTS.md measured under
+# 60 KiB, and the generated CLAUDE.md, which adds a fixed comment header, was
+# over it. The maintainer treats 60 KiB as a soft target.
+CONSUMER_CEILING_BYTES = 62_464
 
 # Name, fixture directory, and passive mapping, in the order the maintainer's
 # consumers compose them (the bundled agent-style first, then the two

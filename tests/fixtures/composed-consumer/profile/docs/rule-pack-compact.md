@@ -11,13 +11,8 @@ Project-specific and task-specific instructions override these bullets when they
 
 ## Identity
 
-- Yue Zhao, Computer Science faculty at the University of Southern California (USC).
-- Research focus: machine learning, anomaly detection, outlier ensembles, automated tabular ML, and applied AI for science.
-- Personal site: <https://yzhao062.github.io>. Author name for citations: "Yue Zhao" (Yue is the given name, Zhao the family name).
-
-## Public Projects
-
-PyOD and PyGOD are anomaly detection libraries (tabular and graph). The public agent configuration with pack architecture is anywhere-agents, with agent-config as its canonical source. This pack, agent-pack, is the reference example for third-party pack authors, and agent-style is the writing rule pack. All are under github.com/yzhao062 except pygod-team/pygod.
+- Yue Zhao, Computer Science faculty at the University of Southern California (USC). Author name for citations: "Yue Zhao" (Yue is the given name, Zhao the family name).
+- For current research and projects, read the personal site <https://yzhao062.github.io> and <https://github.com/yzhao062>.
 
 ## Communication Preferences
 
@@ -26,18 +21,14 @@ PyOD and PyGOD are anomaly detection libraries (tabular and graph). The public a
 - Pacific Time (Los Angeles).
 - Direct over diplomatic. Flag disagreements explicitly rather than soften them; a fast back-and-forth beats a cushioned monologue.
 
-## Common Tasks and Venue Conventions
-
-- **Research papers.** NeurIPS, ICML, ICLR, KDD, and the NeurIPS Datasets and Benchmarks track by default; ACL / EMNLP for NLP work; CVPR / ICCV for vision.
-- **Funding proposals.** NSF Merit Review framework by default; NIH Simplified Peer Review when the call is biomedical; DOE / DOD only on explicit request. Avoid DEI-related terms in NSF / federal proposals unless the solicitation explicitly requires them.
-- **Reviews.** Papers and proposals go through `/vet` like code, with content-type lenses.
-
 ## Tools and Stack
 
 - Python primary; Miniforge `py312` environment by default.
 - LaTeX for papers and proposals; Markdown for documentation; reStructuredText where Sphinx is in play.
 - Claude drafts prose a person will read (paper and proposal text, abstracts, emails, documentation). Agy, prun units, and Codex do not; a Codex or Agy coordinator hands that draft to Claude or the user. A Codex or Agy reviewer's suggested wording marks the problem; Claude writes the fix.
-- macOS, Windows, and Linux all in active use; PyCharm and VS Code as editors.
+- macOS by default; PyCharm and VS Code as editors.
+- `~/PycharmProjects/research-compute` (private repo <https://github.com/yzhao062/research-compute>) documents the lab's GPUs, model APIs, and credits. Read its `RESOURCE-GUIDE.md` before treating a resource as unavailable or paying for a commercial API.
+- `~/PycharmProjects/research-data/`, a local folder with no remote, holds long-lived files kept out of git (results, archives, backups, dataset caches). Read its `README.md` before downloading a corpus again, recomputing a listed result, or choosing where a new long-lived result goes. If the folder is missing, say so and do not recreate it.
 
 ## Decision-Support Stance
 
@@ -54,5 +45,6 @@ Loop control: after plan-review or several rounds on the same point, challenge o
 
 ## Defaults Agents Should Follow
 
+- Papers and proposals go through `/vet` like code, with content-type lenses.
 - Mark a citation `[UNVERIFIED]` when it cannot be verified, and never invent BibTeX venue or year fields.
-- Treat `agent-style` as binding for `.md` / `.tex` / `.rst` / `.txt` writes; for a paper or proposal abstract, introduction, or conclusion, also load `author-voice` if installed.
+- Treat `agent-style` as binding for `.md` / `.tex` / `.rst` / `.txt` writes. When `polish` is installed, it is the one entry for writing: the writer named above runs it whenever drafting or revising prose a person will read, papers and proposals included, even when the user names no skill. It applies `agent-style`, `author-voice`, and the review lenses; typo, citation, and single-word fixes skip it. Without `polish`, apply `author-voice`, when installed, to each paper or proposal section drafted or revised. Ask the user before applying `author-voice` when a paper's lead author appears to be someone else.

@@ -1,21 +1,21 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
 <!--
-Compact paper-workflow pack: submodule, Overleaf merge, venue, and
-revision rules for paper and proposal repos. docs/paper-workflow.md is the full reference.
+Compact paper-workflow pack: submodule, Overleaf merge, venue,
+revision, and research-design rules for paper and proposal repos. docs/paper-workflow.md is the full reference.
 -->
 
 # Paper and Proposal Workflow
 
-The submodule and Overleaf rules apply when the project has a `.gitmodules` file or an Overleaf-synced subdirectory; the venue and revision rules apply to any paper or proposal. Skip them all on prototype and OSS repos.
+The submodule and Overleaf rules apply when the project has a `.gitmodules` file or an Overleaf-synced subdirectory; the venue, revision, and research-design rules apply to any paper or proposal. Skip them all on prototype and OSS repos.
 
 ## Submodule Workflow
 
 - At session start, if `.gitmodules` exists, run `git submodule status`. An uninitialized submodule (prefix `-`) gets a warning and the suggestion `git submodule update --init`.
 - A submodule has its own `.git` and `origin`; commits and pushes inside it go to the submodule's upstream, not the parent.
-- Submodules are shared repos: a push lands in a collaborator's Overleaf project or co-PI repo, and a careless force-push or overwrite destroys someone else's work. Treat every write inside a submodule as high-risk.
+- Treat every write inside a submodule as high-risk: a push can land in a collaborator's Overleaf project or co-PI repo, and a careless force-push or overwrite can destroy someone else's work.
 - When the user asks to push or pull a submodule:
-  1. Before writing, run `git -C <submodule-path> fetch` and `status` for uncommitted changes, then `log --oneline -5` with and without `--remotes` for recent activity. This is a quick sanity check; a submodule is often in detached-HEAD state, where branch comparisons do not apply cleanly.
+  1. Before writing, run `git -C <submodule-path> fetch` and `status` for uncommitted changes, then `log --oneline -5` with and without `--remotes` for recent activity. A submodule is often in detached-HEAD state, where branch comparisons do not apply cleanly.
   2. Use `git -C <submodule-path>` inside the submodule, and confirm with the user before any commit, push, pull, or reset.
   3. Back in the parent repo, `git add <submodule-path>` and commit the updated pointer (also with confirmation).
 - A submodule's `.gitignore` may exclude internal-only directories (`.agent/`, `guardrail/`, `figure-spec/`, `figure-src/`); they exist on disk but are not pushed, so a fresh clone lacks them. Warn the user when an expected internal directory is absent.
@@ -23,7 +23,7 @@ The submodule and Overleaf rules apply when the project has a `.gitmodules` file
 
 ## Overleaf Merge Conflict Resolution
 
-Overleaf's git bridge branches from its own snapshot, which may lag behind the latest local push. When a collaborator edits on Overleaf while we push structural changes locally, "theirs" in the merge means the older base plus the collaborator's edits. Taking that side with `git checkout --theirs` silently discards our work. Co-PI changes are the priority: our structural work (compaction, renames) can be redone in minutes, while a co-PI's content edits are their intellectual contribution and a silent drop goes unnoticed. Preserve both sides, and when in doubt, err toward the co-PI's content.
+The Overleaf bridge branches from a snapshot that can lag our latest push, so after a local structural push, "theirs" in a merge can be the older base plus the collaborator's edits. Preserve both sides, and when in doubt, favor the co-PI's content.
 
 ### Rules for Merging Overleaf Branches with Conflicts
 
@@ -44,11 +44,11 @@ Overleaf's git bridge branches from its own snapshot, which may lag behind the l
 
 ### Recovery if `--theirs` Was Already Used
 
-Restore our structural version with `git restore --source=<pre-merge-commit> --worktree -- <file>` (shell redirection on Windows brings encoding and line-ending issues), then reapply the collaborator's content and formatting changes on top. The reapply step is part of the recovery.
+Restore our structural version with `git restore --source=<pre-merge-commit> --worktree -- <file>`, then reapply the collaborator's content and formatting changes on top.
 
 ## Venue Conventions
 
-For NSF and federal proposals, do not introduce DEI-related terms unless the solicitation explicitly requires them; a non-federal call that asks for DEI framing gets it. NSF Merit Review framework by default (intellectual merit and broader impacts); NIH Simplified Peer Review on biomedical proposals. For papers, follow the venue's own guidelines (NeurIPS, ICML, ICLR, KDD, ACL, EMNLP, CVPR), and generate venue-specific formatting (camera-ready, anonymous version) only when asked.
+For NSF and federal proposals, do not introduce DEI-related terms unless the solicitation explicitly requires them; a non-federal call that asks for DEI framing gets it. NSF Merit Review framework by default (intellectual merit and broader impacts); NIH Simplified Peer Review on biomedical proposals; DOE or DOD frameworks only on explicit request. For papers, follow the venue's own guidelines (NeurIPS, ICML, ICLR, KDD, ACL, EMNLP, CVPR), and generate venue-specific formatting (camera-ready, anonymous version) only when asked.
 
 ## Revision Discipline
 
@@ -56,3 +56,7 @@ For NSF and federal proposals, do not introduce DEI-related terms unless the sol
 2. **Keep the main text for the story.** Defenses against objections no reader raised, the project's path to a result, and small negative results off the main line go to the records. Main text grows only for a new result or for what a reader needs to follow or check a retained claim.
 3. **Report the trend.** State the main pattern and how widely it holds. Report a statistical test only where the claim depends on it; qualify only where it changes the conclusion. A retained robustness check or estimator detail that leaves a claim unchanged gets one main-text clause and an appendix, unless readers or the venue need more.
 4. **Change direction only on purpose.** Run an experiment only if it can change a headline claim or a main table row. Before a finding narrows or reframes the story, state what it cuts and ask the author. Once AI panel scores stop moving, the next readers are people.
+
+## Research Design
+
+Observe first, then explain. Add or extend a preregistration only if the user asks or a venue requires it. That covers any hypothesis, prediction, analysis plan, threshold, or reporting or failure rule written before a run that decides whether to run or what to report. "Decide in advance what we write if X" counts. Ground the trust in a framework, benchmark, or protocol a paper proposes in who produces its evidence or in an existing institution. A promise made before the data cannot supply that ground. When a result breaks the story, run the experiment that separates the confounded factors, run it broadly, and explain what comes out. Check the explanation on new models or data as part of understanding it, without gating further work on that check. A post hoc explanation is fine. Settle a reframing once, after the evidence, and say which parts are confident. Keep existing preregistrations as history and report them honestly where a paper relies on them.

@@ -37,6 +37,8 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ### Changed
 
+- **The composed consumer budget rose from 60 to 61 KiB.** Fixtures for `tests/test_composed_consumer_size.py` now copy the current `agent-pack` profile and `paper-workflow` bodies, which no longer carry an outdated research description, the project list, default venues, or some background prose. With those cuts the composed `AGENTS.md` is back under 60 KiB, while the generated `CLAUDE.md` adds a fixed comment header and stays just over it. 60 KiB remains a soft target for the maintainer.
+
 - **The Paper lens asks for a story and a lean appendix.** Item 4 asks whether the introduction builds to the paper's answer as a story or lists what the work did. The preamble says an appendix holds what a reader needs to understand, check, or reproduce a main-text claim, and that run records and implementation detail that serve no such claim belong in the repository.
 - **`/polish` is the entry for writing.** The `acad-skills` pack in `agent-pack` supplies `/polish` for drafting and revising prose, and Task Routing in `AGENTS.md` names it beside `/vet` for review.
 - **The Paper lens judges a style revision by what it loses.** The preamble counted a rewrite of most sentences as a regression, which held `/polish` in `agent-pack` to small edits. A style revision now regresses when it loses or shifts a retained claim or its support, flattens the author's voice into sentences of one length and shape, turns every semicolon into a period, removes a value the retained text still needs, or pushes a section past the page limit.
