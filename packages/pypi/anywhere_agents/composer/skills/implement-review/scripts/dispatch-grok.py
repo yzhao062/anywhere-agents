@@ -16,6 +16,7 @@ executes in or mutates the caller's working tree or Git index. Enforces:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -1002,6 +1003,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
+    with contextlib.ExitStack() as cleanup:
+        return dispatch(argv, cleanup)
+
+
+def dispatch(argv: list[str], cleanup: contextlib.ExitStack) -> int:
     try:
         args = parse_args(argv)
     except SystemExit as exc:
@@ -1120,6 +1126,10 @@ def main(argv: list[str]) -> int:
     sys.stdout.write(f"STATE-DIR {state_dir.resolve()}\n")
     sys.stdout.flush()
 
+    # The snapshot is a whole copy of the Git index, and nothing reads it once
+    # the reviewer has exited. Left in place, one per reviewer per round filled
+    # the temp volume. The rest of the state directory stays.
+    cleanup.callback(shutil.rmtree, state_dir / "staged-snapshot", ignore_errors=True)
     snapshot_info = prepare_snapshot(cwd, state_dir)
     if snapshot_info is None:
         sys.stderr.write(

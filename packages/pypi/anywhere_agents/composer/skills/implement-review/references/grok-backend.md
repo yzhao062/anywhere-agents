@@ -48,6 +48,7 @@ Because `--always-approve` authorizes tool calls inside `--cwd`, `dispatch-grok.
 1. Unless `IMPLEMENT_REVIEW_ALLOW_STAGED_DRIFT=1`, the dispatcher verifies that no staged path also has unstaged edits in the working tree (exiting `2` on drift).
 2. It exports the Git index to `<state-dir>/staged-snapshot` via `git -c core.longpaths=true checkout-index -a --prefix=<state-dir>/staged-snapshot/` and captures `git diff --cached --no-ext-diff`.
 3. It runs Grok with `--cwd <state-dir>/staged-snapshot`. The original worktree and Git index remain unchanged.
+4. It deletes `<state-dir>/staged-snapshot` when it exits, whatever the outcome of the round, and leaves the rest of the state directory in place.
 
 The relay prompt at `<state-dir>/prompt-relay` wraps the caller's prompt with:
 

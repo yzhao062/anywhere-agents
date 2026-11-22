@@ -91,7 +91,7 @@ def _temp_dir():
 MOCK_CLAUDE_PY = r'''"""Mock claude stub for dispatch-claude tests.
 
 Behavior driven by env vars (all optional):
-  MOCK_CLAUDE_LOG     directory to write args/cwd/stdin files into (default cwd)
+  MOCK_CLAUDE_LOG     directory to write args/cwd/cwd-files/stdin files into (default cwd)
   MOCK_CLAUDE_EXIT    integer exit code to return (default 0)
   MOCK_CLAUDE_STDOUT  text written to stdout (default "mock-claude: stdout\n")
   MOCK_CLAUDE_STDERR  text written to stderr (default "mock-claude: stderr\n")
@@ -131,6 +131,10 @@ if _actual_model and _config_dir and "--session-id" in sys.argv:
 
 with open(os.path.join(log_dir, "cwd"), "w", encoding="utf-8") as f:
     f.write(os.getcwd())
+
+# What the reviewer could see: the snapshot is gone once the dispatcher exits.
+with open(os.path.join(log_dir, "cwd-files"), "w", encoding="utf-8") as f:
+    f.write(json.dumps(sorted(os.listdir(os.getcwd()))))
 
 # Read any stdin and record it: the Claude backend delivers the prompt via
 # stdin redirection, so this captures the prompt body for assertion. Use
@@ -227,6 +231,21 @@ def _registry_reviewer(directory: Path) -> tuple[str, str]:
     """The reviewer model and effort the tmp registry resolves to."""
     row = agent_models.resolve("claude", "reviewer", agent_models.load(directory / REGISTRY_NAME))
     return row["model"], row["effort"]
+
+
+def break_snapshot_export(repo: Path, name: str) -> None:
+    """Make the index export fail at `name` while `git diff --cached` still
+    works: a required smudge filter runs only when a file is written out,
+    so the files that sort before `name` are exported first."""
+    for key, value in (
+        ("filter.broken.clean", "cat"),
+        ("filter.broken.smudge", "false"),
+        ("filter.broken.required", "true"),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=repo, check=True)
+    attributes = repo / ".git" / "info" / "attributes"
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    attributes.write_text(f"{name} filter=broken\n", encoding="utf-8")
 
 
 class _DispatchContractMixin:
@@ -1115,6 +1134,100 @@ class _DispatchContractMixin:
                              f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
             self.assertTrue((log_dir / "args").exists())
 
+    def _staged_repo(self, tmpdir: Path) -> Path:
+        """A repository beside the fixture with two committed files and a
+        staged change to the one that sorts last."""
+        repo = tmpdir / "repo"
+        repo.mkdir()
+        (repo / "a-first.txt").write_text("unchanged\n", encoding="utf-8")
+        (repo / "tracked.txt").write_text("line 1\n", encoding="utf-8")
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "test@example.com"],
+            ["git", "config", "user.name", "Test User"],
+            ["git", "add", "a-first.txt", "tracked.txt"],
+            ["git", "commit", "-q", "-m", "initial"],
+        ):
+            subprocess.run(
+                cmd, cwd=repo, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        (repo / "tracked.txt").write_text("line 1\nline 2 staged\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tracked.txt"], cwd=repo, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return repo
+
+    def _run_in_repo(self, tmpdir: Path, repo: Path, **kwargs) -> subprocess.CompletedProcess[str]:
+        """Dispatch from `repo` with the state-dir, registry, and Claude
+        config kept beside it under `tmpdir`."""
+        claude, prompt, log_dir = self._fresh_fixture(tmpdir)
+        return self._run_dispatch(
+            repo, prompt, "1", "Review-Claude-Code.md", claude, log_dir,
+            extra_env={
+                "TMPDIR": str(tmpdir),
+                "TEMP": str(tmpdir),
+                "TMP": str(tmpdir),
+                "AGENT_MODELS_FILE": str(tmpdir / REGISTRY_NAME),
+                "CLAUDE_CONFIG_DIR": str(tmpdir / "claude-config"),
+            },
+            **kwargs,
+        )
+
+    def test_the_snapshot_is_removed_once_the_reviewer_has_exited(self) -> None:
+        """The snapshot is a whole copy of the index, and one left behind per
+        reviewer per round filled the temp volume. The reviewer still ran in
+        it, and the records the health check reads stay."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            repo = self._staged_repo(tmpdir)
+            result = self._run_in_repo(tmpdir, repo)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state_dir = _parse_state_dir(result.stdout)
+            log_dir = tmpdir / "mock-log"
+            reviewer_cwd = Path((log_dir / "cwd").read_text(encoding="utf-8").strip())
+            self.assertEqual(reviewer_cwd.name, "staged-snapshot")
+            seen = json.loads((log_dir / "cwd-files").read_text(encoding="utf-8"))
+            self.assertEqual(seen, ["a-first.txt", "tracked.txt"])
+            self.assertFalse((state_dir / "staged-snapshot").exists())
+            for name in ("review-model", "tail", "prompt-relay", "timestamp"):
+                self.assertTrue((state_dir / name).is_file(), name)
+
+    def test_a_failed_reviewer_leaves_no_snapshot(self) -> None:
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            repo = self._staged_repo(tmpdir)
+            result = self._run_in_repo(tmpdir, repo, exit_code=3)
+            self.assertNotEqual(result.returncode, 0)
+            state_dir = _parse_state_dir(result.stdout)
+            self.assertFalse((state_dir / "staged-snapshot").exists())
+            self.assertTrue((state_dir / "tail").is_file())
+
+    def test_a_failed_export_removes_the_partial_snapshot_and_not_the_repo(self) -> None:
+        """When the export fails the reviewer runs in the repository itself, so
+        the removal must name the snapshot and never the directory it ran in."""
+        with _temp_dir() as td:
+            tmpdir = Path(td)
+            repo = self._staged_repo(tmpdir)
+            break_snapshot_export(repo, "tracked.txt")
+            result = self._run_in_repo(tmpdir, repo)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state_dir = _parse_state_dir(result.stdout)
+            self.assertIn(
+                "staged snapshot export failed",
+                (state_dir / "git-diff.stderr").read_text(encoding="utf-8"),
+            )
+            reviewer_cwd = (tmpdir / "mock-log" / "cwd").read_text(encoding="utf-8").strip()
+            self.assertTrue(os.path.samefile(reviewer_cwd, repo))
+            self.assertFalse((state_dir / "staged-snapshot").exists())
+            self.assertEqual(
+                (repo / "tracked.txt").read_text(encoding="utf-8"),
+                "line 1\nline 2 staged\n",
+            )
+            self.assertTrue((repo / "a-first.txt").is_file())
+            self.assertTrue((repo / ".git").is_dir())
+
     def test_supplied_plan_reaches_a_snapshot_reviewer_once_with_the_boundary_stated(self) -> None:
         with _temp_dir() as td:
             tmpdir = Path(td)
@@ -1183,7 +1296,9 @@ class _DispatchContractMixin:
             )
             reviewer_cwd = Path((log_dir / "cwd").read_text(encoding="utf-8").strip())
             self.assertEqual(reviewer_cwd.name, "staged-snapshot")
-            self.assertFalse((reviewer_cwd / "PLAN-diet.md").exists())
+            seen = json.loads((log_dir / "cwd-files").read_text(encoding="utf-8"))
+            self.assertIn("tracked.txt", seen)
+            self.assertNotIn("PLAN-diet.md", seen)
 
             relay = self._read_stdin(log_dir)
             self.assertEqual(relay.count("--- SUPPLIED INPUT: PLAN-diet.md ---"), 1)

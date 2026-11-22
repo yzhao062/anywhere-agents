@@ -889,6 +889,11 @@ def tail_to_stderr(path: Path, count: int = 80) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    with contextlib.ExitStack() as cleanup:
+        return dispatch(argv, cleanup)
+
+
+def dispatch(argv: list[str] | None, cleanup: contextlib.ExitStack) -> int:
     try:
         args = parse_args(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
@@ -1008,6 +1013,10 @@ def main(argv: list[str] | None = None) -> int:
     effort = effort_for(model, effort)
     record_request(state_dir, model, effort)
 
+    # The snapshot is a whole copy of the Git index, and nothing reads it once
+    # the reviewer has exited. Left in place, one per reviewer per round filled
+    # the temp volume. The rest of the state directory stays.
+    cleanup.callback(shutil.rmtree, state_dir / "staged-snapshot", ignore_errors=True)
     validation_dir, diff_text, _ = prepare_snapshot(cwd, state_dir)
     if validation_dir is None:
         print(

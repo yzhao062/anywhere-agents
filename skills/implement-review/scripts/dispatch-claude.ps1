@@ -539,29 +539,36 @@ try {
 } catch {
     $diffText = 'dispatch-claude: git diff --cached failed before invocation'
 }
-[System.IO.File]::WriteAllText($diffPath, ($diffText + "`n"), $utf8NoBom)
+# Errors stop the script here, which would skip the removal that follows the
+# reviewer, so a failure to prepare the relay removes the snapshot itself.
+try {
+    [System.IO.File]::WriteAllText($diffPath, ($diffText + "`n"), $utf8NoBom)
 
-$originalPrompt = Get-Content -LiteralPath $PromptFile -Raw
-$shellToolName = 'Ba' + 'sh'
-$relayPrompt = @(
-    'Backend note for Auto-terminal Claude reviewer:'
-    "- The dispatch wrapper saves your final answer to $ExpectedReviewFile; do not write that review file yourself."
-    ("- You have unattended tool permission. Run relevant tests, experiments, benchmarks, " + $shellToolName + " commands, and network verification needed to support the review.")
-    "- The current working directory is a disposable staged snapshot when git export succeeds: $validationDir"
-    '- The snapshot holds only the exported Git index. Inputs it lacks, such as a gitignored plan or an untracked note, arrive in the original review prompt under SUPPLIED INPUT headings: read those copies and never the original worktree.'
-    '- You may create or modify generated files inside the disposable snapshot as part of verification.'
-    '- Do not commit, push, publish, alter external systems, or perform destructive cleanup.'
-    '- Return the complete review as your final answer, starting with the required Round marker.'
-    ''
-    'Original review prompt:'
-    $originalPrompt.TrimEnd()
-    ''
-    ''
-    'Dispatcher-provided staged diff:'
-    $diffText
-) -join "`n"
-[System.IO.File]::WriteAllText($relayPromptPath, ($relayPrompt + "`n"), $utf8NoBom)
-[System.IO.File]::WriteAllText($emptyMcpConfigPath, '{"mcpServers":{}}' + "`n", $utf8NoBom)
+    $originalPrompt = Get-Content -LiteralPath $PromptFile -Raw
+    $shellToolName = 'Ba' + 'sh'
+    $relayPrompt = @(
+        'Backend note for Auto-terminal Claude reviewer:'
+        "- The dispatch wrapper saves your final answer to $ExpectedReviewFile; do not write that review file yourself."
+        ("- You have unattended tool permission. Run relevant tests, experiments, benchmarks, " + $shellToolName + " commands, and network verification needed to support the review.")
+        "- The current working directory is a disposable staged snapshot when git export succeeds: $validationDir"
+        '- The snapshot holds only the exported Git index. Inputs it lacks, such as a gitignored plan or an untracked note, arrive in the original review prompt under SUPPLIED INPUT headings: read those copies and never the original worktree.'
+        '- You may create or modify generated files inside the disposable snapshot as part of verification.'
+        '- Do not commit, push, publish, alter external systems, or perform destructive cleanup.'
+        '- Return the complete review as your final answer, starting with the required Round marker.'
+        ''
+        'Original review prompt:'
+        $originalPrompt.TrimEnd()
+        ''
+        ''
+        'Dispatcher-provided staged diff:'
+        $diffText
+    ) -join "`n"
+    [System.IO.File]::WriteAllText($relayPromptPath, ($relayPrompt + "`n"), $utf8NoBom)
+    [System.IO.File]::WriteAllText($emptyMcpConfigPath, '{"mcpServers":{}}' + "`n", $utf8NoBom)
+} catch {
+    Remove-Item -LiteralPath $stagedSnapshotDir -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+}
 
 $ErrorActionPreference = 'Continue'
 
@@ -666,6 +673,11 @@ try {
     if ($stderrStream) { $stderrStream.Dispose() }
     if ($proc) { $proc.Dispose() }
 }
+
+# The snapshot is a whole copy of the Git index, and nothing reads it once
+# the reviewer has exited. Left in place, one per reviewer per round filled
+# the temp volume. The rest of the state directory stays.
+Remove-Item -LiteralPath $stagedSnapshotDir -Recurse -Force -ErrorAction SilentlyContinue
 if ($launchError) {
     [System.IO.File]::AppendAllText($tailStderrPath, $launchError, $utf8NoBom)
 }

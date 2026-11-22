@@ -523,6 +523,11 @@ unset IMPLEMENT_REVIEW_DISPATCH_REEXEC IMPLEMENT_REVIEW_DISPATCH_SOURCE_DIR
 )
 CLAUDE_EXIT=$?
 
+# The snapshot is a whole copy of the Git index, and nothing reads it once
+# the reviewer has exited. Left in place, one per reviewer per round filled
+# the temp volume. The rest of the state directory stays.
+rm -rf -- "$STAGED_SNAPSHOT_DIR"
+
 # Effective, not configured: read what the run itself reports and append it to
 # the record. A mismatch also prints MODEL-MISMATCH on stderr (from the
 # resolver), and a transcript that cannot be found prints MODEL-UNVERIFIED.

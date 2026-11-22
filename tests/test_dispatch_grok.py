@@ -49,6 +49,21 @@ DISPATCH_PY = (
 )
 
 
+def break_snapshot_export(repo: Path, name: str) -> None:
+    """Make the index export fail at `name` while `git diff --cached` still
+    works: a required smudge filter runs only when a file is written out,
+    so the files that sort before `name` are exported first."""
+    for key, value in (
+        ("filter.broken.clean", "cat"),
+        ("filter.broken.smudge", "false"),
+        ("filter.broken.required", "true"),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=repo, check=True)
+    attributes = repo / ".git" / "info" / "attributes"
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    attributes.write_text(f"{name} filter=broken\n", encoding="utf-8")
+
+
 def load_dispatch_module():
     spec = importlib.util.spec_from_file_location("dispatch_grok", DISPATCH_PY)
     assert spec is not None and spec.loader is not None
@@ -117,6 +132,10 @@ FAKE_GROK_PY = textwrap.dedent(
         }
         (rec / "env.json").write_text(json.dumps(env_subset), encoding="utf-8")
         (rec / "cwd.txt").write_text(os.getcwd(), encoding="utf-8")
+        # What the reviewer could see: the snapshot is gone once the dispatcher exits.
+        (rec / "cwd-files.json").write_text(
+            json.dumps(sorted(os.listdir(os.getcwd()))), encoding="utf-8"
+        )
         if "--prompt-file" in argv:
             idx = argv.index("--prompt-file")
             if idx + 1 < len(argv):
@@ -677,6 +696,37 @@ class TestDispatchGrokTerminalFailuresAndCost(DispatchGrokHarness):
 
 
 class TestDispatchGrokSnapshotAndSuppliedInputs(DispatchGrokHarness):
+    def test_the_snapshot_is_removed_once_the_reviewer_has_exited(self) -> None:
+        """The snapshot is a whole copy of the index, and one left behind per
+        reviewer per round filled the temp volume. The reviewer still ran in
+        it, and the records the health check reads stay."""
+        proc, state_dir = self._run_dispatch()
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        assert state_dir is not None
+        seen = json.loads((self.record_dir / "cwd-files.json").read_text(encoding="utf-8"))
+        self.assertIn("tracked.txt", seen)
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        for name in ("review-model", "tail", "prompt-relay", "timestamp"):
+            self.assertTrue((state_dir / name).is_file(), name)
+
+    def test_a_failed_review_leaves_no_snapshot(self) -> None:
+        proc, state_dir = self._run_dispatch(extra_env={"FAKE_GROK_MODE": "error_event"})
+        self.assertEqual(proc.returncode, 70, msg=proc.stderr)
+        assert state_dir is not None
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        self.assertTrue((state_dir / "tail").is_file())
+
+    def test_a_failed_export_leaves_no_partial_snapshot(self) -> None:
+        # AGENTS.md sorts first, so it is exported before the export stops.
+        break_snapshot_export(self.repo_dir, "tracked.txt")
+        proc, state_dir = self._run_dispatch()
+        self.assertEqual(proc.returncode, 70, msg=proc.stderr)
+        self.assertIn("failed to export staged snapshot", proc.stderr)
+        assert state_dir is not None
+        self.assertTrue(state_dir.is_dir())
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        self.assertFalse((self.record_dir / "cwd.txt").exists())
+
     def test_worktree_and_index_remain_unchanged(self) -> None:
         before_diff = subprocess.check_output(
             ["git", "diff"], cwd=self.repo_dir, text=True

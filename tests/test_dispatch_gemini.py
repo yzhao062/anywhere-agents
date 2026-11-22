@@ -60,6 +60,21 @@ def write_registry(
     return path
 
 
+def break_snapshot_export(repo: Path, name: str) -> None:
+    """Make the index export fail at `name` while `git diff --cached` still
+    works: a required smudge filter runs only when a file is written out,
+    so the files that sort before `name` are exported first."""
+    for key, value in (
+        ("filter.broken.clean", "cat"),
+        ("filter.broken.smudge", "false"),
+        ("filter.broken.required", "true"),
+    ):
+        subprocess.run([GIT, "config", key, value], cwd=repo, check=True)
+    attributes = repo / ".git" / "info" / "attributes"
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    attributes.write_text(f"{name} filter=broken\n", encoding="utf-8")
+
+
 def load_dispatch_module(registry: Path | None = None):
     """Load the dispatcher; its registry constants read AGENT_MODELS_FILE at import."""
     spec = importlib.util.spec_from_file_location("dispatch_gemini", DISPATCH)
@@ -102,6 +117,8 @@ if sys.argv[1:] == ["models"]:
 event = json.loads(sys.stdin.readline())
 prompt = event["message"]["content"]
 (log / "prompt.txt").write_text(prompt, encoding="utf-8")
+# What the reviewer could see: the snapshot is gone once the dispatcher exits.
+(log / "cwd-files.json").write_text(json.dumps(sorted(os.listdir("."))), encoding="utf-8")
 # Agy writes the label of the model it propagates to its backend into the file
 # --log-file names, after an earlier line that is pre-auth noise and not the
 # effective model. MOCK_AGY_ACTUAL_LABEL names another model to simulate a run
@@ -1118,6 +1135,45 @@ class DispatchGeminiIntegrationTests(unittest.TestCase):
         )
         self.assertTrue((state_dir / "tail").is_file())
         self.assertTrue((state_dir / "tail.stderr-tmp").is_file())
+
+    def test_the_snapshot_is_removed_once_the_reviewer_has_exited(self) -> None:
+        """The snapshot is a whole copy of the index, and one left behind per
+        reviewer per round filled the temp volume. The reviewer still ran in
+        it, and the records the health check reads stay."""
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_dir = self._state_dir(result)
+        seen = json.loads((self.log / "cwd-files.json").read_text(encoding="utf-8"))
+        self.assertEqual(seen, ["sample.txt"])
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        for name in ("review-model", "tail", "prompt-relay", "timestamp"):
+            self.assertTrue((state_dir / name).is_file(), name)
+
+    def test_a_rejected_review_leaves_no_snapshot(self) -> None:
+        result = self._run(
+            {
+                "MOCK_AGY_STATUS": "ERROR",
+                "MOCK_AGY_ERROR": "Quota exceeded for gemini-3.8-flash-high",
+                "MOCK_AGY_RESPONSE": "narration",
+            }
+        )
+        self.assertEqual(result.returncode, 70, result.stderr)
+        state_dir = self._state_dir(result)
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        self.assertTrue((state_dir / "tail").is_file())
+
+    def test_a_failed_export_leaves_no_partial_snapshot(self) -> None:
+        (self.repo / "zz-late.txt").write_text("exported after sample.txt\n", encoding="utf-8")
+        subprocess.run([GIT, "add", "zz-late.txt"], cwd=self.repo, check=True)
+        break_snapshot_export(self.repo, "zz-late.txt")
+        result = self._run()
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn("unable to create an isolated staged snapshot", result.stderr)
+        state_dir = self._state_dir(result)
+        self.assertIn("smudge filter", (state_dir / "git-diff.stderr").read_text(encoding="utf-8"))
+        self.assertFalse((state_dir / "staged-snapshot").exists())
+        # No review was requested: the reviewer never runs outside a snapshot.
+        self.assertFalse((self.log / "prompt.txt").exists())
 
     def test_model_override_is_forwarded(self) -> None:
         result = self._run(
