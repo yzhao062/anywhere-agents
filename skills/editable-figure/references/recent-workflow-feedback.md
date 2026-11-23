@@ -2,6 +2,13 @@
 
 Merged into the canonical skill on 2026-10-17 from `internal-writing/figure-preferences/index.md`, `NSF-Proposal-Template-Yue/figure-preferences/index.md`, and the associated figure revision records. These are Yue Zhao's preferences. Direct feedback is separate from design interpretation; accepted scientific content and reviewer PASS do not establish visual approval.
 
+## Figure text preference, 2026-11-22
+
+**作者反馈：** “字太多了，去掉防御性的描述，什么 ai draft, example only 这种是无意义的细节。”“图里面经常加一些这种防御性描述，明文禁止。读者都知道是 example，不必写。”
+
+**Application:** Remove defensive process and example-status text from the figure. Carry the figure-text prohibition in the main skill into generation prompts and check the rendered output for these labels.
+
+
 ## Multiple Concepts Before Reconstruction, 2026-11-18
 
 **Author feedback:** After requesting five complete AFOSR YIP overview concepts, the author said: “我觉得 1 是这几个里面最 clear 的”, and asked that the skill require presenting multiple versions before drawing.
