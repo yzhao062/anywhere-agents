@@ -4662,6 +4662,23 @@ class SettingsPublicationBashTests(unittest.TestCase):
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
         )
 
+    def test_the_user_level_merge_retires_withdrawn_rules(self) -> None:
+        # The flag is what removes ask rules an earlier release shipped; the
+        # list merge alone only adds. Record the arguments the helper receives.
+        helper = self.work / ".agent-config" / "repo" / "scripts"
+        helper.mkdir(parents=True)
+        record = self.root / "argv.json"
+        _write_text_lf(
+            helper / "merge_settings.py",
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(record)!r}).write_text(json.dumps(sys.argv[1:]))\n",
+        )
+        result = self._run(py=sys.executable.replace("\\", "/"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(record.read_text(encoding="utf-8"))
+        self.assertEqual(argv[0], "--retire-withdrawn")
+        self.assertEqual(Path(argv[1]), self.target)
+
     def test_an_absent_target_is_routed_through_the_helper_not_the_shell(self) -> None:
         # Whenever Python is present the helper owns create-or-merge, because it
         # is the only writer here holding the lock. An existence test out in the
@@ -4673,7 +4690,7 @@ class SettingsPublicationBashTests(unittest.TestCase):
         _write_text_lf(
             helper / "merge_settings.py",
             "import pathlib, sys\n"
-            "pathlib.Path(sys.argv[1]).write_text('{\"by\": \"helper\"}')\n",
+            "pathlib.Path(sys.argv[-2]).write_text('{\"by\": \"helper\"}')\n",
         )
         self.assertFalse(self.target.exists())
         result = self._run(py=sys.executable.replace("\\", "/"))
@@ -4874,7 +4891,7 @@ class SettingsEntryBlockPowerShellTests(unittest.TestCase):
         # "which one published" answerable from the resulting file.
         self._stub_helper(
             "import pathlib, sys\n"
-            "pathlib.Path(sys.argv[1]).write_text('{\"by\": \"helper\"}')\n"
+            "pathlib.Path(sys.argv[-2]).write_text('{\"by\": \"helper\"}')\n"
         )
         result = self._run(sys.executable)
         self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
@@ -5807,6 +5824,141 @@ class GrokAutoUpdateTests(unittest.TestCase):
         sh_grok_pos = sh.rfind("maybe_update_grok_cli")
         self.assertGreater(sh_ledger_pos, 0)
         self.assertGreater(sh_grok_pos, sh_ledger_pos)
+
+
+class WithdrawnSettingsRuleTests(unittest.TestCase):
+    """`--retire-withdrawn` removes ask rules an earlier release shipped.
+
+    A list of scalars merges by union, so a rule that `user/settings.json`
+    stops shipping would otherwise keep prompting on every machine that once
+    merged it."""
+
+    HELPER = ROOT / "scripts" / "merge_settings.py"
+
+    def _load_helper(self):
+        spec = importlib.util.spec_from_file_location("merge_settings_withdrawn", self.HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _run(self, target, shared, retire=True):
+        args = [sys.executable, str(self.HELPER)]
+        if retire:
+            args.append("--retire-withdrawn")
+        result = subprocess.run(args + [str(target), str(shared)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+    def _write(self, path, data):
+        path.write_bytes((json.dumps(data, indent=2) + "\n").encode("utf-8"))
+
+    def test_retire_removes_withdrawn_rules_and_keeps_the_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = Path(tmpdir)
+            shared = work / "shared.json"
+            target = work / "target.json"
+            self._write(shared, {"permissions": {"ask": ["Bash(git push *)"]}})
+            self._write(target, {"permissions": {"ask": [
+                "Bash(git commit *)", "Bash(rm -rf *)", "Bash(my own rule *)",
+                "Bash(git push *)",
+            ]}, "env": {"KEEP": "1"}})
+            self._run(target, shared)
+            merged = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                merged["permissions"]["ask"], ["Bash(my own rule *)", "Bash(git push *)"]
+            )
+            self.assertEqual(merged["env"], {"KEEP": "1"})
+
+    def test_without_the_flag_the_merge_only_adds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = Path(tmpdir)
+            shared = work / "shared.json"
+            target = work / "target.json"
+            self._write(shared, {"permissions": {"ask": ["Bash(git push *)"]}})
+            self._write(target, {"permissions": {"ask": ["Bash(git commit *)"]}})
+            self._run(target, shared, retire=False)
+            merged = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                merged["permissions"]["ask"], ["Bash(git commit *)", "Bash(git push *)"]
+            )
+
+    def test_a_rule_the_shared_file_lists_again_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = Path(tmpdir)
+            shared = work / "shared.json"
+            target = work / "target.json"
+            self._write(shared, {"permissions": {"ask": ["Bash(git commit *)"]}})
+            self._write(target, {"permissions": {"ask": ["Bash(git commit *)"]}})
+            self._run(target, shared)
+            merged = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(merged["permissions"]["ask"], ["Bash(git commit *)"])
+
+    def test_a_second_run_writes_nothing_and_keeps_no_new_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = Path(tmpdir)
+            shared = work / "shared.json"
+            target = work / "target.json"
+            self._write(shared, {"permissions": {"ask": ["Bash(git push *)"]}})
+            self._write(target, {"permissions": {"ask": ["Bash(git merge *)"]}})
+            self._run(target, shared)
+            first = target.read_bytes()
+            stat_before = target.stat()
+            backups = sorted(p.name for p in work.iterdir() if ".bak-" in p.name)
+            self._run(target, shared)
+            stat_after = target.stat()
+            self.assertEqual(first, target.read_bytes())
+            self.assertEqual(stat_before.st_ino, stat_after.st_ino)
+            self.assertEqual(stat_before.st_mtime_ns, stat_after.st_mtime_ns)
+            self.assertEqual(
+                backups, sorted(p.name for p in work.iterdir() if ".bak-" in p.name)
+            )
+
+    # The ask list `user/settings.json` shipped before 2026-11-22.
+    PRIOR_ASK = [
+        "Bash(git commit *)", "Bash(git push *)", "Bash(git push)",
+        "Bash(git reset --hard *)", "Bash(git checkout -- *)", "Bash(git clean *)",
+        "Bash(git branch -D *)", "Bash(git branch -d *)", "Bash(git stash drop *)",
+        "Bash(git stash clear *)", "Bash(git tag -d *)", "Bash(gh pr create *)",
+        "Bash(gh pr merge *)", "Bash(gh pr close *)", "Bash(gh repo delete *)",
+        "Bash(rm -rf *)", "Bash(rm -fr *)", "Bash(rm -r -f *)", "Bash(git merge *)",
+        "Bash(git rebase *)", "Bash(git branch --delete *)",
+    ]
+
+    def test_a_prior_release_install_ends_with_the_shipped_ask_list(self) -> None:
+        shipped = ROOT / "user" / "settings.json"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "settings.json"
+            self._write(target, {"permissions": {"ask": list(self.PRIOR_ASK)}})
+            self._run(target, shipped)
+            merged = json.loads(target.read_text(encoding="utf-8"))
+        expected = json.loads(shipped.read_text(encoding="utf-8"))["permissions"]["ask"]
+        self.assertEqual(merged["permissions"]["ask"], expected)
+
+    def test_odd_settings_shapes_are_left_alone(self) -> None:
+        retire = self._load_helper().retire_withdrawn
+        shared = {"permissions": {"ask": ["Bash(git push *)"]}}
+        cases = [
+            ({}, {}),
+            ({"permissions": None}, {"permissions": None}),
+            ({"permissions": {"ask": "Bash(rm -rf *)"}}, {"permissions": {"ask": "Bash(rm -rf *)"}}),
+            ({"permissions": {"ask": [1, {"x": 1}, "Bash(rm -rf *)", "Bash(mine *)"]}},
+             {"permissions": {"ask": [1, {"x": 1}, "Bash(mine *)"]}}),
+        ]
+        for target, expected in cases:
+            with self.subTest(target=target):
+                retire(target, shared)
+                self.assertEqual(target, expected)
+
+    def test_bootstrap_retires_on_the_user_level_merge_only(self) -> None:
+        # SettingsPublicationBashTests runs the Bash block and checks the flag
+        # reaches the helper; this pins that the project merge never gets it.
+        sh = (ROOT / "bootstrap" / "bootstrap.sh").read_text(encoding="utf-8")
+        self.assertEqual(sh.count("merge_settings.py --retire-withdrawn"), 1)
+        ps = (ROOT / "bootstrap" / "bootstrap.ps1").read_text(encoding="utf-8")
+        self.assertEqual(ps.count("-RetireWithdrawn"), 1)
+        self.assertIn(
+            "Invoke-SettingsMerge $userSettings '.agent-config/repo/user/settings.json' -RetireWithdrawn",
+            ps,
+        )
 
 
 if __name__ == "__main__":

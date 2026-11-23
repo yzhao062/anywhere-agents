@@ -38,12 +38,16 @@ Dispatches by tool_name. Shared checks:
    with .agent-config/bootstrap.{sh,ps1} is located. Source repos (no
    .agent-config/) and unrelated directories are not gated.
 3. Compound cd commands (cd path && cmd, cd path; cmd) → deny  [Bash only]
-4. Mandatory risk classification → ask  [Bash + PowerShell]
-   - destructive git (push, commit, merge, reset --hard, branch -D, etc.)
-   - destructive / publish gh (pr create|merge|close, repo delete, release ...)
-   - outward publishes (npm publish, twine upload, python -m twine upload)
-   - irreversible file/device deletes (rm -rf, dd, mkfs, shred; PowerShell
-     Remove-Item and recursive aliases when -Recurse / -r / /s is present)
+4. Mandatory outward-action classification → ask  [Bash + PowerShell]
+   - git push
+   - gh actions that change GitHub state (pr create|merge|close, repo delete,
+     release create|delete|upload|edit)
+   - package publishes (npm publish, twine upload, python -m twine upload)
+   - disk-wipe tools (dd, mkfs*, shred) [Bash only]; they almost never run in
+     routine work, so the prompt costs nothing and guards a wiped disk
+   Other steps (commit, merge, rebase, reset, clean, branch and tag changes,
+   rm -rf) pass; the user reviews the work at the push or publish that sends
+   it out.
    Classification is tool-agnostic and sees through built-in command-carrying
    wrappers (ssh, bash -c, sh -c, zsh -c, docker exec/run, pwsh/powershell
    -Command) up to MAX_WRAPPER_DEPTH. `python -c` and custom/private wrappers
@@ -60,8 +64,8 @@ Escape hatches (v0.7.0):
 - AGENT_NESTED_GIT_INIT_HOOK=off (per-guard): disables the nested git init
   gate only. Set it to create a submodule or a deliberate inner repository.
 
-Destructive git/gh `ask` checks have NO agent-side reroute (commit/push/reset/merge
-need human approval) and are NOT disabled by any escape env. Adding any future
+The outward-action `ask` checks have NO agent-side reroute (a push or a publish
+needs human approval) and are NOT disabled by any escape env. Adding any future
 hook-escape env requires updating _ESCAPE_HATCH_ENV_NAMES; the static literal-scan
 test in test_guard.py enforces that no AGENT_*_HOOK string literal exists in this
 file outside that constant.
@@ -745,7 +749,7 @@ def check_writing_style(tool_name, tool_input):
 # Writes are an output redirection, `tee`, an in-place `sed` or `perl`, and
 # `Set-Content`, `Add-Content`, `Out-File`, and `Tee-Object` in PowerShell. A
 # script that opens the file itself (`python - <<EOF`, a heredoc fed to
-# `bash`) is opaque, as it is to the destructive-command classifier, and so is
+# `bash`) is opaque, as it is to the outward-action classifier, and so is
 # a path whose variable the command does not assign and the environment does
 # not hold. A blind spot restores the status quo; reading either would mean
 # guessing what a program does.
@@ -1034,7 +1038,7 @@ def _shell_prose_targets(commands, shell, assignments, depth=0):
 
     `commands` is the lexer's output. Redirections come from it directly. The
     named writers are read per simple command, through the same wrappers the
-    destructive-command classifier sees through, so a `bash -c` payload is
+    outward-action classifier sees through, so a `bash -c` payload is
     read as a command of its own. Each operand carries the variables as they
     stood when its command ran, so a later reassignment does not reach back,
     and a child shell works on a copy that never flows back to its parent.
@@ -2062,48 +2066,36 @@ def extract_gh_subcommand(parts):
     return group, action
 
 
-def check_git_destructive(parts):
-    """Check if a git command is destructive."""
-    idx, sub = extract_git_subcommand(parts)
-    if not sub:
-        return False
-    rest = parts[idx:]
-
-    if sub in ("push", "commit", "merge", "rebase", "clean"):
-        return True
-    if sub == "reset":
-        return "--hard" in rest
-    if sub == "checkout":
-        return "--" in rest
-    if sub == "branch":
-        return any(f in rest for f in ("-D", "-d", "--delete"))
-    if sub == "tag":
-        return any(f in rest for f in ("-d", "--delete"))
-    if sub == "stash":
-        return len(rest) > 1 and rest[1] in ("drop", "clear")
-    return False
+def check_git_outward(parts):
+    """Ask for the push subcommand; every other git subcommand passes,
+    including commit, merge, rebase, reset --hard, clean, and branch or tag
+    deletion."""
+    _, sub = extract_git_subcommand(parts)
+    return sub == "push"
 
 
-def check_gh_destructive(parts):
-    """Check if a gh command is destructive or outward-facing (publish)."""
+def check_gh_outward(parts):
+    """Check if a gh command changes GitHub state: a PR create, merge, or close
+    (close can delete the remote branch), a repo delete, or a release change."""
     group, action = extract_gh_subcommand(parts)
-    destructive = {
+    outward = {
         ("pr", "create"), ("pr", "merge"),
         ("pr", "close"), ("repo", "delete"),
         ("release", "create"), ("release", "delete"),
         ("release", "upload"), ("release", "edit"),
     }
-    return (group, action) in destructive
+    return (group, action) in outward
 
 
-# --- Mandatory risk classification (Check 4, tool-agnostic) ----------------
+# --- Mandatory outward-action classification (Check 4, tool-agnostic) -------
 #
-# The mandatory ask set is: destructive git, destructive/publish gh, outward
-# package publishes, and irreversible file/device deletes. Classification is
+# The mandatory ask set is the point where work leaves the machine (git push,
+# gh actions that change GitHub state, package publishes) plus the disk-wipe
+# tools dd, mkfs*, and shred. Classification is
 # tool-agnostic (Bash + PowerShell), keys on the EXACT leading token of each
 # sub-command (never a substring scan, which would false-positive on
-# `echo "rm -rf"` / `grep "git push"`), and recurses through built-in
-# command-carrying wrappers so a dangerous payload inside `ssh host "..."`,
+# `echo "git push"` / `grep "git push"`), and recurses through built-in
+# command-carrying wrappers so a push inside `ssh host "..."`,
 # `bash -c "..."`, or `docker exec c bash -lc "..."` is still caught.
 #
 # `python -c` and custom/private wrappers (e.g. a personal job-runner) are NOT
@@ -2294,40 +2286,12 @@ def check_publish(parts):
     return None
 
 
-def check_fs_destructive(parts, shell):
-    """Irreversible file/device destruction. Returns a label or None.
-
-    Bash: `rm` with BOTH recursive and force flags (mirrors the existing
-    `rm -rf` / `rm -fr` / `rm -r -f` native ask rules), plus `dd`, `mkfs*`,
-    `shred`. PowerShell: `Remove-Item` and its delete aliases when a recursive
-    flag (`-Recurse` / `-r` / `/s`) is present."""
-    if not parts:
+def check_disk_wipe(parts, shell):
+    """`dd`, `mkfs*`, or `shred` under Bash. Returns the tool name or None.
+    Recursive `rm` and PowerShell `Remove-Item` pass."""
+    if not parts or shell == "powershell":
         return None
-    head = parts[0]
-    name = _basename(head)
-    if shell == "powershell":
-        if name in ("remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"):
-            for t in parts[1:]:
-                tl = t.lower()
-                # PowerShell accepts unambiguous parameter prefixes; -Recurse
-                # is the only Remove-Item parameter starting "Re", so -Re / -Rec
-                # / -Recu / -Recurse all mean recursive. /s is the cmd-style form.
-                if tl == "/s" or tl == "-r" or tl.startswith("-re"):
-                    return f"{head} (recursive delete)"
-        return None
-    if name == "rm":
-        flags = [f for f in parts[1:] if f.startswith("-")]
-        has_r = any(
-            f in ("-r", "-R", "--recursive")
-            or (not f.startswith("--") and ("r" in f or "R" in f))
-            for f in flags
-        )
-        has_f = any(
-            f in ("-f", "--force")
-            or (not f.startswith("--") and "f" in f)
-            for f in flags
-        )
-        return "rm -rf" if (has_r and has_f) else None
+    name = _basename(parts[0])
     if name == "dd" or name.startswith("mkfs") or name == "shred":
         return name
     return None
@@ -2458,7 +2422,7 @@ def _wrapper_payload(parts, shell):
             return (_payload_str(rest), "bash") if rest else (None, None)
     if name == "cmd":
         # cmd /c <command> or cmd /k <command>. The payload uses Windows verbs
-        # (rmdir/del + /s) and shell-agnostic git, so classify it as powershell.
+        # and shell-agnostic git, so classify it as powershell.
         for j in range(1, len(parts)):
             if parts[j].lower() in ("/c", "/k"):
                 rest = parts[j + 1:]
@@ -2470,14 +2434,14 @@ def _wrapper_payload(parts, shell):
         rest = _trailing_command(parts, 1, _TIMEOUT_VALUE_FLAGS)
         return (_payload_str(rest), "bash") if rest else (None, None)
     if name == "xargs":
-        # find ... | xargs rm -rf: the command follows xargs's options directly.
+        # find ... | xargs gh release upload: the command follows xargs's options.
         rest = _command_after_flags(parts, 1, _XARGS_VALUE_FLAGS)
         return (_payload_str(rest), "bash") if rest else (None, None)
     return None, None
 
 
 def _cowboy(label):
-    """Attention-grabbing ask message for destructive git/gh (unchanged tone)."""
+    """Attention-grabbing ask message for git push and outward gh actions."""
     return random.choice([
         f"WHOA THERE COWBOY! {label} wants to run. Are you SURE about this?!",
         f"STOP! HAMMER TIME! A wild {label} appeared! Think before you click!",
@@ -2520,10 +2484,10 @@ def classify_command(cmd, shell, depth=0):
                 return decision, reason
             continue
         head = _basename(parts[0])
-        if head == "git" and check_git_destructive(parts):
+        if head == "git" and check_git_outward(parts):
             _, sub_g = extract_git_subcommand(parts)
             return "ask", _cowboy(f"git {sub_g}")
-        if head == "gh" and check_gh_destructive(parts):
+        if head == "gh" and check_gh_outward(parts):
             group, action = extract_gh_subcommand(parts)
             return "ask", _cowboy(f"gh {group} {action}")
         pub = check_publish(parts)
@@ -2532,9 +2496,9 @@ def classify_command(cmd, shell, depth=0):
                 f"Approval needed: `{pub}` publishes to a shared registry or "
                 f"remote (outward-facing, hard to reverse)."
             )
-        fs = check_fs_destructive(parts, shell)
-        if fs:
-            return "ask", f"Approval needed: `{fs}` is an irreversible delete."
+        wipe = check_disk_wipe(parts, shell)
+        if wipe:
+            return "ask", f"Approval needed: `{wipe}` can wipe a disk or file irreversibly."
     return None, None
 
 
@@ -2826,8 +2790,9 @@ def main():
             print(make_response("deny", deny))
             return
 
-    # Check 4: mandatory risk classification — destructive git/gh, outward
-    # publishes, irreversible file/device deletes. Tool-agnostic, sees through
+    # Check 4: mandatory outward-action classification — git push, gh actions
+    # that change GitHub state, package publishes, and disk-wipe tools.
+    # Tool-agnostic, sees through
     # built-in command wrappers (ssh / bash -c / docker exec / pwsh -Command).
     # NOT gated by any escape env: human approval is the contract.
     decision, reason = classify_command(cmd, shell)

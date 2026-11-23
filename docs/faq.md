@@ -53,7 +53,7 @@
 
     Per-guard envs are useful in meta-discussion contexts (a style guide that quotes banned words, a CHANGELOG citing one as an example) without turning off the whole suite.
 
-    **Destructive git / gh approval is NOT bypassable by any env.** No env var disables the `ask` prompt on `git commit`, `git push`, `git reset --hard`, `git merge`, `git rebase`, `gh pr merge`, `gh repo delete`, etc. Human approval is the contract; these guards have no agent-side reroute.
+    **Push and publish approval is NOT bypassable by any env.** In Claude Code, no env var disables the `ask` prompt on `git push`, `gh pr create`, `gh pr merge`, `gh pr close`, `gh release create`, `gh repo delete`, `npm publish`, `twine upload`, or the disk-wipe tools `dd`, `mkfs`, and `shred`. Human approval is the contract; these guards have no agent-side reroute. Local steps such as `git commit`, `git reset --hard`, and `rm -rf` do not ask.
 
     Full removal: in a fork, remove the user-level section of `bootstrap/bootstrap.sh` / `bootstrap.ps1` that deploys `scripts/guard.py`. In a specific project only, remove the `hooks` entry from `~/.claude/settings.json` manually (bootstrap re-installs it on the next run from upstream).
 
@@ -80,10 +80,10 @@
     Compound cd command blocked. Suggested rewrite: `git -C papers/foo status`.
     ```
 
-    This is faster than `ask`-style prompts for autonomous flows (`/implement-review auto`, headless `claude -p` runs): the agent sees a hard NO plus a concrete alternative, course-corrects, and continues. Destructive operations (git commit / push / reset / merge, gh pr merge / repo delete) still surface as `ask` because they have no automatic reroute.
+    This is faster than `ask`-style prompts for autonomous flows (`/implement-review auto`, headless `claude -p` runs): the agent sees a hard NO plus a concrete alternative, course-corrects, and continues. Push and publish operations (`git push`, `gh pr create` / `merge` / `close`, `gh release`, `gh repo delete`, `npm publish`, `twine upload`) and the disk-wipe tools still surface as `ask` because they have no automatic reroute.
 
 ??? question "Why does `git push` always ask for confirmation?"
-    The `Git Safety` section of `AGENTS.md` says _"Never run `git commit` or `git push` without explicit user approval."_ This is a deliberate opinion. The guard hook enforces it: even if Claude Code has permissions set to auto-approve `git push`, the hook intercepts and requires explicit confirmation. No escape env disables this guard (v0.7.0 Round 6; destructive operations have no agent-side reroute).
+    The `Git Safety` section of `AGENTS.md` says _"Never push or publish without explicit user approval."_ This is a deliberate opinion. The guard hook enforces it in Claude Code: even if permissions are set to auto-approve `git push`, the hook intercepts and requires explicit confirmation. No escape env disables this guard (v0.7.0 Round 6; a push or publish has no agent-side reroute). Codex hooks cannot ask, so under Codex the approval happens in the conversation.
 
     To disable, remove the Git Safety section from your fork's `AGENTS.md` and the corresponding rules from `scripts/guard.py`.
 

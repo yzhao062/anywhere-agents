@@ -5,27 +5,12 @@
       "PowerShell(*)"
     ],
     "ask": [
-      "Bash(git commit *)",
       "Bash(git push *)",
       "Bash(git push)",
-      "Bash(git reset --hard *)",
-      "Bash(git checkout -- *)",
-      "Bash(git clean *)",
-      "Bash(git branch -D *)",
-      "Bash(git branch -d *)",
-      "Bash(git stash drop *)",
-      "Bash(git stash clear *)",
-      "Bash(git tag -d *)",
       "Bash(gh pr create *)",
       "Bash(gh pr merge *)",
       "Bash(gh pr close *)",
-      "Bash(gh repo delete *)",
-      "Bash(rm -rf *)",
-      "Bash(rm -fr *)",
-      "Bash(rm -r -f *)",
-      "Bash(git merge *)",
-      "Bash(git rebase *)",
-      "Bash(git branch --delete *)"
+      "Bash(gh repo delete *)"
     ]
   },
   "hooks": {
@@ -36,7 +21,7 @@
           {
             "type": "command",
             "command": "\"$HOME/.claude/hooks/_python\" \"$HOME/.claude/hooks/guard.py\"",
-            "statusMessage": "Checking for compound cd and destructive commands..."
+            "statusMessage": "Checking for compound cd, push, publish, and disk-wipe commands..."
           }
         ]
       },

@@ -176,7 +176,7 @@ The guard denies a `Write` / `Edit` call when its new prose contains a banned wo
 This is destructive. Are you sure? (y/N)
 ```
 
-The guard covers `git push`, `git commit`, `git merge`, `git rebase`, `git reset --hard`, `gh pr merge`, `gh pr create`, and related destructive commands. Read-only operations (`status`, `diff`, `log`) pass silently, so the common workflow stays fast.
+The guard asks before `git push`, `gh pr create`, `gh pr merge`, `gh pr close`, `gh release` changes, `gh repo delete`, package publishes, and the disk-wipe tools `dd`, `mkfs`, and `shred`. Local steps such as `commit`, `merge`, `rebase`, and `reset` pass silently, so the common workflow stays fast.
 
 ## Install
 
@@ -362,7 +362,7 @@ Git is the subscription engine. Cherry-pick what you want, skip what you do not.
 
 | Opinion | Why |
 |---------|-----|
-| **Safety-first by default** | `git commit` / `push` always confirm. Destructive Git/GitHub (ask) and compound-command shapes (deny) have no bypass; writing-style and banner gates have an `AGENT_CONFIG_GATES=off` escape hatch for false positives. |
+| **Safety-first by default** | `git push` and publishing always confirm in Claude Code; local steps such as commits run without a prompt, and Codex relies on approval in the conversation. No env var bypasses the push and publish asks; the compound-`cd`, writing-style, and banner gates have narrow escape switches for false positives. |
 | **Dual-agent review is default** | Claude Code implements; Codex reviews. Either solo still works; the second opinion is where the value is. Includes an optional Phase 0 plan-review for complex work where the shape precedes the code. |
 | **Strong writing style** | ~45 banned words (enforced by PreToolUse hook on `.md` / `.tex` / `.rst` / `.txt` writes), no em-dashes as casual punctuation, no bullet-conversion of prose, no summary sentence at the end of every paragraph. Sound like you, not a chatbot. |
 | **Session checks report, not fix** | Flags outdated Actions versions, wrong Codex config, model preferences — agents never silently change anything without telling you. |
@@ -385,7 +385,7 @@ anywhere-agents/
 │   ├── bootstrap.ps1              # idempotent sync for Windows
 │   └── packs.yaml                 # v2 unified manifest: passive + active packs (agent-style, aa-core-skills)
 ├── scripts/
-│   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
+│   ├── guard.py                   # PreToolUse hook: 4 gate families (push/publish ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
 │   ├── statusline.py              # compact Claude + Codex + Agy quota row
@@ -461,7 +461,7 @@ anywhere-agents/
 
 - Requires `git` everywhere. Requires Python (stdlib only) for settings merge; bootstrap continues without merge if Python is unavailable.
 - Guard hook deploys to `~/.claude/hooks/guard.py` and modifies `~/.claude/settings.json`. To opt out of user-level modifications, remove the user-level section from `bootstrap/bootstrap.sh` / `bootstrap/bootstrap.ps1` in your fork.
-- `AGENT_CONFIG_GATES=off` in the `env` block of `~/.claude/settings.json` disables only the writing-style and banner gates. Destructive Git/GitHub and compound-command guards stay active.
+- `AGENT_CONFIG_GATES=off` in the `env` block of `~/.claude/settings.json` disables only the writing-style and banner gates. The push and publish asks and the compound-command guard stay active.
 
 </details>
 

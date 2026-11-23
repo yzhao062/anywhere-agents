@@ -136,8 +136,8 @@ This is enforced structurally, not by trust:
   ```
   The worker edits freely in the clone. An accidental `git push` has no remote to reach (GitHub /
   Overleaf stay untouched); an accidental `git commit` only lands in the throwaway clone. The coordinator reads
-  `git -C <clone-dir> diff`, integrates the wanted changes into the real tree, and **the user
-  approves the actual commit**. That is the only gate.
+  `git -C <clone-dir> diff`, integrates and commits the wanted changes, and **the user
+  approves the push**. That is the only gate.
 
 **The worker's environment is scrubbed.** `dispatch-task-agy.py` builds the child environment
 with `worker_env()`, which drops every name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`,
@@ -190,7 +190,7 @@ accident; it is not a sandbox, and a worker can still read any file the user can
    let a `SUCCESS` event override an observed nonzero exit. Re-dispatch or ask when no usable
    result remains. If any dispatched unit still has no usable result, do not integrate the partial
    set. Then read each accepted result and clone diff, integrate the wanted changes, run
-   verification, and ask before committing.
+   verification, commit, and ask before pushing.
 
 Resolve scripts via this order, first hit wins: `skills/prun/scripts/`, then
 `.claude/skills/prun/scripts/`, then `.agent-config/repo/skills/prun/scripts/`.

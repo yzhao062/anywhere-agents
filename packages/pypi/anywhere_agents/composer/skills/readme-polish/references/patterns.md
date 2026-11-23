@@ -103,7 +103,7 @@ Rules:
 - 🔄 **Dual-agent review** — implementer + gatekeeper with independent judgment.
 - ✍️ **Consistent writing style** — 40+ AI-tell words banned; format preserved.
 - 🧭 **Auto dispatch** — router picks the right skill from prompt + file type.
-- 🔒 **Git safety** — commit/push/reset always confirm; read-only ops stay fast.
+- 🔒 **Git safety** — push and publish always confirm; local steps stay fast.
 ```
 
 Each bullet = one emoji + **bold feature name** + em-dash + one-line takeaway. Aim for 5–8 bullets. Fewer than 4 feels thin; more than 8 becomes a wall.

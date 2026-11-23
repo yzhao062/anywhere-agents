@@ -221,7 +221,7 @@ Bootstrap is idempotent and non-destructive — there is no system-wide install 
     | `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd guard only |
     | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + session banner |
 
-    **Destructive git / gh approval is NOT bypassable.** No env var disables the `ask` prompt on `git commit`, `git push`, `git reset --hard`, `git merge`, `git rebase`, `gh pr merge`, `gh repo delete`, etc. Those guards have no agent-side reroute; human approval is the contract.
+    **Push and publish approval is NOT bypassable.** In Claude Code, no env var disables the `ask` prompt on `git push`, `gh pr create`, `gh pr merge`, `gh pr close`, `gh release create`, `gh repo delete`, `npm publish`, `twine upload`, or the disk-wipe tools `dd`, `mkfs`, and `shred`. Those guards have no agent-side reroute; human approval is the contract. Local steps such as `git commit` and `rm -rf` do not ask.
 
     Example deny output:
 

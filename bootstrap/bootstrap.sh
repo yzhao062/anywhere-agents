@@ -1283,7 +1283,9 @@ if [ -f .agent-config/repo/user/settings.json ]; then
     # than carrying on regardless: this file registers the PreToolUse guard
     # for every consumer on the machine, and a run that silently skipped the
     # merge used to look exactly like one that applied it (#32).
-    "$_py" .agent-config/repo/scripts/merge_settings.py \
+    # --retire-withdrawn removes ask rules an earlier release shipped and has
+    # since withdrawn; the list merge alone only ever adds.
+    "$_py" .agent-config/repo/scripts/merge_settings.py --retire-withdrawn \
       "$HOME/.claude/settings.json" .agent-config/repo/user/settings.json
     _settings_rc=$?
     if [ "$_settings_rc" -eq 3 ]; then

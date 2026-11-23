@@ -178,7 +178,7 @@ outgoing 一旦撞上禁词，`guard` 直接 deny 这次 `Write` / `Edit` tool �
 This is destructive. Are you sure? (y/N)
 ```
 
-`guard` 覆盖 `git push` / `git commit` / `git merge` / `git rebase` / `git reset --hard` / `gh pr merge` / `gh pr create` 这类可能有破坏性的命令。读操作（`status` / `diff` / `log`）直接通过，日常流不被打断。
+`guard` 在 `git push`、`gh pr create` / `merge` / `close`、`gh release` 变更、`gh repo delete`、包发布，以及会擦盘的 `dd` / `mkfs` / `shred` 之前询问。`commit`、`merge`、`rebase`、`reset` 这类本地步骤直接通过，日常流不被打断。
 
 ## 安装
 
@@ -364,7 +364,7 @@ Git 就是订阅机制。想要的 cherry-pick，不想要的跳过。
 
 | 原则 | 理由 |
 |---|---|
-| **安全优先作为默认** | `git commit` / `push` 永远确认。破坏性 Git / GitHub 操作（ask）和 compound-command 形式（deny）没有绕过入口；写作规则和 banner gate 保留 `AGENT_CONFIG_GATES=off`，专门处理误判。 |
+| **安全优先作为默认** | Claude Code 里 `git push` 和发布永远确认；commit 这类本地步骤不弹窗，Codex 则在对话里确认。push 和发布的 ask 没有环境变量可以绕过；compound-`cd`、写作规则和 banner gate 各有专门处理误判的开关。 |
 | **双 agent review 作为默认** | Claude Code 写，Codex 审。单独用任何一个都行，价值在第二双眼睛。复杂工作支持 Phase 0 plan-review（结构先于代码）。 |
 | **强写作规范** | ~45 个被禁词（PreToolUse hook 在 `.md` / `.tex` / `.rst` / `.txt` 写入上强制生效），em-dash 不作随手标点，散文不被 bullet 化，不是每段都拖一个尾巴句。写得像你，不像聊天机器人。 |
 | **Session check 只报告，不改** | 发现旧的 Actions pin、Codex config 不对、模型 / effort 低于偏好 —— agent 不会悄悄改任何东西。 |
@@ -387,7 +387,7 @@ anywhere-agents/
 │   ├── bootstrap.ps1              # idempotent sync for Windows
 │   └── packs.yaml                 # v2 unified manifest: passive + active packs (agent-style, aa-core-skills)
 ├── scripts/
-│   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
+│   ├── guard.py                   # PreToolUse hook: 4 gate families (push/publish ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
 │   ├── statusline.py              # 紧凑显示 Claude + Codex + Agy 额度
@@ -463,7 +463,7 @@ anywhere-agents/
 
 - 要求系统里有 `git`。Python（只要 stdlib）用来合并 settings；没 Python，`bootstrap` 跳过 merge 继续跑。
 - `guard` hook 会部署到 `~/.claude/hooks/guard.py`、改 `~/.claude/settings.json`。不想要用户级改动，在你 fork 的 `bootstrap/bootstrap.sh` / `bootstrap/bootstrap.ps1` 里删掉 user-level 段。
-- `~/.claude/settings.json` 里 `env` 设 `AGENT_CONFIG_GATES=off` 只关掉写作规则和 banner 两个 gate。破坏性 Git/GitHub 和 compound-command 两个 guard 保持生效。
+- `~/.claude/settings.json` 里 `env` 设 `AGENT_CONFIG_GATES=off` 只关掉写作规则和 banner 两个 gate。push 和发布的 ask 以及 compound-command guard 保持生效。
 
 </details>
 

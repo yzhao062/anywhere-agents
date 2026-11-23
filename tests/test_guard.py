@@ -383,8 +383,8 @@ class NestedGitInitTests(unittest.TestCase):
         self.assertIn("AGENT_NESTED_GIT_INIT_HOOK", reason)
 
 
-class DestructiveGitDirectTests(unittest.TestCase):
-    """Destructive git commands in direct form should ask."""
+class GitDirectTests(unittest.TestCase):
+    """git push asks; every local git command passes, destructive or not."""
 
     def test_push(self) -> None:
         self.assertEqual(run_guard("git push origin main"), "ASK")
@@ -393,65 +393,65 @@ class DestructiveGitDirectTests(unittest.TestCase):
         self.assertEqual(run_guard("git push"), "ASK")
 
     def test_commit(self) -> None:
-        self.assertEqual(run_guard('git commit -m "fix bug"'), "ASK")
+        self.assertEqual(run_guard('git commit -m "fix bug"'), "PASSED")
 
     def test_merge(self) -> None:
-        self.assertEqual(run_guard("git merge origin/main"), "ASK")
+        self.assertEqual(run_guard("git merge origin/main"), "PASSED")
 
     def test_rebase(self) -> None:
-        self.assertEqual(run_guard("git rebase main"), "ASK")
+        self.assertEqual(run_guard("git rebase main"), "PASSED")
 
     def test_reset_hard(self) -> None:
-        self.assertEqual(run_guard("git reset --hard HEAD~1"), "ASK")
+        self.assertEqual(run_guard("git reset --hard HEAD~1"), "PASSED")
 
     def test_clean(self) -> None:
-        self.assertEqual(run_guard("git clean -fd"), "ASK")
+        self.assertEqual(run_guard("git clean -fd"), "PASSED")
 
     def test_branch_D(self) -> None:
-        self.assertEqual(run_guard("git branch -D feature"), "ASK")
+        self.assertEqual(run_guard("git branch -D feature"), "PASSED")
 
     def test_branch_d(self) -> None:
-        self.assertEqual(run_guard("git branch -d feature"), "ASK")
+        self.assertEqual(run_guard("git branch -d feature"), "PASSED")
 
     def test_branch_delete(self) -> None:
-        self.assertEqual(run_guard("git branch --delete feature"), "ASK")
+        self.assertEqual(run_guard("git branch --delete feature"), "PASSED")
 
     def test_tag_d(self) -> None:
-        self.assertEqual(run_guard("git tag -d v1.0"), "ASK")
+        self.assertEqual(run_guard("git tag -d v1.0"), "PASSED")
 
     def test_tag_delete(self) -> None:
-        self.assertEqual(run_guard("git tag --delete v1.0"), "ASK")
+        self.assertEqual(run_guard("git tag --delete v1.0"), "PASSED")
 
     def test_stash_drop(self) -> None:
-        self.assertEqual(run_guard("git stash drop stash@{0}"), "ASK")
+        self.assertEqual(run_guard("git stash drop stash@{0}"), "PASSED")
 
     def test_stash_clear(self) -> None:
-        self.assertEqual(run_guard("git stash clear"), "ASK")
+        self.assertEqual(run_guard("git stash clear"), "PASSED")
 
     def test_checkout_dash_dash_file(self) -> None:
-        self.assertEqual(run_guard("git checkout -- src/main.py"), "ASK")
+        self.assertEqual(run_guard("git checkout -- src/main.py"), "PASSED")
 
 
-class DestructiveGitFlagVariantTests(unittest.TestCase):
-    """Destructive git commands with global flags should still ask."""
+class GitFlagVariantTests(unittest.TestCase):
+    """git push with global flags still asks; local commands still pass."""
 
     def test_C_push(self) -> None:
         self.assertEqual(run_guard("git -C papers/repo push origin main"), "ASK")
 
     def test_C_commit(self) -> None:
-        self.assertEqual(run_guard('git -C papers/repo commit -m "msg"'), "ASK")
+        self.assertEqual(run_guard('git -C papers/repo commit -m "msg"'), "PASSED")
 
     def test_C_merge(self) -> None:
-        self.assertEqual(run_guard("git -C papers/repo merge origin/main"), "ASK")
+        self.assertEqual(run_guard("git -C papers/repo merge origin/main"), "PASSED")
 
     def test_C_branch_D(self) -> None:
-        self.assertEqual(run_guard("git -C papers/repo branch -D feature"), "ASK")
+        self.assertEqual(run_guard("git -C papers/repo branch -D feature"), "PASSED")
 
     def test_C_checkout_dash_dash(self) -> None:
-        self.assertEqual(run_guard("git -C papers/repo checkout -- file.py"), "ASK")
+        self.assertEqual(run_guard("git -C papers/repo checkout -- file.py"), "PASSED")
 
     def test_C_tag_d(self) -> None:
-        self.assertEqual(run_guard("git -C papers/repo tag -d v1.0"), "ASK")
+        self.assertEqual(run_guard("git -C papers/repo tag -d v1.0"), "PASSED")
 
     def test_c_config_push(self) -> None:
         self.assertEqual(run_guard("git -c color.ui=always push origin main"), "ASK")
@@ -469,8 +469,8 @@ class DestructiveGitFlagVariantTests(unittest.TestCase):
         self.assertEqual(run_guard("git --work-tree /tmp push origin main"), "ASK")
 
 
-class DestructiveGitWrapperTests(unittest.TestCase):
-    """Destructive git commands with env/var wrappers should still ask."""
+class GitWrapperTests(unittest.TestCase):
+    """git push behind env/var wrappers should still ask."""
 
     def test_env_var_push(self) -> None:
         self.assertEqual(run_guard("env FOO=1 git push origin main"), "ASK")
@@ -478,15 +478,15 @@ class DestructiveGitWrapperTests(unittest.TestCase):
     def test_inline_var_push(self) -> None:
         self.assertEqual(run_guard("FOO=1 git push origin main"), "ASK")
 
-    def test_env_unset_commit(self) -> None:
-        self.assertEqual(run_guard("env -u VAR git commit -m msg"), "ASK")
+    def test_env_unset_push(self) -> None:
+        self.assertEqual(run_guard("env -u VAR git push origin main"), "ASK")
 
     def test_multi_var_push(self) -> None:
         self.assertEqual(run_guard("A=1 B=2 git push origin main"), "ASK")
 
 
-class DestructiveGhTests(unittest.TestCase):
-    """Destructive gh commands should ask."""
+class OutwardGhTests(unittest.TestCase):
+    """gh actions that change GitHub state should ask."""
 
     def test_pr_create(self) -> None:
         self.assertEqual(run_guard('gh pr create --title "fix"'), "ASK")
@@ -496,6 +496,7 @@ class DestructiveGhTests(unittest.TestCase):
 
     def test_pr_close(self) -> None:
         self.assertEqual(run_guard("gh pr close 42"), "ASK")
+        self.assertEqual(run_guard("gh pr close 42 --delete-branch"), "ASK")
 
     def test_repo_delete(self) -> None:
         self.assertEqual(run_guard("gh repo delete owner/repo"), "ASK")
@@ -519,11 +520,11 @@ class DestructiveGhTests(unittest.TestCase):
 class BypassRegressionTests(unittest.TestCase):
     """Branch names containing safe-looking substrings should still ask."""
 
-    def test_merge_feature_merge_base_fix(self) -> None:
-        self.assertEqual(run_guard("git merge feature/merge-base-fix"), "ASK")
+    def test_push_feature_merge_base_fix(self) -> None:
+        self.assertEqual(run_guard("git push origin feature/merge-base-fix"), "ASK")
 
-    def test_rebase_topic_commit_graph(self) -> None:
-        self.assertEqual(run_guard("git rebase topic/commit-graph-cleanup"), "ASK")
+    def test_push_topic_commit_graph(self) -> None:
+        self.assertEqual(run_guard("git push origin topic/commit-graph-cleanup"), "ASK")
 
 
 class SafeCommandTests(unittest.TestCase):
@@ -647,9 +648,6 @@ class JsonPayloadTests(unittest.TestCase):
         self.assertEqual(hook["permissionDecision"], expected_decision)
         self.assertIsInstance(hook["permissionDecisionReason"], str)
         self.assertTrue(len(hook["permissionDecisionReason"]) > 0)
-
-    def test_git_commit_payload(self) -> None:
-        self._assert_valid_payload('git commit -m "msg"', "ask")
 
     def test_git_push_payload(self) -> None:
         self._assert_valid_payload("git push origin main", "ask")
@@ -989,9 +987,8 @@ class ShellProseWriteTests(unittest.TestCase):
             self._decision("echo 'The word `pivotal` is banned.' > notes.md"))
 
     def test_commit_message_is_left_to_the_git_gate(self):
-        # Not a prose file, so this gate stays out; the destructive-git row
-        # still asks for the commit itself.
-        self.assertEqual(self._decision('git commit -m "A pivotal fix"'), "ask")
+        # Not a prose file, so this gate stays out, and a commit is local.
+        self.assertIsNone(self._decision('git commit -m "A pivotal fix"'))
 
     def test_declared_scratch_path_built_in_the_command_passes(self):
         scratch = self._scratch()
@@ -1096,9 +1093,8 @@ class ShellProseWriteTests(unittest.TestCase):
             "> AGENTS.md lists delve as a banned word.\nEOF"))
 
     def test_commit_message_quoting_a_redirection_reaches_the_git_gate(self):
-        self.assertEqual(self._decision(
-            'git commit -m "Close the bypass where echo delve > notes.md passed"'),
-            "ask")
+        self.assertIsNone(self._decision(
+            'git commit -m "Close the bypass where echo delve > notes.md passed"'))
 
     def test_read_only_sed_with_attached_script_passes(self):
         self.assertIsNone(self._decision("sed -n -e'/pivotal/p' notes.md"))
@@ -1281,8 +1277,8 @@ class CodexHookTests(unittest.TestCase):
         self.assertIsNone(self._decision("Bash", "echo delve > build.log"))
         # A Codex hook cannot ask, and a deny would outlast the user's
         # approval in the conversation, so the approval rows pass.
-        for cmd in ("git push origin main", "git commit -m wip",
-                    "gh pr create", "rm -rf build"):
+        for cmd in ("git push origin main", "npm publish",
+                    "gh pr create", "dd if=/dev/zero of=disk.img"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self._decision("Bash", cmd))
 
@@ -2688,7 +2684,7 @@ class HookReachabilityTests(unittest.TestCase):
         ("MultiEdit", {"file_path": "/tmp/probe.md",
                        "edits": [{"new_string": "A pivotal idea.\n"}]}, "deny"),
         ("Bash", {"command": "git push origin main"}, "ask"),
-        ("PowerShell", {"command": "Remove-Item -Recurse -Force C:\\tmp\\x"}, "ask"),
+        ("PowerShell", {"command": "gh release create v1.0.0"}, "ask"),
     )
 
     @staticmethod
@@ -3721,7 +3717,7 @@ class CompoundCdQuoteAwareTests(unittest.TestCase):
 
 class PerGuardEscapeEnvTests(unittest.TestCase):
     """v0.7.0 finding A: narrowly-scoped per-guard escape envs. Each env
-    disables only its target guard; destructive git/gh stay always-on."""
+    disables only its target guard; the outward-action asks stay always-on."""
 
     def test_style_hook_off_disables_writing_style(self) -> None:
         resp = _run_with_envs(
@@ -3782,18 +3778,17 @@ class PerGuardEscapeEnvTests(unittest.TestCase):
 
 class DestructiveNonBypassTests(unittest.TestCase):
     """v0.7.0 Round 1 finding 1 + Round 2 finding 5: NO escape env may turn
-    destructive git/gh `ask` checks into pass-through. Parametrized over the
+    outward-action `ask` checks into pass-through. Parametrized over the
     advertised `_ESCAPE_HATCH_ENV_NAMES` constant in guard.py so future env
     additions automatically extend this negative-test surface."""
 
     DESTRUCTIVE_COMMANDS = [
-        'git commit -m "test"',
         "git push origin main",
-        "git reset --hard HEAD~1",
-        "git merge feature",
-        "git rebase main",
+        "gh pr create --title t",
         "gh pr merge 123",
         "gh repo delete owner/repo",
+        "npm publish",
+        "dd if=/dev/zero of=/dev/sda",
     ]
 
     def _import_constant(self):
@@ -3949,7 +3944,7 @@ def _classify_payload(command, tool):
 
 
 class ToolAgnosticDestructiveTests(unittest.TestCase):
-    """Destructive git/gh now ask on the PowerShell tool too, not only Bash."""
+    """git push and outward gh ask on the PowerShell tool too, not only Bash."""
 
     def _decision(self, command, tool="PowerShell"):
         resp = _classify_payload(command, tool)
@@ -3958,14 +3953,14 @@ class ToolAgnosticDestructiveTests(unittest.TestCase):
     def test_ps_git_push_asks(self):
         self.assertEqual(self._decision("git push origin main"), "ask")
 
-    def test_ps_git_commit_asks(self):
-        self.assertEqual(self._decision('git commit -m "x"'), "ask")
+    def test_ps_git_commit_passes(self):
+        self.assertIsNone(self._decision('git commit -m "x"'))
 
-    def test_ps_git_reset_hard_asks(self):
-        self.assertEqual(self._decision("git reset --hard HEAD~1"), "ask")
+    def test_ps_git_reset_hard_passes(self):
+        self.assertIsNone(self._decision("git reset --hard HEAD~1"))
 
-    def test_ps_git_branch_D_asks(self):
-        self.assertEqual(self._decision("git branch -D feature"), "ask")
+    def test_ps_git_branch_D_passes(self):
+        self.assertIsNone(self._decision("git branch -D feature"))
 
     def test_ps_gh_pr_merge_asks(self):
         self.assertEqual(self._decision("gh pr merge 42"), "ask")
@@ -4016,22 +4011,23 @@ class PublishClassTests(unittest.TestCase):
         self.assertIsNone(self._decision("gh release list"))
 
 
-class FsDestructiveTests(unittest.TestCase):
+class FsDeleteTests(unittest.TestCase):
+    """Recursive deletes pass; the disk-wipe tools dd, mkfs, and shred ask."""
+
     def _decision(self, command, tool):
         resp = _classify_payload(command, tool)
         return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
 
-    def test_bash_rm_rf_asks(self):
-        self.assertEqual(self._decision("rm -rf /tmp/x", "Bash"), "ask")
+    def test_bash_rm_rf_passes(self):
+        self.assertIsNone(self._decision("rm -rf /tmp/x", "Bash"))
 
-    def test_bash_rm_fr_asks(self):
-        self.assertEqual(self._decision("rm -fr /tmp/x", "Bash"), "ask")
+    def test_bash_rm_fr_passes(self):
+        self.assertIsNone(self._decision("rm -fr /tmp/x", "Bash"))
 
-    def test_bash_rm_r_f_separate_asks(self):
-        self.assertEqual(self._decision("rm -r -f /tmp/x", "Bash"), "ask")
+    def test_bash_rm_r_f_separate_passes(self):
+        self.assertIsNone(self._decision("rm -r -f /tmp/x", "Bash"))
 
     def test_bash_rm_recursive_no_force_passes(self):
-        # matches the existing native rule scope (rm -rf needs force too)
         self.assertIsNone(self._decision("rm -r /tmp/x", "Bash"))
 
     def test_bash_rm_single_file_passes(self):
@@ -4046,13 +4042,13 @@ class FsDestructiveTests(unittest.TestCase):
     def test_bash_shred_asks(self):
         self.assertEqual(self._decision("shred -u secret.key", "Bash"), "ask")
 
-    def test_ps_remove_item_recurse_asks(self):
-        self.assertEqual(
-            self._decision("Remove-Item -Recurse -Force C:\\tmp\\x", "PowerShell"), "ask"
+    def test_ps_remove_item_recurse_passes(self):
+        self.assertIsNone(
+            self._decision("Remove-Item -Recurse -Force C:\\tmp\\x", "PowerShell")
         )
 
-    def test_ps_rm_recurse_alias_asks(self):
-        self.assertEqual(self._decision("rm -Recurse C:\\tmp\\x", "PowerShell"), "ask")
+    def test_ps_rm_recurse_alias_passes(self):
+        self.assertIsNone(self._decision("rm -Recurse C:\\tmp\\x", "PowerShell"))
 
     def test_ps_remove_item_single_passes(self):
         self.assertIsNone(self._decision("Remove-Item C:\\tmp\\file.txt", "PowerShell"))
@@ -4065,8 +4061,8 @@ class WrapperRecursionTests(unittest.TestCase):
         resp = _classify_payload(command, tool)
         return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
 
-    def test_ssh_rm_rf_asks(self):
-        self.assertEqual(self._decision('ssh host "rm -rf /tmp/x"'), "ask")
+    def test_ssh_git_push_asks(self):
+        self.assertEqual(self._decision('ssh host "git push origin main"'), "ask")
 
     def test_ssh_echo_passes(self):
         self.assertIsNone(self._decision('ssh host "echo ok"'))
@@ -4083,14 +4079,17 @@ class WrapperRecursionTests(unittest.TestCase):
     def test_bash_c_safe_passes(self):
         self.assertIsNone(self._decision('bash -c "echo hi"'))
 
-    def test_docker_exec_rm_rf_asks(self):
-        self.assertEqual(self._decision('docker exec c bash -lc "rm -rf /tmp/x"'), "ask")
+    def test_docker_exec_git_push_asks(self):
+        self.assertEqual(self._decision('docker exec c bash -lc "git push origin main"'), "ask")
 
     def test_docker_ps_passes(self):
         self.assertIsNone(self._decision("docker ps -a"))
 
-    def test_ssh_with_port_flag_rm_rf_asks(self):
-        self.assertEqual(self._decision('ssh -p 2222 host "rm -rf /data"'), "ask")
+    def test_sudo_dd_asks(self):
+        self.assertEqual(self._decision("sudo dd if=/dev/zero of=/dev/sda"), "ask")
+
+    def test_ssh_with_port_flag_git_push_asks(self):
+        self.assertEqual(self._decision('ssh -p 2222 host "git push origin main"'), "ask")
 
     def test_depth_within_limit_passes(self):
         # 3 ssh hops to a safe command is within MAX_WRAPPER_DEPTH
@@ -4110,30 +4109,30 @@ class ClassifierFalsePositiveTests(unittest.TestCase):
         resp = _classify_payload(command, tool)
         return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
 
-    def test_echo_rm_rf_string_passes(self):
-        self.assertIsNone(self._decision('echo "rm -rf is dangerous"'))
+    def test_echo_publish_string_passes(self):
+        self.assertIsNone(self._decision('echo "npm publish runs in CI"'))
 
     def test_grep_git_push_passes(self):
         self.assertIsNone(self._decision('grep -r "git push" .'))
 
-    def test_ps_write_output_remove_item_passes(self):
+    def test_ps_write_output_publish_passes(self):
         self.assertIsNone(
-            self._decision('Write-Output "Remove-Item -Recurse -Force"', "PowerShell")
+            self._decision('Write-Output "npm publish"', "PowerShell")
         )
 
-    def test_git_commit_with_rm_rf_in_message_asks_for_commit(self):
-        # asks because of `git commit`, not because the message says rm -rf
-        self.assertEqual(self._decision('git commit -m "drop the rm -rf hack"'), "ask")
+    def test_git_commit_with_push_in_message_passes(self):
+        # the message names `git push`, but only the leading command counts
+        self.assertIsNone(self._decision('git commit -m "run git push after review"'))
 
     def test_python_dash_c_is_opaque(self):
         # python -c carries Python source, not shell — treated as opaque
         self.assertIsNone(
-            self._decision('python -c "import shutil; shutil.rmtree(\'/x\')"')
+            self._decision('python -c "print(\'git push origin main\')"')
         )
 
     def test_custom_wrapper_is_opaque(self):
         # a private runner is not a built-in wrapper; its payload is not pierced
-        self.assertIsNone(self._decision('myrunner.py run "rm -rf /tmp/x"'))
+        self.assertIsNone(self._decision('myrunner.py run "git push origin main"'))
 
 
 class CodeReviewRegressionTests(unittest.TestCase):
@@ -4164,14 +4163,14 @@ class CodeReviewRegressionTests(unittest.TestCase):
         self.assertIsNone(self._decision("/usr/bin/git status"))
 
     # H2: recursive delete flag variants (uppercase R, PowerShell abbreviation)
-    def test_bash_rm_Rf_uppercase_asks(self):
-        self.assertEqual(self._decision("rm -Rf /tmp/x"), "ask")
+    def test_bash_rm_Rf_uppercase_passes(self):
+        self.assertIsNone(self._decision("rm -Rf /tmp/x"))
 
-    def test_bash_rm_fR_asks(self):
-        self.assertEqual(self._decision("rm -fR /tmp/x"), "ask")
+    def test_bash_rm_fR_passes(self):
+        self.assertIsNone(self._decision("rm -fR /tmp/x"))
 
-    def test_ps_remove_item_rec_abbrev_asks(self):
-        self.assertEqual(self._decision("Remove-Item -Rec -Force C:\\tmp\\x", "PowerShell"), "ask")
+    def test_ps_remove_item_rec_abbrev_passes(self):
+        self.assertIsNone(self._decision("Remove-Item -Rec -Force C:\\tmp\\x", "PowerShell"))
 
     # H3: wrapper option forms before the payload
     def test_powershell_executionpolicy_command_git_push_asks(self):
@@ -4179,17 +4178,17 @@ class CodeReviewRegressionTests(unittest.TestCase):
             self._decision('powershell -ExecutionPolicy Bypass -Command "git push"'), "ask"
         )
 
-    def test_powershell_executionpolicy_command_remove_item_asks(self):
+    def test_powershell_executionpolicy_command_gh_pr_merge_asks(self):
         self.assertEqual(
             self._decision(
-                'powershell -ExecutionPolicy Bypass -Command "Remove-Item -Recurse -Force C:\\tmp\\x"'
+                'powershell -ExecutionPolicy Bypass -Command "gh pr merge 42"'
             ),
             "ask",
         )
 
-    def test_docker_global_context_exec_rm_rf_asks(self):
+    def test_docker_global_context_exec_git_push_asks(self):
         self.assertEqual(
-            self._decision('docker --context prod exec c bash -lc "rm -rf /tmp/x"'), "ask"
+            self._decision('docker --context prod exec c bash -lc "git push"'), "ask"
         )
 
     # M4: publish with global options before the verb
@@ -4223,11 +4222,11 @@ class CodeReviewRound2RegressionTests(unittest.TestCase):
         return None if resp is None else resp["hookSpecificOutput"]["permissionDecision"]
 
     # H2: shorter PowerShell -Recurse prefixes
-    def test_ps_remove_item_re_abbrev_asks(self):
-        self.assertEqual(self._decision("Remove-Item -Re -Force C:\\tmp\\x", "PowerShell"), "ask")
+    def test_ps_remove_item_re_abbrev_passes(self):
+        self.assertIsNone(self._decision("Remove-Item -Re -Force C:\\tmp\\x", "PowerShell"))
 
-    def test_ps_rm_re_abbrev_asks(self):
-        self.assertEqual(self._decision("rm -Re C:\\tmp\\x", "PowerShell"), "ask")
+    def test_ps_rm_re_abbrev_passes(self):
+        self.assertIsNone(self._decision("rm -Re C:\\tmp\\x", "PowerShell"))
 
     # H3: bash value-options before -c
     def test_bash_o_pipefail_c_git_push_asks(self):
@@ -4254,9 +4253,9 @@ class CodeReviewRound2RegressionTests(unittest.TestCase):
         self.assertIsNone(self._decision('powershell -ExecutionPolicy Bypass -Command "Get-Date"'))
 
     # H3: docker TLS global options
-    def test_docker_tlscacert_exec_rm_rf_asks(self):
+    def test_docker_tlscacert_exec_git_push_asks(self):
         self.assertEqual(
-            self._decision('docker --tlscacert cert.pem exec c bash -lc "rm -rf /tmp/x"'), "ask"
+            self._decision('docker --tlscacert cert.pem exec c bash -lc "git push"'), "ask"
         )
 
     # M4: npm --scope
@@ -4270,14 +4269,14 @@ class CodeReviewRound2RegressionTests(unittest.TestCase):
     def test_sudo_git_push_asks(self):
         self.assertEqual(self._decision("sudo git push"), "ask")
 
-    def test_sudo_rm_rf_asks(self):
-        self.assertEqual(self._decision("sudo rm -rf /tmp/x"), "ask")
+    def test_sudo_rm_rf_passes(self):
+        self.assertIsNone(self._decision("sudo rm -rf /tmp/x"))
 
     def test_sudo_u_user_git_push_asks(self):
         self.assertEqual(self._decision("sudo -u deploy git push"), "ask")
 
-    def test_doas_rm_rf_asks(self):
-        self.assertEqual(self._decision("doas rm -rf /tmp/x"), "ask")
+    def test_doas_git_push_asks(self):
+        self.assertEqual(self._decision("doas git push"), "ask")
 
     def test_sudo_safe_passes(self):
         self.assertIsNone(self._decision("sudo ls -la"))
@@ -4306,8 +4305,8 @@ class CodeReviewRound3RegressionTests(unittest.TestCase):
     def test_path_qualified_env_git_push_asks(self):
         self.assertEqual(self._decision("/usr/bin/env git push"), "ask")
 
-    def test_path_qualified_env_rm_rf_asks(self):
-        self.assertEqual(self._decision("/usr/bin/env rm -rf /tmp/x"), "ask")
+    def test_path_qualified_env_rm_rf_passes(self):
+        self.assertIsNone(self._decision("/usr/bin/env rm -rf /tmp/x"))
 
     def test_path_qualified_env_safe_passes(self):
         self.assertIsNone(self._decision("/usr/bin/env ls -la"))
@@ -4319,24 +4318,24 @@ class CodeReviewRound3RegressionTests(unittest.TestCase):
     def test_cmd_k_git_push_asks(self):
         self.assertEqual(self._decision("cmd /k git push", "PowerShell"), "ask")
 
-    def test_cmd_c_rmdir_s_asks(self):
-        self.assertEqual(self._decision("cmd /c rmdir /s C:\\tmp\\x", "PowerShell"), "ask")
+    def test_cmd_c_gh_pr_create_asks(self):
+        self.assertEqual(self._decision("cmd /c gh pr create", "PowerShell"), "ask")
 
     def test_cmd_c_safe_passes(self):
         self.assertIsNone(self._decision("cmd /c echo hi", "PowerShell"))
 
     # N4: docker run value flags (--mount, --env-file) before the image
-    def test_docker_run_mount_rm_rf_asks(self):
+    def test_docker_run_mount_git_push_asks(self):
         self.assertEqual(
             self._decision(
-                "docker run --mount type=bind,src=/,dst=/host ubuntu rm -rf /host/tmp"
+                "docker run --mount type=bind,src=/,dst=/host ubuntu git push"
             ),
             "ask",
         )
 
-    def test_docker_run_env_file_rm_rf_asks(self):
+    def test_docker_run_env_file_git_push_asks(self):
         self.assertEqual(
-            self._decision("docker run --env-file .env ubuntu rm -rf /tmp/x"), "ask"
+            self._decision("docker run --env-file .env ubuntu git push"), "ask"
         )
 
     def test_docker_run_mount_safe_passes(self):
@@ -4378,10 +4377,9 @@ class CodeReviewRound4RegressionTests(unittest.TestCase):
     def test_ps_command_unquoted_git_push_asks(self):
         self.assertEqual(self._decision("powershell -Command git push", "PowerShell"), "ask")
 
-    def test_ps_command_unquoted_remove_item_asks(self):
-        self.assertEqual(
+    def test_ps_command_unquoted_remove_item_passes(self):
+        self.assertIsNone(
             self._decision("powershell -Command Remove-Item -Recurse -Force C:\\tmp\\x", "PowerShell"),
-            "ask",
         )
 
     def test_pwsh_command_unquoted_gh_release_asks(self):
@@ -4409,27 +4407,27 @@ class CodeReviewRound4RegressionTests(unittest.TestCase):
     def test_nohup_git_push_asks(self):
         self.assertEqual(self._decision("nohup git push"), "ask")
 
-    def test_setsid_rm_rf_asks(self):
-        self.assertEqual(self._decision("setsid rm -rf /tmp/x"), "ask")
+    def test_setsid_git_push_asks(self):
+        self.assertEqual(self._decision("setsid git push"), "ask")
 
     # N7: timeout DURATION COMMAND
     def test_timeout_git_push_asks(self):
         self.assertEqual(self._decision("timeout 30 git push"), "ask")
 
-    def test_timeout_signal_flag_rm_rf_asks(self):
-        self.assertEqual(self._decision("timeout -s KILL 30 rm -rf /tmp/x"), "ask")
+    def test_timeout_signal_flag_git_push_asks(self):
+        self.assertEqual(self._decision("timeout -s KILL 30 git push"), "ask")
 
     def test_timeout_safe_passes(self):
         self.assertIsNone(self._decision("timeout 30 ls -la"))
 
     # N7: xargs (commonly behind a pipe)
-    def test_find_pipe_xargs_rm_rf_asks(self):
+    def test_find_pipe_xargs_gh_release_upload_asks(self):
         self.assertEqual(
-            self._decision("find . -type d -name __pycache__ | xargs rm -rf"), "ask"
+            self._decision("find dist -name '*.whl' | xargs gh release upload v1.0.0"), "ask"
         )
 
-    def test_xargs_n_flag_rm_rf_asks(self):
-        self.assertEqual(self._decision("xargs -n 1 rm -rf"), "ask")
+    def test_xargs_n_flag_git_push_asks(self):
+        self.assertEqual(self._decision("xargs -n 1 git push origin"), "ask")
 
     def test_xargs_safe_passes(self):
         self.assertIsNone(self._decision("echo x | xargs echo hi"))

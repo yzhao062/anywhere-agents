@@ -18,8 +18,13 @@ permission handler already takes; every other target gets a sibling lock. The pr
 content is copied aside first, under a capped history, so a loss caused by
 something outside this script stays recoverable.
 
+A list of scalars merges by union, so a rule that the shared file stops
+shipping would stay on every machine that once merged it. `--retire-withdrawn`
+removes the rules listed in `WITHDRAWN` after the merge. Bootstrap passes it for
+the user-level target only, so a project's own settings keep whatever they list.
+
 Usage:
-    merge_settings.py <target.json> <shared.json>
+    merge_settings.py [--retire-withdrawn] <target.json> <shared.json>
 
 Exit codes:
     0  merged, or nothing to do
@@ -222,6 +227,54 @@ def deep_merge(base: dict, over: dict) -> None:
             base[key] = value
 
 
+# Rules an earlier `user/settings.json` shipped and a later release withdrew,
+# keyed by their path in the settings object. Only these exact strings are
+# removed, and only while the shared file does not list them again. To keep one
+# of them, put it in a project's `.claude/settings.local.json`, or delete it
+# from this table in a fork.
+WITHDRAWN = {
+    # 2026-11-22: approval moved to the point where work leaves the machine
+    # (git push, gh actions that change GitHub state, package publishes).
+    # Local git steps and recursive deletes no longer ask.
+    ("permissions", "ask"): (
+        "Bash(git commit *)",
+        "Bash(git reset --hard *)",
+        "Bash(git checkout -- *)",
+        "Bash(git clean *)",
+        "Bash(git branch -D *)",
+        "Bash(git branch -d *)",
+        "Bash(git branch --delete *)",
+        "Bash(git stash drop *)",
+        "Bash(git stash clear *)",
+        "Bash(git tag -d *)",
+        "Bash(git merge *)",
+        "Bash(git rebase *)",
+        "Bash(rm -rf *)",
+        "Bash(rm -fr *)",
+        "Bash(rm -r -f *)",
+    ),
+}
+
+
+def retire_withdrawn(target: dict, shared: dict) -> None:
+    """Remove the `WITHDRAWN` rules from `target` in place, except any rule the
+    shared file still lists at the same path."""
+    for keys, rules in WITHDRAWN.items():
+        node, shared_node = target, shared
+        for key in keys[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+            shared_node = shared_node.get(key) if isinstance(shared_node, dict) else None
+        if not isinstance(node, dict) or not isinstance(node.get(keys[-1]), list):
+            continue
+        shipped = shared_node.get(keys[-1]) if isinstance(shared_node, dict) else None
+        shipped = shipped if isinstance(shipped, list) else []
+        drop = {rule for rule in rules if rule not in shipped}
+        node[keys[-1]] = [
+            value for value in node[keys[-1]]
+            if not (isinstance(value, str) and value in drop)
+        ]
+
+
 def read_json(path: pathlib.Path):
     """Read JSON as UTF-8 whatever the machine's locale says.
 
@@ -333,8 +386,10 @@ def write_json(path: pathlib.Path, data) -> None:
         raise
 
 
-def merge_into(target: pathlib.Path, shared: pathlib.Path) -> int:
-    """Read both files, merge, back up, and publish. Returns an exit code."""
+def merge_into(target: pathlib.Path, shared: pathlib.Path, retire: bool = False) -> int:
+    """Read both files, merge, back up, and publish. Returns an exit code.
+
+    With `retire`, the `WITHDRAWN` rules are removed after the merge."""
     try:
         shared_data = read_json(shared)
     except Exception as exc:
@@ -366,6 +421,8 @@ def merge_into(target: pathlib.Path, shared: pathlib.Path) -> int:
         # point, which does not read the exit code, carried on regardless.
         sys.stderr.write("merge_settings: cannot merge %s: %s\n" % (target, exc))
         return 1
+    if retire:
+        retire_withdrawn(target_data, shared_data)
     if not target_data:
         # A merge that produced nothing is a defect rather than a state worth
         # persisting; leaving the file alone keeps the old content readable.
@@ -397,11 +454,17 @@ def merge_into(target: pathlib.Path, shared: pathlib.Path) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        sys.stderr.write("usage: merge_settings.py <target.json> <shared.json>\n")
+    args = argv[1:]
+    retire = bool(args) and args[0] == "--retire-withdrawn"
+    if retire:
+        args = args[1:]
+    if len(args) != 2:
+        sys.stderr.write(
+            "usage: merge_settings.py [--retire-withdrawn] <target.json> <shared.json>\n"
+        )
         return 2
-    target = pathlib.Path(argv[1])
-    shared = pathlib.Path(argv[2])
+    target = pathlib.Path(args[0])
+    shared = pathlib.Path(args[1])
     try:
         with settings_lock(target) as held:
             if not held:
@@ -409,7 +472,7 @@ def main(argv: list[str]) -> int:
                     "merge_settings: %s does not support locking; "
                     "merging without it\n" % target.parent
                 )
-            return merge_into(target, shared)
+            return merge_into(target, shared, retire)
     except LockBusy as exc:
         sys.stderr.write("merge_settings: %s\n" % exc)
         return 3

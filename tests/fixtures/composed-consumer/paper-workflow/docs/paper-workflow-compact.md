@@ -16,8 +16,8 @@ The submodule and Overleaf rules apply when the project has a `.gitmodules` file
 - Treat every write inside a submodule as high-risk: a push can land in a collaborator's Overleaf project or co-PI repo, and a careless force-push or overwrite can destroy someone else's work.
 - When the user asks to push or pull a submodule:
   1. Before writing, run `git -C <submodule-path> fetch` and `status` for uncommitted changes, then `log --oneline -5` with and without `--remotes` for recent activity. A submodule is often in detached-HEAD state, where branch comparisons do not apply cleanly.
-  2. Use `git -C <submodule-path>` inside the submodule, and confirm with the user before any commit, push, pull, or reset.
-  3. Back in the parent repo, `git add <submodule-path>` and commit the updated pointer (also with confirmation).
+  2. Use `git -C <submodule-path>` inside the submodule, and confirm with the user before any push.
+  3. Back in the parent repo, `git add <submodule-path>` and commit the updated pointer.
 - A submodule's `.gitignore` may exclude internal-only directories (`.agent/`, `guardrail/`, `figure-spec/`, `figure-src/`); they exist on disk but are not pushed, so a fresh clone lacks them. Warn the user when an expected internal directory is absent.
 - Which directories, which upstream repos, and which files are internal-only belong in the project's `CLAUDE.md` or `AGENTS.local.md`, not here.
 

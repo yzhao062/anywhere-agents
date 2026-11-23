@@ -883,13 +883,17 @@ function Backup-SettingsFile([string]$Path) {
 # invalid UTF-8 byte came back with U+FFFD, both with the run reporting
 # success. The Bash entry point does not read the exit code at all, so leaving
 # the file alone is also what makes the two agree.
-function Invoke-SettingsMerge([string]$TargetPath, [string]$SharedPath) {
+function Invoke-SettingsMerge([string]$TargetPath, [string]$SharedPath, [switch]$RetireWithdrawn) {
   $helper = '.agent-config/repo/scripts/merge_settings.py'
   if (-not $pyCmd) { return $false }
   if (-not (Test-Path -LiteralPath $helper)) { return $false }
+  # --retire-withdrawn removes ask rules an earlier release shipped and has
+  # since withdrawn. The Merge-Json fallback below does not retire them.
+  $mergeFlags = @()
+  if ($RetireWithdrawn) { $mergeFlags = @('--retire-withdrawn') }
   try {
     $global:LASTEXITCODE = $null
-    & $pyCmd.Path $helper $TargetPath $SharedPath
+    & $pyCmd.Path $helper @mergeFlags $TargetPath $SharedPath
     if ($LASTEXITCODE -ne 0) {
       $reason = if ($LASTEXITCODE -eq 3) {
         "another writer held the lock for ${TargetPath}; target left unchanged"
@@ -1594,7 +1598,7 @@ if (Test-Path .agent-config/repo/user/settings.json) {
   # starts clean rather than inheriting a project failure.
   $script:SettingsMergeReason = $null
   $userSettings = Join-Path $userClaude 'settings.json'
-  if (Invoke-SettingsMerge $userSettings '.agent-config/repo/user/settings.json') {
+  if (Invoke-SettingsMerge $userSettings '.agent-config/repo/user/settings.json' -RetireWithdrawn) {
     # The helper ran and took the lock itself; its exit code already decided
     # what the ledger records.
   } else {

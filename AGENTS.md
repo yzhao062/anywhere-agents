@@ -72,7 +72,9 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 
 ## Git Safety and Mechanical Gates
 
-**Never run `git commit` or `git push` without explicit user approval.** Show the proposed command and ask first. This covers every variant: `git commit -m`, `git commit --amend`, `git push`, `git push --force`, `gh pr create` (which pushes), and the rest. Approval in one context does not carry to the next.
+**Never push or publish without explicit user approval.** Show the exact command and its target, plus the commits a push sends, and ask first. This covers `git push` in every variant (`--force` included), `gh pr create`, `gh pr merge`, `gh pr close`, `gh repo delete`, `gh release` changes, and package publishes (`npm publish`, `twine upload`). Approval in one context does not carry to the next.
+
+Other steps run without asking: commits, merges, rebases, resets, branch and tag changes, and deletes. The user reviews the work at the push or publish that sends it out. Two limits remain. Ask before `dd`, `mkfs`, or `shred`, which can wipe a disk. Do not delete or discard work you did not create, such as another session's uncommitted changes or the user's notes, unless the user asks.
 
 `scripts/guard.py`, deployed by bootstrap as a `PreToolUse` hook, enforces these gates before every tool call:
 
@@ -83,10 +85,10 @@ A hand-authored `CLAUDE.md` or `agents/codex.md` without the `GENERATED FILE` he
 | Banner emission | Any tool except `Read`, `Grep`, `Glob`, `Skill`, `Task`, `TodoWrite`, `BashOutput`, `WebFetch`, `WebSearch`, `ToolSearch`, `LS`, `NotebookRead`, and a `Write`/`Edit`/`MultiEdit` whose target is exactly `<project-root>/.agent-config/banner-emitted.json` | `session-event.json.ts` newer than `banner-emitted.json.ts` in the consumer root found by walking up to `.agent-config/bootstrap.{sh,ps1}`; source repos and unrelated directories are not gated | **deny** on the first arm (no acknowledgement file yet) with the instruction to emit the banner and write the acknowledgement; a stale acknowledgement passes through with a `[banner-gate]` advisory |
 | Compound `cd` | `Bash` | `cd <path> && <cmd>` or `cd <path>; <cmd>` | **deny** with a `Suggested rewrite:` line (`git -C <path>`, or the path as an argument) |
 | Nested `git init` | `Bash`, `PowerShell` | A `git init` whose target is already inside a git worktree | **deny** with a `Suggested rewrite:` line pointing at the session scratch directory |
-| Destructive git | `Bash`, `PowerShell` | `git push`, `git commit`, `git merge`, `git rebase`, `git reset --hard`, `git clean`, `git branch -d/-D`, `git checkout --`, `git tag -d`, `git stash drop/clear` | **ask** |
-| Destructive or publishing gh | `Bash`, `PowerShell` | `gh pr create/merge/close`, `gh repo delete`, `gh release create/delete/upload/edit` | **ask** |
+| Push | `Bash`, `PowerShell` | `git push` | **ask** |
+| Outward gh | `Bash`, `PowerShell` | `gh pr create/merge/close`, `gh repo delete`, `gh release create/delete/upload/edit` | **ask** |
 | Publish | `Bash`, `PowerShell` | `npm publish`, `npm unpublish`, `twine upload`, `python -m twine upload` | **ask** |
-| File or device destruction | `Bash`, `PowerShell` | Bash `rm -rf`/`-fr`/`-r -f`, `dd`, `mkfs*`, `shred`; PowerShell `Remove-Item` and its aliases with `-Recurse`/`-r`/`/s` | **ask** |
+| Disk wipe | `Bash` | `dd`, `mkfs*`, `shred` | **ask** |
 
 The four `ask` rows are one classifier that reads the leading token of each sub-command, also inside built-in wrappers such as `bash -c` and `ssh`, and treats `python -c` and private wrappers as opaque. It is not bypassable by any env var: those operations have no agent-side reroute, and human approval is the contract. A gate that has an obvious reroute is a `deny` with the reroute inline, because an unattended loop can take it in one turn where an `ask` would stall. Under Codex they pass, as its hooks cannot ask, and chat approval governs.
 
@@ -104,11 +106,7 @@ Use the narrowest escape only for a legitimate write that quotes a banned word a
 ## Shell Command Style
 
 - Avoid `cd <path> && <command>` chains. Use `git -C <path> <subcommand>` for git in another repo, and pass the target path as an argument otherwise (`ls <path>`, `python <path>/script.py`), or use separate tool calls.
-- Read-only invocations that need no approval: `git status`, `git diff`, `git log`, `git branch` (no flags), `git show`, `git stash list`, `git remote -v`, `git submodule status`, `git ls-files`, `git tag --list`, filesystem reads (`ls`, `cat`), and benign local operations (`mkdir`).
-- Invocations that always need explicit approval: `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, `git merge`, `git branch -d`, `git remote add/remove`, `git tag <name>`, `git stash drop`.
-- `cp` and `mv` are fine for scratch and temporary files. A move or rename of a git-tracked file is reviewed before executing.
 - Do not wrap PowerShell inside PowerShell with inline `-Command` when the payload contains `$` variables; run the body directly or write a temporary `.ps1` and invoke it with `-File`. The outer shell expands `$f`, `$_`, and friends first.
-- Do not delete a scratch directory before rewriting it (`rm -rf <dir>; cp -r <src> <dir>` prompts on every run). Copy into a fresh name or let the consuming script create the directory.
 - Do not pass backslash-heavy or commented content through a shell command. Some command transports collapse doubled backslashes before the shell sees them, even inside a quoted heredoc. In a one-line `python -c`, a `#` comments out the rest of the line. Create the `.py` or `.ps1` with a file-writing tool and run that.
 - Wait for a long job in a background command that exits when it ends; no model-turn status checks.
 
@@ -155,7 +153,7 @@ The first module governs a reply to a person; the other two govern a file, and d
 
 ## Task Routing
 
-- Before starting a task, read the router skill (`my-router`, through the lookup order) to pick the domain skill from prompt keywords, file types, and project structure. Do not ask which skill to use when the routing table gives a clear match; when several could apply, state the detected context and the proposed skill, then ask. The `superpowers` plugin, when active, runs the outer workflow, and the router dispatches during execution.
+- Before starting a task, read the router skill (`my-router`, through the lookup order) to pick the domain skill from prompt keywords, file types, and project structure. Do not ask which skill to use when the routing table gives a clear match; when several could apply, take the closest and name it with the detected context. The `superpowers` plugin, when active, runs the outer workflow, and the router dispatches during execution.
 - `/polish`, when installed, is the entry for drafting or revising prose a person will read; `/vet` (alias of `implement-review`) is the review entry for staged changes and plans.
 - Do not fan work out across subagents or a Workflow run on your own initiative; those workers bill the session's account. When parallel work would help, propose it and let the user choose between `prun` (units run on Agy) and a Workflow. Honor a route the user already chose for the task without asking again. A single helper agent for a bounded lookup is not a fan-out.
 

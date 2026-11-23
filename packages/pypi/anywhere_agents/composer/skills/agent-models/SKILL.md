@@ -95,11 +95,11 @@ For a Claude session already open, read its transcript: `agent_models.py actual 
 
 ## Change a model or an effort
 
-Do this in the source repository your projects bootstrap from (your fork of `anywhere-agents`), never in a consumer project: bootstrap overwrites the copy there. The user approves every commit and push.
+Do this in the source repository your projects bootstrap from (your fork of `anywhere-agents`), never in a consumer project: bootstrap overwrites the copy there. The user approves every push.
 
 1. `agent_models.py set --family <family> --model <name> --effort <level>` changes the family row and renders `user/settings.json`. Add `--role <role>` to write an override for `premium`, `worker`, or `prun-worker`. Add `--role reviewer --role-only` only when a review must differ from the interactive session, and say why in the commit.
 2. `agent_models.py show`, then run `tests/test_agent_models.py` and the dispatcher tests (`test_dispatch_claude.py`, `test_dispatch_codex.py`, `test_dispatch_gemini.py`, `test_dispatch_grok.py`, `test_dispatch_task_agy.py`, `test_dispatch_task_grok.py`, `test_dispatch_task.py`, `test_render_banner.py`).
-3. Run `/vet`, wait for approval, then commit and push.
+3. Run `/vet`, commit once it passes, and push after the user approves.
 4. Bring the change to each consumer project: run bootstrap there, or start a new session in it, since bootstrap runs at session start. Bootstrap merges the Claude settings and runs `sync`.
 5. Run `doctor`, then `verify`. Start a new Claude session, since an open one keeps its startup effort. Run one `/vet both` round and check the `review-model` records.
 6. On every other machine, pull and run bootstrap in one consumer.
