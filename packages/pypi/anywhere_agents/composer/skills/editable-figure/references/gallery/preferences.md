@@ -162,6 +162,16 @@ Initial feedback was recorded on 2026-09-25; later additions carry their own dat
 
 **Design implication:** The whole figure is acceptable. Borrow the orderly comparison on the right and avoid copying the central yellow fill.
 
+## 25 DARPA FLASH · Figure 1
+
+**作者反馈：** 2026-11-25：“箭头加小阴影在这个 figure 里我觉得体现了一种设计我还比较喜欢。对于这种科学性很强的题案，我觉得简洁和 elegance 这次是个不错的选择。”
+
+**作者反馈：** 2026-11-25：“illustrative 3 肯定是错的，我忘了删除。”
+
+**作者反馈：** 2026-11-25：“那个小飞机也不浮夸。”
+
+**Design implication:** Use understated aircraft icons that establish the application without dominating the mechanism. Use restrained arrow shadows and a simple, elegant composition when the figure serves a scientifically dense proposal. This approval is specific to that context and supports choosing a quieter visual direction when it fits the scientific story. The stored original contains “Illustrative: 3 fail”; omit that rejected text in future figures under the main skill's figure-text prohibition.
+
 ## Working Interpretation Across Examples
 
 The November additions pair real scenes with elegant presentation (22, 23), and use annotation to explain observations within domain imagery (18, 19). For mechanism detail inspect 20 for composed 3D views or the right panel of 24 for aligned comparisons. Use the scene in 21 when location matters to the question.

@@ -417,7 +417,22 @@
       "changes": "Figure artwork cropped from the linked paper; caption excluded.",
       "collection_note": "On 2026-11-15 the maintainer requested distribution of this 24-figure collection via anywhere-agents and local consumer bootstrap.",
       "paper_url": "https://arxiv.org/abs/2301.12597v3"
+    },
+    {
+      "id": "25-darpa-flash",
+      "title": "DARPA FLASH · Figure 1",
+      "role": "科学性强的提案：简洁、优雅的表达与带轻微阴影的箭头；勿沿用 Illustrative: 3 fail",
+      "repository": "NSF-Proposal-Template-Yue",
+      "source_path": "proposals/archived/darpa-flash-rfi-2026-due-1130/figure/figure1-overview.pdf",
+      "copied_file": "25-darpa-flash/figure1.pdf",
+      "preview": "25-darpa-flash/preview.png",
+      "sha256": "304550640e6d427e1ac8d89a72fe441577b75751e520e057b01c992745732cd3",
+      "collected_on": "2026-11-25",
+      "feedback_updated_on": "2026-11-25",
+      "page": 1,
+      "preference_status": "Positive for understated aircraft icons, subtle arrow shadows and simple, elegant presentation in a scientifically dense proposal context; rejects Illustrative: 3 fail",
+      "source_note": "Figure 1 from the five-page FLASH RFI response marked submitted on 2026-11-25. Original artwork retained, including the example-status label explicitly rejected by the author. RFI response; no award claim."
     }
   ],
-  "updated_on": "2026-11-15"
+  "updated_on": "2026-11-25"
 }

@@ -10,7 +10,7 @@ Before choosing a composition or drafting a generation prompt, read the dated fe
 
 Use that mapping to determine composition, visual variety, technical detail, color/form consistency, and domain-object treatment before applying generic defaults. In particular, 14 is a strongly liked overall style donor. Reference 12 supports a large readable ecosystem overview; 10 and 11 support impactful real-world imagery and logos, and 11 also integrates them with technical detail. Use 13 for equations and consistent encodings, and 15 for professional clarity while avoiding its heavy colors. Choose by the current scientific story; the ranking does not make a single layout mandatory for every figure.
 
-For domain-image annotation inspect 18 and 19. Use 20 for depth and component composition, and 21 when a shared location explains the topic. Compare 22 and 23 for elegant treatment with real scene photos. Use 24 for its orderly right panel.
+For domain-image annotation inspect 18 and 19. Use 20 for depth and component composition, and 21 when a shared location explains the topic. Compare 22 and 23 for elegant treatment with real scene photos. Use 24 for its orderly right panel. For scientifically dense proposals, 25 supports simple, elegant composition and subtle arrow shadows; its example-status text is rejected.
 
 Also read [recent workflow feedback](../recent-workflow-feedback.md) for the 2026-11-18 concept-selection gate, the 2026-10-17 concept-first preference, the Meta central illustration (16), the full overview (17), and cross-project reconstruction failures. The center is strongly liked, and the full figure is now a positive reference with explicit approval of the upper part. Optimization of the lower strip is deferred.
 
@@ -32,7 +32,7 @@ The author permits collecting figures from papers and awarded proposals in this 
 
 ## Starting references
 
-Figures 01 to 09 were collected and visually inspected on 2026-09-25; 10 to 15 were added on 2026-09-26; 16 and 17 were added on 2026-10-17 as central-detail and full-overview views of the same Meta figure. Entries 18 to 24 were added on 2026-11-15. Entries 01 to 05 and 08 retain their original single-page PDFs with PNG previews; 06, 07, and 09 retain unmodified figure PNGs from arXiv v1. Figure 08 matches the overview PDF in the supplied nested Overleaf ZIP byte for byte. The table summarizes the author's feedback; the complete record and separate design interpretations are in [preferences.md](preferences.md).
+Figures 01 to 09 were collected and visually inspected on 2026-09-25; 10 to 15 were added on 2026-09-26; 16 and 17 were added on 2026-10-17 as central-detail and full-overview views of the same Meta figure. Entries 18 to 24 were added on 2026-11-15. Entry 25 was added on 2026-11-25 from the submitted DARPA FLASH RFI response. Entries 01 to 05 and 08 retain their original single-page PDFs with PNG previews; 06, 07, and 09 retain unmodified figure PNGs from arXiv v1. Figure 08 matches the overview PDF in the supplied nested Overleaf ZIP byte for byte. The table summarizes the author's feedback; the complete record and separate design interpretations are in [preferences.md](preferences.md).
 
 | Example | Recorded preference | Useful role and boundary | Source |
 |---|---|---|---|
@@ -60,6 +60,7 @@ Figures 01 to 09 were collected and visually inspected on 2026-09-25; 10 to 15 w
 | [22 PaLM-E · Figure 1](22-palm-e/preview.png) | Likes the elegant style and real scenes, paired with 23 | Central model surrounded by concrete tasks | [Original paper](https://arxiv.org/pdf/2303.03378v1#page=1) |
 | [23 RT-2 · Figure 1](23-rt-2/preview.png) | Likes the elegant style and real scenes, paired with 22 | Training inputs on the left and robot actions on the right | [Original paper](https://arxiv.org/pdf/2307.15818v1#page=2) |
 | [24 BLIP-2 · Figure 2](24-blip-2/preview.png) | Acceptable overall; prefers the orderly right panel; finds the central yellow palette less elegant | Use aligned matrices with consistent axes and cell sizes to compare the three attention masks. The color feedback concerns the central panel of this figure. | [Original paper](https://arxiv.org/pdf/2301.12597v3#page=3) |
+| [25 DARPA FLASH · Figure 1](25-darpa-flash/preview.png) | Likes understated aircraft icons, small arrow shadows and simple, elegant presentation for a scientifically dense proposal | Variant row, evidence number line, and screening loop; omit the rejected “Illustrative: 3 fail” text | [Figure PDF](25-darpa-flash/figure1.pdf) |
 
 The role column identifies visible structure; it does not add new author preferences. Keep future feedback tied to these stable numbers and preserve distinctions between overall preference, color-only preference, and an acceptable style.
 
