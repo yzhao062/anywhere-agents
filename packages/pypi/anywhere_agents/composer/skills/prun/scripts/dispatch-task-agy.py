@@ -44,6 +44,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import BinaryIO, Iterable, NamedTuple
@@ -1013,6 +1015,50 @@ def response_path_for(result_path: Path) -> Path:
     )
 
 
+# An absolute path in a closing response, plain or as a `file://` URL (the
+# form a Markdown link to a local file takes). Paths with spaces count only
+# in URL form, where they are percent-encoded.
+_RESPONSE_PATH_RE = re.compile(r"(?i:file://)[^\s()<>\[\]\"'`]+|(?<![\w:/])/[^\s()<>\[\]\"'`]+")
+
+
+def find_relocated_result(
+    response: str, result_path: Path, launch_time: float, state_dir: Path
+) -> Path | None:
+    """Return a result the worker wrote under a mistyped path, or None.
+
+    Workers sometimes mistype the session UUID in a long result path, write
+    the full result there, and name that path in their closing response.
+    A file is adopted only when it has the result's basename, is not the
+    result path or another unit's, is non-empty, and was written after the
+    unit launched.
+    """
+    others = set()
+    for record in state_dir.parent.glob("prun-task-*/result-file"):
+        if record.parent != state_dir:
+            try:
+                recorded = record.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            # The Codex dispatcher records a logical path such as /var/...
+            others.update((recorded, str(Path(recorded).resolve())))
+    for match in _RESPONSE_PATH_RE.finditer(response):
+        token = match.group(0).rstrip(".,;:!?")
+        if token.lower().startswith("file://"):
+            token = urllib.request.url2pathname(urllib.parse.urlparse(token).path)
+        candidate = Path(token)
+        if candidate.name != result_path.name or candidate == result_path:
+            continue
+        if str(candidate) in others or str(candidate.resolve()) in others:
+            continue
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if candidate.is_file() and stat.st_size > 0 and stat.st_mtime >= launch_time:
+            return candidate
+    return None
+
+
 def publish_fallback(
     result_path: Path,
     unit_id: str,
@@ -1256,7 +1302,8 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         return fail(f"failed to prepare isolated working directory: {exc}")
 
-    timestamp = int(time.time())
+    launch_time = time.time()
+    timestamp = int(launch_time)
     (state_dir / "pre-mtime").write_text("0\n", encoding="utf-8")
     (state_dir / "timestamp").write_text(f"{timestamp}\n", encoding="utf-8")
     (state_dir / "result-file").write_text(f"{result_path}\n", encoding="utf-8")
@@ -1493,6 +1540,25 @@ def main(argv: list[str] | None = None) -> int:
                 refresh_quota_cache(force=True)
 
     worker_wrote = result_path.is_file() and result_path.stat().st_size > 0
+    if not worker_wrote and response is not None and response.strip():
+        relocated = find_relocated_result(
+            response, result_path, launch_time, state_dir
+        )
+        if relocated is not None:
+            try:
+                relocated_text = relocated.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                atomic_publish(result_path, relocated_text, nonce)
+            except OSError:
+                pass
+            else:
+                print(
+                    f"dispatch-task-agy: RESULT-RELOCATED {relocated} -> {result_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                worker_wrote = True
     if worker_wrote:
         # The worker followed the prun return contract and wrote its own
         # result file during the run. Keep it: replacing it with the final

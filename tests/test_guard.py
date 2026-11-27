@@ -382,6 +382,106 @@ class NestedGitInitTests(unittest.TestCase):
         self.assertIn("scratch", reason)
         self.assertIn("AGENT_NESTED_GIT_INIT_HOOK", reason)
 
+    def test_assigned_variable_outside_worktree_passes(self) -> None:
+        r_out = self.outside / "agent-io" / "vet-federal"
+        v_out = self.outside / "vet"
+        root_out = self.outside / "vet-abc"
+        d_out = self.outside / "x"
+        for command, label in (
+            (f"R={r_out}; git init -q $R && git -C $R add -A",
+             "semicolon assignment with git -C follow-up"),
+            (f"V={v_out}; mkdir -p $V; git init -q $V",
+             "assignment with mkdir between assignment and git init"),
+            (f'root={root_out}; git init -q "$root"',
+             "double-quoted variable target"),
+            (f'd={d_out}\ngit -C "$d" init',
+             "newline assignment feeding git -C"),
+            ('v=$(mktemp -d); git init -q "$v"',
+             "command substitution leaves target unknown"),
+            ('v="$(mktemp -d)"; git init -q "$v"',
+             "quoted command substitution leaves target unknown"),
+            ('v=`mktemp -d`; git init -q "$v"',
+             "backtick command substitution leaves target unknown"),
+            ('git init -q "$GUARD_TEST_UNSET_DIR"',
+             "unset variable target"),
+            ('git -C "$GUARD_TEST_UNSET_DIR" init',
+             "unset variable in git -C"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(self._decide(command, self.inside), "PASSED", label)
+
+    def test_assigned_variable_inside_worktree_is_still_denied(self) -> None:
+        for command, cwd, env, label in (
+            ("P=$PWD/sub; git init $P", self.inside, None,
+             "$PWD-relative assignment inside repo"),
+            ("P=$PWD/sub; git init $P", self.inside, {"PWD": str(self.outside)},
+             "$PWD resolves from cwd even when env PWD differs"),
+            (f"P={self.inside / 'sub'}; git init $P", self.outside, None,
+             "absolute in-repo assignment from outside cwd"),
+            (f'export P={self.inside / "sub"}; git init "$P"', self.outside, None,
+             "exported in-repo assignment"),
+            (f'd={self.inside}; git -C "$d" init', self.outside, None,
+             "assigned variable in git -C pointing inside repo"),
+            (f"B={self.inside} V=$B/sub; git init $V", self.outside, None,
+             "second assignment in one command reads the first"),
+            (f"OUT={self.outside / 'x'} true; git init sub", self.inside, None,
+             "inline prefix assignment does not change relative target"),
+            ("git init", self.inside, None,
+             "plain git init inside repo"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(
+                    self._decide(command, cwd, env=env), "DENY", label,
+                )
+
+    def test_codex_hook_resolves_assigned_variables(self) -> None:
+        for target, expected in ((self.outside / "vet", None),
+                                 (self.inside / "sub", "deny")):
+            payload = {
+                "hook_event_name": "PreToolUse", "turn_id": "t1",
+                "cwd": str(self.inside), "tool_name": "Bash",
+                "tool_input": {"command": f"V={target}; git init -q $V"},
+            }
+            result = subprocess.run(
+                [sys.executable, str(GUARD), "--agent", "codex"],
+                input=json.dumps(payload), capture_output=True, text=True,
+                check=True,
+            )
+            response = json.loads(result.stdout) if result.stdout.strip() else None
+            decision = response and response["hookSpecificOutput"]["permissionDecision"]
+            with self.subTest(target=target.name):
+                self.assertEqual(decision, expected)
+
+    def test_saved_value_ignores_later_reassignment(self) -> None:
+        # Round 1 (Codex): `saved=$base` keeps the value base had then.
+        inside, outside = self.inside / "sub", self.outside / "vet"
+        for first, second, expected in (
+            (inside, outside, "DENY"),
+            (outside, inside, "PASSED"),
+        ):
+            command = f'base={first}; saved=$base; base={second}; git init "$saved"'
+            with self.subTest(first=first.name):
+                self.assertEqual(self._decide(command, self.outside), expected)
+
+    def test_powershell_assigned_variable(self) -> None:
+        for command, cwd, expected, label in (
+            (f'$R = "{self.outside / "vet"}"; git init -q $R',
+             self.inside, "PASSED", "PowerShell outside assignment"),
+            (f'$R = "{self.inside / "sub"}"; git init -q $R',
+             self.outside, "DENY", "PowerShell inside assignment"),
+        ):
+            with self.subTest(label):
+                response = run_guard_with_payload(
+                    {"tool_name": "PowerShell", "tool_input": {"command": command}},
+                    cwd=str(cwd),
+                )
+                decision = (
+                    "PASSED"
+                    if response is None
+                    else response["hookSpecificOutput"]["permissionDecision"].upper()
+                )
+                self.assertEqual(decision, expected, label)
+
 
 class GitDirectTests(unittest.TestCase):
     """git push asks; every local git command passes, destructive or not."""
@@ -1130,6 +1230,14 @@ class ShellProseWriteTests(unittest.TestCase):
         self.assertIsNone(self._decision(
             f"P={scratch}; cat > \"$P/agent-io/prompt.txt\" <<'EOF'\n"
             "delve\nEOF\nP=/repo"))
+
+    # Round 2 (Agy): assignments in one command chain left to right.
+
+    def test_assignments_in_one_command_chain(self):
+        self.assertEqual(self._decision(
+            'D=/repo B=$D/notes.md; echo delve > "$B"'), "deny")
+        self.assertEqual(self._decision(
+            "D=/repo B=$D/notes.md bash -c 'echo delve > \"$B\"'"), "deny")
 
     def test_command_local_and_child_assignments_do_not_persist(self):
         self.assertIsNone(self._decision('OUT=notes.md true; echo delve > "$OUT"'))

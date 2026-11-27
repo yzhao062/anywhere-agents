@@ -1,6 +1,6 @@
 # Agy Dispatcher Reference: Models, Quota, and Sandbox
 
-Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`, when a `MODEL-*` line appears, a dispatch exits 75, or a unit exits 124, or when the sandbox (Agy's `--sandbox` flag) needs changing.
+Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`, when a `MODEL-*` line appears, a dispatch exits 75, or a unit exits 124, when the sandbox (Agy's `--sandbox` flag) needs changing, or when auto mode refuses a dispatch.
 
 - The Agy dispatcher (`dispatch-task-agy.py`) defaults to the registry's `prun-worker` row for Agy: stem plus effort tier gives the slug, and
   `second_model` gives the second group's slug. `DEFAULT_MODEL`, `DEFAULT_EFFORT`, and
@@ -80,3 +80,7 @@ Read this when you are about to override `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAV
   repository. They do not enforce filesystem or network isolation; the worker must follow the
   prompt's ban on commit, push, and destructive git.
 - **Idle reaper (`PRUN_STALL_THRESHOLD`).** When `PRUN_STALL_THRESHOLD` seconds (default 600) pass without stdout or stderr output, the dispatcher sends SIGTERM and then SIGKILL (after 2 s) to the Agy process and its descendants. The unit exits 124, writes a `FALLBACK` (a result the worker already wrote is kept), and appends a `[reaper]` line to the tail. The conversation id is kept, so `--continue-from` can resume the unit. Set `PRUN_STALL_THRESHOLD` on the dispatch command, not only on `monitor.sh`, for units that run a single command longer than ten minutes. `ANTIGRAVITY_DISPATCH_TIMEOUT_SECONDS` / `--print-timeout` stays the wall-clock cap.
+
+## Automatic Launch Route
+
+Claude Code's auto-mode classifier judges each dispatcher command, and in two sessions it refused `dispatch-task-agy.py` and `dispatch-task.sh` with `[Unauthorized Access]` while it let the Grok dispatcher through, because the machine's `autoMode.allow` entry named only the Grok dispatchers. To run Agy units, and Codex units the user names, unattended under auto mode, describe `dispatch-task-agy.py` and `dispatch-task.sh` in the same machine-local `~/.claude/settings.json` entry, after `"$defaults"`. `references/grok-executor.md` gives the limits that apply to any such entry, and `skills/implement-review/references/grok-backend.md` shows its shape. Without the entry, auto mode may refuse the unit; then tell the user, who can run the dispatch command with a `!` prefix or add the entry.

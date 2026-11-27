@@ -15,7 +15,7 @@ Stdout schema (one machine-parseable line per check/heuristic):
 
 Exit code:
   0 if no FAIL (WARN-only is exit 0)
-  1 if any Check 1-6/10 FAIL or required dispatch state missing/stale
+  1 if any Check 1-5/10 FAIL or required dispatch state missing/stale
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ SUSPICIOUS_PHRASES = [
     r"i cannot",
     r"failed to",
     r"permission denied",
-    r"rate limit",
+    r"rate limit(?:ed|ing|s)?",
     r"unable to access",
     r"(?:unable|not able) to (?:execute|run)",
     r"do not have access",
@@ -42,7 +42,7 @@ SUSPICIOUS_PHRASES = [
     r"quota",
     r"command not found",
     r"no such file",
-    r"sandbox.*fail",
+    r"sandbox.*fail\w*",
 ]
 
 # Check 8 failure vocabulary, split into two tiers (Fix B; see the Check 8 row
@@ -355,12 +355,14 @@ def strip_code_spans(text: str) -> str:
     The spans come from :func:`code_span_bounds`. Matching runs whole fixed
     the old failure: an inline four-backtick span quoting a fence was read as
     a three-backtick fence that ran to the next fenced block and removed the
-    status line between them.
+    status line between them. Each removed span leaves its newline characters
+    behind so line numbers of the stripped text match the original.
     """
     pieces: list[str] = []
     keep_from = 0
     for start, end in code_span_bounds(text):
         pieces.append(text[keep_from:start])
+        pieces.append("\n" * text.count("\n", start, end))
         keep_from = end
     pieces.append(text[keep_from:])
     return "".join(pieces)
@@ -755,9 +757,8 @@ def main(argv: list[str] | None = None) -> int:
             if matched:
                 emit("PASS", "check-6", f"scope-mentions={len(matched)}/{len(all_refs)}")
             else:
-                emit("FAIL", "check-6",
+                emit("WARN", "check-6",
                      f"no-scope-files-mentioned prompt-refs={','.join(all_refs)}")
-                any_fail = True
         else:
             emit("PASS", "check-6", "no-explicit-files-in-prompt")
     else:
@@ -765,7 +766,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # ----- Check 7: review-text suspicious phrases (exclude code spans) -----
     review_no_code = strip_code_spans(review_text)
-    pattern_7 = re.compile("|".join(SUSPICIOUS_PHRASES), re.IGNORECASE)
+    pattern_7 = re.compile(
+        r"\b(?:" + "|".join(SUSPICIOUS_PHRASES) + r")\b", re.IGNORECASE
+    )
     check7_hits: list[int] = []
     for line_num, line in enumerate(review_no_code.splitlines(), 1):
         if pattern_7.search(line):

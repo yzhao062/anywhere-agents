@@ -15,8 +15,7 @@ gathers their results, reviews their diffs, and integrates. It never runs a unit
 
 **No Claude-side workers.** A Sonnet subagent, a Workflow agent, or any other Agent-tool worker draws
 on the same Claude account as the coordinating session, so a fan-out of them spends the pool the
-session itself needs. Exact plan buckets can change, so inspect current Agy quota before a large
-batch.
+session itself needs. Inspect current Agy quota before a large batch.
 
 `prun` never starts a Workflow or a Claude subagent, not as a unit, a fallback, or a second panel. A
 Claude panel the user explicitly asks for is a Workflow run outside `prun`. A cross-vendor read on
@@ -39,7 +38,7 @@ withholds.
 | File | Read when |
 |---|---|
 | [references/grok-executor.md](references/grok-executor.md) | the user names Grok for a unit or a batch |
-| [references/agy-quota-and-models.md](references/agy-quota-and-models.md) | before overriding `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`; when a `MODEL-*` line appears or a dispatch exits 75; or when the sandbox needs changing |
+| [references/agy-quota-and-models.md](references/agy-quota-and-models.md) | before overriding `ANTIGRAVITY_DISPATCH_MODEL`, `ANTIGRAVITY_DISPATCH_EFFORT`, or `ANTIGRAVITY_PREFLIGHT`; when a `MODEL-*` line appears or a dispatch exits 75; when the sandbox needs changing; or when auto mode refuses a dispatch |
 | [references/codex-executor.md](references/codex-executor.md) | the user names Codex for a unit or a batch |
 | [references/state-recovery.md](references/state-recovery.md) | a run was interrupted, or `gather` replaces `monitor` |
 | [references/web-units.md](references/web-units.md) | a unit needs the web |

@@ -1009,7 +1009,9 @@ def _record_assignments(words, shell, assignments):
     command is nothing but assignments (`export` and its kin included);
     `OUT=x cmd` sets OUT for `cmd` alone and is skipped. PowerShell's
     `$name = value` counts only as a whole three-word command, since anything
-    longer is an expression.
+    longer is an expression. A value is expanded when it is assigned, as the
+    shell does, so a later reassignment of a variable it names leaves it
+    unchanged.
     """
     if shell == "powershell":
         if not words or not words[0].startswith("$"):
@@ -1020,17 +1022,38 @@ def _record_assignments(words, shell, assignments):
                 return
             value = words[2]
         if _SHELL_NAME.fullmatch(name):
-            assignments[name] = value
+            assignments[name] = _expand_shell_variables(value, assignments)
         return
-    found = {}
+    updated = dict(assignments)
     for word in words:
         if word in ("export", "local", "declare", "readonly"):
             continue
         match = _SHELL_ASSIGNMENT_WORD.fullmatch(word)
         if not match:
             return
-        found[match.group(1)] = match.group(2)
-    assignments.update(found)
+        # `A=x B=$A/sub` sees A=x, as Bash assigns left to right.
+        updated[match.group(1)] = _expand_shell_variables(
+            match.group(2), updated,
+        )
+    assignments.update(updated)
+
+
+def _expand_shell_variables(text, assignments):
+    """Expand the variables in `text` from `assignments`, then the environment.
+
+    A variable known to neither keeps its `$` form, so the caller can tell
+    the result is not fully known.
+    """
+    def expand(m):
+        if m.group(1):
+            return os.environ.get(m.group(1), m.group(0))
+        name = m.group(2) or m.group(5)
+        value = assignments.get(name, os.environ.get(name))
+        if m.group(3) and (value is None or (m.group(3) == ":-" and not value)):
+            return m.group(4)
+        return m.group(0) if value is None else value
+
+    return _SHELL_VARIABLE.sub(expand, text)
 
 
 def _shell_prose_targets(commands, shell, assignments, depth=0):
@@ -1061,7 +1084,9 @@ def _shell_prose_targets(commands, shell, assignments, depth=0):
                     for word in words[:len(words) - len(parts)]:
                         match = _SHELL_ASSIGNMENT_WORD.fullmatch(word)
                         if match:
-                            child[match.group(1)] = match.group(2)
+                            child[match.group(1)] = _expand_shell_variables(
+                                match.group(2), child,
+                            )
                 targets.extend(_shell_prose_targets(
                     _lex_shell(payload, payload_shell), payload_shell,
                     child, depth + 1,
@@ -1087,18 +1112,7 @@ def _resolve_shell_path(word, cwd, assignments):
     environment, because a scratch path is usually built in the command
     itself (`P=/tmp/...; cat > "$P/agent-io/prompt.txt"`).
     """
-    def expand(m):
-        if m.group(1):
-            return os.environ.get(m.group(1), m.group(0))
-        name = m.group(2) or m.group(5)
-        value = assignments.get(name, os.environ.get(name))
-        if m.group(3) and (value is None or (m.group(3) == ":-" and not value)):
-            return m.group(4)
-        return m.group(0) if value is None else value
-
-    path = word
-    for _ in range(2):
-        path = _SHELL_VARIABLE.sub(expand, path)
+    path = _expand_shell_variables(word, assignments)
     # A `$` left over is an expansion this reads no further; a backtick is a
     # command substitution. Either way the path is not known.
     if "$" in path or "`" in path:
@@ -1847,12 +1861,14 @@ def _carries_redirection(segment):
     return False
 
 
-def git_init_target(parts, cwd):
+def git_init_target(parts, cwd, assignments=None):
     """Return the directory a `git init` would create a repository in.
 
-    `parts` is the tokenized command. Returns None when this is not a git init.
-    A `git init` with no path argument targets the working directory, which is
-    what the improvised packets did.
+    `parts` is the tokenized command. Returns None when this is not a git init,
+    or when a target or `-C` path still contains an unexpanded variable or
+    command substitution whose destination cannot be determined. A `git init`
+    with no path argument targets the working directory, which is what the
+    improvised packets did.
 
     The leading executable is checked here rather than assumed. Every other
     caller of ``extract_git_subcommand`` has already established that the
@@ -1865,6 +1881,7 @@ def git_init_target(parts, cwd):
     idx, sub = extract_git_subcommand(parts)
     if sub != "init":
         return None
+    variables = {} if assignments is None else assignments
     # A global `-C <path>` changes the directory git runs in, so it decides
     # where a relative target lands. Reading it is not optional here: the
     # compound-cd gate in this same file tells agents to prefer `git -C`, so it
@@ -1873,10 +1890,14 @@ def git_init_target(parts, cwd):
     while i < idx:
         token = parts[i]
         if token == "-C" and i + 1 < idx:
-            cwd = os.path.join(cwd, parts[i + 1])
+            cwd = _resolve_shell_path(parts[i + 1], cwd, variables)
+            if cwd is None:
+                return None
             i += 2
         elif token.startswith("-C") and len(token) > 2:
-            cwd = os.path.join(cwd, token[2:])
+            cwd = _resolve_shell_path(token[2:], cwd, variables)
+            if cwd is None:
+                return None
             i += 1
         elif token in _GIT_VALUE_FLAGS:
             i += 2
@@ -1895,7 +1916,9 @@ def git_init_target(parts, cwd):
             if "=" not in token and token in _GIT_INIT_FLAGS_WITH_VALUES:
                 skip_next = True
             continue
-        target = token if os.path.isabs(token) else os.path.join(cwd, token)
+        target = _resolve_shell_path(token, cwd, variables)
+        if target is None:
+            return None
         # realpath resolves `..` as well as symlinks. Walking lexical parents
         # of `<repo>/../outside/fresh` revisits `<repo>`, finds its `.git`, and
         # denies a target that git would create outside the worktree.
@@ -1903,7 +1926,7 @@ def git_init_target(parts, cwd):
     return cwd
 
 
-def nested_git_init_deny_message(cmd, cwd):
+def nested_git_init_deny_message(cmd, cwd, shell="bash"):
     """Deny message when a git init would nest inside an existing worktree.
 
     Returns None when the command is not a git init, or when its target is not
@@ -1916,6 +1939,7 @@ def nested_git_init_deny_message(cmd, cwd):
     text = _executable_text(cmd)
     if text is None:
         return None
+    assignments = {"PWD": cwd} if cwd else {}
     for segment in _split_subcommands(text):
         if _carries_redirection(segment):
             continue
@@ -1931,8 +1955,10 @@ def nested_git_init_deny_message(cmd, cwd):
         parts = _tokenize_shell(stripped)
         if not parts:
             continue
+        state = dict(assignments)
+        _record_assignments(parts, shell, assignments)
         try:
-            target = git_init_target(strip_wrappers(parts), cwd)
+            target = git_init_target(strip_wrappers(parts), cwd, state)
         except (ValueError, IndexError):
             continue
         if target is None:
@@ -2692,7 +2718,7 @@ def main_codex(data):
                 {"command": cmd}, cwd,
             )
         if not deny and nested_git_init_enabled():
-            deny = nested_git_init_deny_message(cmd, cwd)
+            deny = nested_git_init_deny_message(cmd, cwd, shell)
     if deny:
         deny = deny.replace(
             "in ~/.claude/settings.json env", "in the environment Codex starts in",
@@ -2785,7 +2811,7 @@ def main():
     # because the reroute exists and an unattended agent can take it in one
     # turn. Honors AGENT_NESTED_GIT_INIT_HOOK.
     if nested_git_init_enabled():
-        deny = nested_git_init_deny_message(cmd, os.getcwd())
+        deny = nested_git_init_deny_message(cmd, os.getcwd(), shell)
         if deny:
             print(make_response("deny", deny))
             return

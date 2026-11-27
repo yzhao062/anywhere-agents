@@ -29,3 +29,6 @@ routing; a Codex unit spends the Codex plan.
   (`CODEX_DISPATCH_ISOLATE_MCP=off` drops it and passes no model or effort).
 - No output growth for `PRUN_STALL_THRESHOLD` seconds (default 600), or a run past
   `CODEX_DISPATCH_TIMEOUT` (default off), reaps the worker: exit `124` and a `FALLBACK` result.
+- Under Claude Code's auto mode the classifier may refuse `dispatch-task.sh`; the machine-local
+  `autoMode.allow` entry that covers it is described under Automatic Launch Route in
+  `agy-quota-and-models.md`.

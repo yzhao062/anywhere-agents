@@ -310,7 +310,7 @@ class HealthCheckPython(unittest.TestCase):
             self.assertEqual(parsed["check-5"][0], "PASS")
 
     # ----- Check 6: scope correspondence -----
-    def test_check6_prompt_files_not_mentioned_fails(self) -> None:
+    def test_check6_prompt_files_not_mentioned_warns(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             review = td_path / "Review-Codex.md"
@@ -323,9 +323,13 @@ class HealthCheckPython(unittest.TestCase):
             )
             state = make_state_dir(td_path)
             result = run_health_py(state, review, prompt_file=prompt)
-            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.returncode, 0)
             parsed = parse_output(result.stdout)
-            self.assertEqual(parsed["check-6"][0], "FAIL")
+            self.assertEqual(parsed["check-6"][0], "WARN")
+            self.assertEqual(
+                parsed["check-6"][1],
+                "no-scope-files-mentioned prompt-refs=skills/implement-review/SKILL.md",
+            )
 
     def test_check6_prompt_files_mentioned_passes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -406,6 +410,75 @@ class HealthCheckPython(unittest.TestCase):
             result = run_health_py(state, review)
             parsed = parse_output(result.stdout)
             self.assertEqual(parsed["check-7"][0], "PASS")
+
+    def test_check7_reports_real_line_number_after_fenced_block(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Codex.md"
+            body = make_review(
+                review,
+                extra_body=(
+                    "Example failure log inside a fence:\n"
+                    "```text\n"
+                    "line 1 inside fence\n"
+                    "could not connect inside fence\n"
+                    "line 3 inside fence\n"
+                    "line 4 inside fence\n"
+                    "```\n"
+                    "Outside the fence: I could not open the config file.\n"
+                ),
+            )
+            expected_line = next(
+                idx for idx, line in enumerate(body.splitlines(), 1)
+                if "Outside the fence:" in line
+            )
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            self.assertEqual(result.returncode, 0)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(parsed["check-7"][0], "WARN")
+            self.assertIn(f"lines={expected_line}", parsed["check-7"][1])
+
+    def test_check7_matches_phrases_on_word_boundaries(self) -> None:
+        benign = (
+            "The quotation formatting is clear.\n"
+            "This CLI cannot write outside the workspace.\n"
+            "Multiple timeouts are documented in the table.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            review = td_path / "Review-Codex.md"
+            make_review(review, extra_body=benign)
+            state = make_state_dir(td_path)
+            result = run_health_py(state, review)
+            self.assertEqual(result.returncode, 0)
+            parsed = parse_output(result.stdout)
+            self.assertEqual(
+                parsed["check-7"][0], "PASS",
+                f"word-boundary false positive: {parsed['check-7']}",
+            )
+
+        for phrase in (
+            "Hit a quota limit during testing.",
+            "I cannot run the suite locally.",
+            "The command timed out after 30s.",
+            "I could not open the log file.",
+            "The sandbox runner failed on startup.",
+            "Verification was rate limited.",
+        ):
+            with self.subTest(phrase=phrase):
+                with tempfile.TemporaryDirectory() as td:
+                    td_path = Path(td)
+                    review = td_path / "Review-Codex.md"
+                    make_review(review, extra_body=phrase + "\n")
+                    state = make_state_dir(td_path)
+                    result = run_health_py(state, review)
+                    self.assertEqual(result.returncode, 0)
+                    parsed = parse_output(result.stdout)
+                    self.assertEqual(
+                        parsed["check-7"][0], "WARN",
+                        f"expected WARN for {phrase!r}, got {parsed['check-7']}",
+                    )
 
     # ----- Check 8: tool failures in dispatch tail -----
     def test_check8_warns_on_tail_tool_failures(self) -> None:

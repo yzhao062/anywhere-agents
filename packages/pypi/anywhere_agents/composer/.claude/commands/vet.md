@@ -6,6 +6,8 @@ alias-of: implement-review
 
 Read and follow the skill definition. Look for it at `skills/implement-review/SKILL.md` first, then `.claude/skills/implement-review/SKILL.md`, then `.agent-config/repo/skills/implement-review/SKILL.md`.
 
+When the first match is the deployed `.claude/skills/implement-review/SKILL.md` and the Skill tool lists `implement-review`, load it with the Skill tool under that name instead of reading the file: the tool then carries the whole `SKILL.md`, and invoking it again after compaction reloads it, which this alias alone does not. Otherwise read the first matching file.
+
 Command arguments from the slash invocation: `$ARGUMENTS`
 
 Treat the command arguments as part of the user's current task.

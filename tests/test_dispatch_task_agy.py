@@ -2148,6 +2148,176 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         for line in grok_lines:
             self.assertIn(line, prefix)
 
+    def test_relocated_worker_result_from_file_url_is_adopted(self) -> None:
+        sibling = self.root / "mistyped-uuid" / "unit-result.md"
+        sibling.parent.mkdir()
+        target = self.root / "expected-uuid" / "unit-result.md"
+        target.parent.mkdir()
+        response = (
+            "# unit_a result\n"
+            "Conclusion: wrote full table to the result file.\n"
+            f"Files: [unit-result.md]({sibling.as_uri()})\n"
+            "Open items: none\n"
+            "Verification: mock\n"
+        )
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(sibling),
+                "MOCK_AGY_RESPONSE": response,
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        self.assertEqual(sibling.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        beside = target.parent / "unit-result.response.md"
+        self.assertEqual(beside.read_text(encoding="utf-8"), response)
+        self.assertIn(
+            f"dispatch-task-agy: RESULT-RELOCATED {sibling} -> {target.resolve()}",
+            result.stderr,
+        )
+
+    def test_relocated_worker_result_percent_decodes_and_handles_failed_runs(self) -> None:
+        sibling = self.root / "my sibling dir" / "unit-result.md"
+        sibling.parent.mkdir()
+        target = self.root / "expected-dir" / "unit-result.md"
+        target.parent.mkdir()
+        response = (
+            "# unit_a result\n"
+            "Conclusion: interrupted after writing result.\n"
+            f"Files: [unit-result.md]({sibling.as_uri()})\n"
+            "Open items: stream stopped\n"
+            "Verification: mock\n"
+        )
+        self.assertIn("%20", sibling.as_uri())
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(sibling),
+                "MOCK_AGY_RESPONSE": response,
+                "MOCK_AGY_STATUS": "ERROR",
+                "MOCK_AGY_ERROR": "The stream was interrupted.",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        beside = target.parent / "unit-result.response.md"
+        self.assertEqual(beside.read_text(encoding="utf-8"), response)
+        self.assertIn(
+            f"dispatch-task-agy: RESULT-RELOCATED {sibling} -> {target.resolve()}",
+            result.stderr,
+        )
+
+    def test_relocated_result_older_than_launch_is_not_adopted(self) -> None:
+        old_file = self.root / "stale-uuid" / "unit-result.md"
+        old_file.parent.mkdir()
+        old_file.write_text(WORKER_RESULT_TEXT, encoding="utf-8")
+        old_time = time.time() - 60
+        os.utime(old_file, (old_time, old_time))
+        target = self.root / "unit-result.md"
+        response = (
+            "# unit_a result\n"
+            "Conclusion: complete\n"
+            f"Files: [unit-result.md]({old_file.as_uri()})\n"
+            "Open items: none\n"
+            "Verification: mock\n"
+        )
+        result, target = self._run(
+            result_path=target,
+            extra_env={"MOCK_AGY_RESPONSE": response},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), response)
+        self.assertFalse((self.root / "unit-result.response.md").exists())
+        self.assertNotIn("RESULT-RELOCATED", result.stderr)
+
+    def test_relocated_result_with_different_basename_is_not_adopted(self) -> None:
+        other_file = self.root / "other-uuid" / "other-name.md"
+        other_file.parent.mkdir()
+        target = self.root / "unit-result.md"
+        response = (
+            "# unit_a result\n"
+            "Conclusion: complete\n"
+            f"Files: [other-name.md]({other_file.as_uri()})\n"
+            "Open items: none\n"
+            "Verification: mock\n"
+        )
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(other_file),
+                "MOCK_AGY_RESPONSE": response,
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), response)
+        self.assertFalse((self.root / "unit-result.response.md").exists())
+        self.assertNotIn("RESULT-RELOCATED", result.stderr)
+
+    def test_relocated_result_skips_another_units_result(self) -> None:
+        # Round 1 (Codex): a reply that cites a peer's result first.
+        peer = self.root / "peer-uuid" / "unit-result.md"
+        peer.parent.mkdir()
+        record = self.root / "prun-task-peer" / "result-file"
+        record.parent.mkdir()
+        # Recorded through a symlink, as the Codex dispatcher records /var/...
+        (self.root / "logical").symlink_to(self.root)
+        record.write_text(f"{self.root / 'logical' / 'peer-uuid' / 'unit-result.md'}\n",
+                          encoding="utf-8")
+        sibling = self.root / "mistyped-uuid" / "unit-result.md"
+        sibling.parent.mkdir()
+        target = self.root / "expected-uuid" / "unit-result.md"
+        target.parent.mkdir()
+        response = (
+            "# unit_a result\n"
+            f"Files: compared with {peer}; wrote {sibling}.\n"
+            "Conclusion: complete\n"
+            "Open items: none\n"
+            "Verification: mock\n"
+        )
+        peer.write_text("peer result\n", encoding="utf-8")
+        later = time.time() + 60  # the peer finished during this run
+        os.utime(peer, (later, later))
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(sibling),
+                "MOCK_AGY_RESPONSE": response,
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+
+    def test_relocated_plain_path_skips_older_or_empty_candidates(self) -> None:
+        empty_file = self.root / "empty-uuid" / "unit-result.md"
+        empty_file.parent.mkdir()
+        empty_file.write_text("", encoding="utf-8")
+        sibling = self.root / "plain-uuid" / "unit-result.md"
+        sibling.parent.mkdir()
+        target = self.root / "unit-result.md"
+        response = (
+            "# unit_a result\n"
+            f"Files: {empty_file}, {sibling}.\n"
+            "Conclusion: complete\n"
+            "Open items: none\n"
+            "Verification: mock\n"
+        )
+        result, target = self._run(
+            result_path=target,
+            extra_env={
+                "MOCK_AGY_WRITE_RESULT": str(sibling),
+                "MOCK_AGY_RESPONSE": response,
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
+        beside = self.root / "unit-result.response.md"
+        self.assertEqual(beside.read_text(encoding="utf-8"), response)
+        self.assertIn(
+            f"dispatch-task-agy: RESULT-RELOCATED {sibling} -> {target.resolve()}",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
