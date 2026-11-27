@@ -440,7 +440,9 @@ class NestedGitInitTests(unittest.TestCase):
             payload = {
                 "hook_event_name": "PreToolUse", "turn_id": "t1",
                 "cwd": str(self.inside), "tool_name": "Bash",
-                "tool_input": {"command": f"V={target}; git init -q $V"},
+                # Codex runs PowerShell on Windows, so the guard reads that syntax there.
+                "tool_input": {"command": f'$V = "{target}"; git init -q $V'
+                               if os.name == "nt" else f"V={target}; git init -q $V"},
             }
             result = subprocess.run(
                 [sys.executable, str(GUARD), "--agent", "codex"],

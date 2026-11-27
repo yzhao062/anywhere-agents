@@ -2270,7 +2270,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         target.parent.mkdir()
         response = (
             "# unit_a result\n"
-            f"Files: compared with {peer}; wrote {sibling}.\n"
+            f"Files: compared with {peer.as_uri()}; wrote {sibling.as_uri()}.\n"
             "Conclusion: complete\n"
             "Open items: none\n"
             "Verification: mock\n"
@@ -2288,6 +2288,7 @@ class DispatchTaskAgyIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(target.read_text(encoding="utf-8"), WORKER_RESULT_TEXT)
 
+    @unittest.skipIf(os.name == "nt", "plain drive paths are not read; Windows replies cite file:/// links")
     def test_relocated_plain_path_skips_older_or_empty_candidates(self) -> None:
         empty_file = self.root / "empty-uuid" / "unit-result.md"
         empty_file.parent.mkdir()
