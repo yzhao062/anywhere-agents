@@ -23,6 +23,7 @@ import os
 import pathlib
 import shutil
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -300,6 +301,170 @@ def _iter_children(path: pathlib.Path) -> list[pathlib.Path]:
 
 def _path_exists(path: pathlib.Path) -> bool:
     return os.path.lexists(_fs_path(path))
+
+
+CACHE_EVICTION_MIN_AGE_SECONDS = 24 * 3600
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_hex(name: str, length: int) -> bool:
+    return len(name) == length and set(name) <= _HEX
+
+
+def _is_real_dir(st: os.stat_result) -> bool:
+    """A directory that is neither a symlink nor a Windows reparse point."""
+    reparse = getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    return stat.S_ISDIR(st.st_mode) and not reparse
+
+
+def referenced_cache_keys(lock_data: dict) -> set[str]:
+    """Cache keys (``<16-hex>/<40-hex>``) that a pack-lock payload names.
+
+    Both ``resolved_commit`` and ``latest_known_head`` count: a skipped
+    update reloads the locked commit from the cache, and ``pack verify``
+    records the remote head it observed. Non-hex commits (bundled packs) name no
+    cache slot.
+    """
+    keys: set[str] = set()
+    packs = lock_data.get("packs") if isinstance(lock_data, dict) else None
+    if not isinstance(packs, dict):
+        return keys
+    for entry in packs.values():
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("source_url")
+        if not isinstance(url, str) or not url:
+            continue
+        for field in ("resolved_commit", "latest_known_head"):
+            sha = entry.get(field)
+            if isinstance(sha, str) and _is_hex(sha.lower(), 40):
+                keys.add(compute_cache_key(url, sha.lower()))
+    return keys
+
+
+def _lexical_path(path) -> str:
+    """Like ``_fs_path`` but never resolves links or junctions.
+
+    Eviction must inspect the link itself; ``Path.resolve`` on Windows would
+    follow a junction and report its target as an ordinary directory.
+    """
+    path = pathlib.Path(path)
+    s = str(path)
+    if os.name != "nt" or s.startswith("\\\\?\\"):
+        return s
+    s = str(path.absolute())
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
+def _retry_plain_readonly_file(func, path, exc_info):
+    """rmtree error hook: on Windows, clear read-only on a plain file once.
+
+    Windows marks git pack files read-only, which blocks their unlink. Only a
+    PermissionError on such a file (singly linked, not a reparse point) is
+    retried. Other failures propagate to the caller, which reports the
+    affected slot, and no other platform ever changes a mode here.
+    """
+    if os.name != "nt" or not isinstance(exc_info[1], PermissionError):
+        raise exc_info[1]
+    st = os.lstat(path)
+    attributes = getattr(st, "st_file_attributes", 0)
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        or not attributes & stat.FILE_ATTRIBUTE_READONLY
+        or st.st_nlink != 1
+        or func not in (os.unlink, os.remove)
+    ):
+        raise exc_info[1]
+    os.chmod(path, st.st_mode | stat.S_IWRITE)
+    func(path)
+
+
+def _remove_slot(slot: pathlib.Path) -> None:
+    """Remove one cache slot without following links; raise on failure."""
+    shutil.rmtree(_lexical_path(slot), onerror=_retry_plain_readonly_file)
+
+
+def _list_names(path: pathlib.Path) -> list[str]:
+    with os.scandir(_lexical_path(path)) as entries:
+        return [entry.name for entry in entries]
+
+
+def evict_unreferenced_slots(
+    cache_root: pathlib.Path,
+    keep_keys: set[str],
+    *,
+    min_age_seconds: float = CACHE_EVICTION_MIN_AGE_SECONDS,
+    now: float | None = None,
+) -> tuple[list[str], list[str]]:
+    """Remove ``<16-hex>/<40-hex>`` cache slots that no lock entry names.
+
+    The cache root, its parent, each key directory, and each slot must be
+    real directories (no link or Windows junction anywhere on that path). A
+    slot goes when its key is not in ``keep_keys`` and its modification time
+    is at least ``min_age_seconds`` old; a key directory left empty goes too.
+    Other names are never touched. The caller holds the repo lock. Returns
+    ``(removed_keys, errors)``; errors are messages, never raised, so a
+    committed compose stays successful.
+    """
+    removed: list[str] = []
+    errors: list[str] = []
+    now = time.time() if now is None else now
+    try:
+        if not _is_real_dir(os.lstat(_lexical_path(cache_root.parent))):
+            return removed, errors
+        if not _is_real_dir(os.lstat(_lexical_path(cache_root))):
+            return removed, errors
+        key_names = _list_names(cache_root)
+    except FileNotFoundError:
+        return removed, errors
+    except OSError as exc:
+        return removed, [f"{cache_root}: {exc}"]
+    for key_name in sorted(key_names):
+        if not _is_hex(key_name, 16):
+            continue
+        key_dir = cache_root / key_name
+        try:
+            if not _is_real_dir(os.lstat(_lexical_path(key_dir))):
+                continue
+            slot_names = _list_names(key_dir)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"{key_dir}: {exc}")
+            continue
+        for slot_name in sorted(slot_names):
+            key = f"{key_name}/{slot_name}"
+            if not _is_hex(slot_name, 40) or key in keep_keys:
+                continue
+            slot = key_dir / slot_name
+            try:
+                slot_stat = os.lstat(_lexical_path(slot))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                errors.append(f"{slot}: {exc}")
+                continue
+            if not _is_real_dir(slot_stat):
+                continue
+            if now - slot_stat.st_mtime < min_age_seconds:
+                continue
+            try:
+                _remove_slot(slot)
+            except OSError as exc:
+                errors.append(f"{slot}: {exc}")
+                continue
+            removed.append(key)
+        try:
+            if not _list_names(key_dir):
+                os.rmdir(_lexical_path(key_dir))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            errors.append(f"{key_dir}: {exc}")
+    return removed, errors
 
 
 def _fs_path(path) -> str:

@@ -1330,22 +1330,38 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
             log("error: credentials in a URL are unsafe; use 'git@' SSH, 'gh auth login', or 'GITHUB_TOKEN' env")
             return 2
 
-    from anywhere_agents.packs import auth, source_fetch, schema
+    import contextlib
+    from anywhere_agents.packs import auth, locks, source_fetch, schema
 
+    # fetch_pack reads and fills .agent-config/cache in the cwd, and a
+    # compose evicts unreferenced cache slots under the repo lock. Hold that
+    # lock across the fetch and the manifest read so a slot this command hits
+    # cannot disappear before it is read. A linked .agent-config shares its
+    # target's lock file, so the link is followed. The lock is released
+    # before the composer subprocess, which takes it itself.
     try:
-        archive = source_fetch.fetch_pack(args.source, args.ref or "main")
-    except auth.AuthChainExhaustedError as exc:
-        log(f"error: could not fetch {args.source}@{args.ref or 'main'}: {exc}")
-        return 2
-    except source_fetch.PackLockDriftError as exc:
-        log(f"error: pack-lock drift: {exc}")
-        return 2
+        with (
+            locks.acquire(locks.repo_lock_path(Path.cwd()))
+            if (Path.cwd() / ".agent-config").is_dir()
+            else contextlib.nullcontext()
+        ):
+            try:
+                archive = source_fetch.fetch_pack(args.source, args.ref or "main")
+            except auth.AuthChainExhaustedError as exc:
+                log(f"error: could not fetch {args.source}@{args.ref or 'main'}: {exc}")
+                return 2
+            except source_fetch.PackLockDriftError as exc:
+                log(f"error: pack-lock drift: {exc}")
+                return 2
 
-    try:
-        remote_manifest = schema.parse_manifest(archive.archive_dir / "pack.yaml")
-    except schema.ParseError as exc:
-        log(f"error: remote pack.yaml is malformed: {exc}")
-        return 2
+            try:
+                remote_manifest = schema.parse_manifest(archive.archive_dir / "pack.yaml")
+            except schema.ParseError as exc:
+                log(f"error: remote pack.yaml is malformed: {exc}")
+                return 2
+    except locks.LockTimeout as exc:
+        log(f"error: {exc}. Retry when the current pack operation finishes.")
+        return 10
 
     remote_packs = remote_manifest.get("packs", [])
     packs_by_name = {p["name"]: p for p in remote_packs}

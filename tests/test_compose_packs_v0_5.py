@@ -2093,6 +2093,84 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
         # Pending-updates still written so the deferred state surfaces.
         write_pending.assert_called_once()
 
+    def _stale_slot(self) -> Path:
+        """An unreferenced cache slot three days old, for the eviction hook."""
+        slot = (
+            self.root / ".agent-config" / "cache"
+            / source_fetch.compute_cache_key(
+                "https://github.com/yzhao062/agent-pack", "e" * 40
+            )
+        )
+        (slot / ".git").mkdir(parents=True)
+        stamp = time.time() - 3 * 24 * 3600
+        os.utime(slot, (stamp, stamp))
+        return slot
+
+    def test_apply_evicts_an_unreferenced_cache_slot_after_commit(self) -> None:
+        """The composer calls eviction after a committed apply, and an old
+        slot the new lock does not name is gone."""
+        stale = self._stale_slot()
+        evict = compose_packs._evict_stale_cache_slots
+        with self._no_lock():
+            with (
+                patch.object(
+                    source_fetch, "fetch_pack", return_value=self.new_archive,
+                ),
+                patch.object(
+                    compose_packs, "prompt_user_for_updates", return_value="apply",
+                ),
+                patch.object(
+                    compose_packs, "_evict_stale_cache_slots", wraps=evict,
+                ) as hook,
+                # This fixture's stub manifest deploys nothing, so the new
+                # lock names no pack; name the new commit so eviction runs.
+                patch.object(
+                    source_fetch, "referenced_cache_keys",
+                    return_value={source_fetch.compute_cache_key(
+                        "https://github.com/yzhao062/agent-pack", "b" * 40,
+                    )},
+                ),
+            ):
+                rc, _out, _err = _invoke(["--root", str(self.root)])
+        self.assertEqual(rc, 0)
+        hook.assert_called_once()
+        self.assertEqual(hook.call_args.args[1:], ("apply", {}))
+        self.assertFalse(stale.exists())
+
+    def test_skip_keeps_every_cache_slot(self) -> None:
+        """A skipped update suspends eviction, so the stale slot survives
+        even when the lock names a slot (the keep set is patched in, as in
+        the apply test, so only the skip gate can stop eviction)."""
+        stale = self._stale_slot()
+        evict = compose_packs._evict_stale_cache_slots
+        with self._no_lock():
+            with (
+                patch.object(
+                    source_fetch, "fetch_pack", return_value=self.new_archive,
+                ),
+                patch.object(
+                    source_fetch, "load_cached_archive", return_value=None,
+                ),
+                patch.object(
+                    compose_packs, "prompt_user_for_updates", return_value="skip",
+                ),
+                patch.object(compose_packs, "write_pending_updates_json"),
+                patch.object(
+                    compose_packs, "_evict_stale_cache_slots", wraps=evict,
+                ) as hook,
+                patch.object(
+                    source_fetch, "referenced_cache_keys",
+                    return_value={source_fetch.compute_cache_key(
+                        "https://github.com/yzhao062/agent-pack", "b" * 40,
+                    )},
+                ),
+            ):
+                rc, _out, _err = _invoke(["--root", str(self.root)])
+        self.assertEqual(rc, 0)
+        hook.assert_called_once()
+        self.assertEqual(hook.call_args.args[1:], ("skip", {}))
+        self.assertTrue(stale.exists())
+
     def test_no_drift_clears_stale_pending_updates_json(self) -> None:
         """A run with no drift remaining must clear any stale
         pending-updates.json from a previous skip (Round 3 M4 PATH 4).

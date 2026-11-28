@@ -462,6 +462,48 @@ def _pending_updates_path(project_root: Path) -> Path:
     return project_root / ".agent-config" / "pending-updates.json"
 
 
+def _evict_stale_cache_slots(
+    project_root: Path, decision: str, per_pack_decision: dict[str, str]
+) -> list[str]:
+    """Remove cache slots the committed pack-lock no longer names.
+
+    Keeps everything when an update was skipped or deferred, when
+    ``pending-updates.json`` remains, when a staging transaction is left
+    over, or when the lock is missing, unreadable, or names no cache slot.
+    Problems become warnings. Returns the removed cache keys.
+    """
+    agent_dir = project_root / ".agent-config"
+    if decision != "apply" or "skip" in per_pack_decision.values():
+        return []
+    if _pending_updates_path(project_root).exists():
+        return []
+    # iterdir, unlike glob, raises when the directory cannot be listed, so a
+    # staging transaction hidden by permissions keeps eviction off.
+    try:
+        if any(entry.match("*.staging-*") for entry in agent_dir.iterdir()):
+            return []
+    except OSError as exc:
+        sys.stderr.write(f"warning: pack cache eviction skipped: {exc}\n")
+        return []
+    lock_path = agent_dir / "pack-lock.json"
+    if not lock_path.is_file():
+        return []
+    try:
+        lock = state_mod.load_pack_lock(lock_path)
+    except (state_mod.StateError, OSError) as exc:
+        sys.stderr.write(f"warning: pack cache eviction skipped: {exc}\n")
+        return []
+    keep = source_fetch.referenced_cache_keys(lock)
+    if not keep:
+        return []
+    removed, errors = source_fetch.evict_unreferenced_slots(
+        agent_dir / "cache", keep
+    )
+    for message in errors:
+        sys.stderr.write(f"warning: pack cache eviction: {message}\n")
+    return removed
+
+
 def _applied_updates_path(project_root: Path) -> Path:
     """Path of the apply-summary file consumed by the CLI's stderr summary.
 
@@ -2073,6 +2115,17 @@ def _do_compose_v2(
         sys.stderr.write(
             f"warning: failed to clear applied-updates.json: {exc}\n"
         )
+
+    # ----- post-commit: evict pack cache slots the lock no longer names -----
+    # Nothing else removes an old <key>/<commit> slot, so every pack update
+    # left one behind in each consumer. Only locked commits are read again
+    # (a skipped update reloads its locked commit from this cache). Runs
+    # under the repo lock the transaction used and never fails the compose.
+    try:
+        _evict_stale_cache_slots(root, decision, per_pack_decision)
+    except Exception as exc:  # noqa: BLE001 - the compose already committed
+        sys.stderr.write(f"warning: pack cache eviction failed: {exc}\n")
+
     if decision == "apply" and pending_updates:
         applied_records: list[dict[str, Any]] = []
         for entry in pending_updates:

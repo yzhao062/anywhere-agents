@@ -82,6 +82,109 @@ _THREE_PACK_MANIFEST = (
 )
 
 
+class TestPackAddHoldsTheCacheLock(unittest.TestCase):
+    """A compose evicts unreferenced cache slots under the repo lock, so
+    ``pack add`` holds that lock while it fetches and reads the manifest."""
+
+    def _run(self, repo_lock, linked=False):
+        from anywhere_agents import cli
+        from anywhere_agents.cli import _pack_main
+        from anywhere_agents.packs import locks, schema, source_fetch
+        real_acquire = locks.acquire
+        with tempfile.TemporaryDirectory() as d:
+            work = pathlib.Path(d) / "work"
+            work.mkdir()
+            if linked:
+                shared = pathlib.Path(d) / "shared" / ".agent-config"
+                shared.mkdir(parents=True)
+                (work / ".agent-config").symlink_to(shared, target_is_directory=True)
+            else:
+                (work / ".agent-config").mkdir()
+            archive_dir = pathlib.Path(d) / "archive"
+            archive_dir.mkdir()
+            (archive_dir / "pack.yaml").write_text(_THREE_PACK_MANIFEST)
+            seen = []
+            held = [False]
+            real_parse = schema.parse_manifest
+            fake_repo_lock = repo_lock(held)
+            own_lock = (work / ".agent-config" / ".pack-lock.lock").resolve()
+
+            def acquire(path, *args, **kwargs):
+                if pathlib.Path(path).resolve() == own_lock:
+                    return fake_repo_lock(path)
+                return real_acquire(path, *args, **kwargs)
+
+            def fetch(*_args, **_kwargs):
+                seen.append(("fetch", held[0]))
+                return _build_archive(archive_dir)
+
+            def parse(path):
+                seen.append(("parse", held[0]))
+                return real_parse(path)
+
+            def compose(_root):
+                seen.append(("compose", held[0]))
+                return 0
+
+            old_cwd = os.getcwd()
+            os.chdir(work)
+            err = io.StringIO()
+            try:
+                with patch.object(locks, "acquire", side_effect=acquire), \
+                        patch.object(source_fetch, "fetch_pack", side_effect=fetch), \
+                        patch.object(schema, "parse_manifest", side_effect=parse), \
+                        patch.object(cli, "_is_in_project", return_value=True), \
+                        patch.object(cli, "_invoke_composer_with_gen_fallback", side_effect=compose), \
+                        redirect_stderr(err), redirect_stdout(io.StringIO()):
+                    rc = _pack_main(pathlib.Path(d) / "user.yaml",
+                                    ["add", "https://github.com/yzhao062/agent-pack", "--ref", "v0.1.0"])
+            finally:
+                os.chdir(old_cwd)
+            return rc, seen, held[0], err.getvalue()
+
+    @staticmethod
+    def _holding_lock(held):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx(path):
+            held[0] = True
+            try:
+                yield None
+            finally:
+                held[0] = False
+        return _ctx
+
+    def test_fetch_and_manifest_read_run_under_the_repo_lock(self) -> None:
+        rc, seen, held_after, _err = self._run(self._holding_lock)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [("fetch", True), ("parse", True), ("compose", False)])
+        self.assertFalse(held_after)
+
+    @unittest.skipIf(os.name == "nt", "directory symlinks need privileges on Windows")
+    def test_a_linked_agent_config_still_takes_the_lock(self) -> None:
+        rc, seen, _held, _err = self._run(self._holding_lock, linked=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [("fetch", True), ("parse", True), ("compose", False)])
+
+    def test_a_lock_timeout_exits_10_without_fetching(self) -> None:
+        from anywhere_agents.packs import locks
+
+        from contextlib import contextmanager
+
+        def repo_lock(_held):
+            @contextmanager
+            def _ctx(path):
+                raise locks.LockTimeout(path, 30.0, 4242)
+                yield  # pragma: no cover
+            return _ctx
+
+        rc, seen, _held, err = self._run(repo_lock)
+        self.assertEqual(rc, 10)
+        self.assertEqual(seen, [])
+        self.assertIn("Retry when the current pack operation finishes", err)
+
+
 class TestPackAddRemoteManifest(unittest.TestCase):
     def test_pack_add_expands_multi_pack_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as d:

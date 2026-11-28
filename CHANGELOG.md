@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Fixed
+
+- **The composer now removes old pack cache entries after a successful compose.** On one machine, 974 obsolete `.agent-config/cache/<key>/<commit>` slots used 19.7 GB across 27 repositories, because nothing removed them. Under the repo lock, the composer keeps each pack's resolved commit and latest known head and removes unreferenced slots at least 24 hours old, then empty key directories. Cleanup pauses if any update is skipped or deferred, or if a pending update file or staging directory remains. It also requires a readable lock that names at least one cache slot. Cleanup skips linked key and slot directories and stops if it finds a link or Windows junction at the cache root or its parent. Each cache belongs to one checkout. A cache directory linked into a second checkout is unsupported, because the owning checkout evicts by its own lock alone. Removal errors produce a warning. The helpers live in `scripts/packs/source_fetch.py`; tests are in `tests/test_pack_cache_eviction.py`.
 
 ## [0.11.0] — 2026-11-26
 
